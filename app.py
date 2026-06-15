@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Recruitment AI Backend", version="1.0.0")
 
+CREATE_ITEM_WEBHOOK_TYPE = "create_item"
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
 
 
@@ -51,13 +52,23 @@ async def monday_webhook(request: Request, background_tasks: BackgroundTasks) ->
     event_type = event.get("type")
     column_id = event.get("columnId") or event.get("column_id")
 
-    if event_type != FILE_COLUMN_WEBHOOK_TYPE or str(column_id) != FILE_COLUMN_ID:
+    if event_type == CREATE_ITEM_WEBHOOK_TYPE:
+        pass
+    elif event_type == FILE_COLUMN_WEBHOOK_TYPE:
+        if str(column_id) != FILE_COLUMN_ID:
+            logger.info(
+                "Monday webhook ignored: type=%r columnId=%r (expected columnId=%r)",
+                event_type,
+                column_id,
+                FILE_COLUMN_ID,
+            )
+            return JSONResponse(content={"status": "ignored"})
+    else:
         logger.info(
-            "Monday webhook ignored: type=%r columnId=%r (expected type=%r columnId=%r)",
+            "Monday webhook ignored: type=%r (expected %r or %r)",
             event_type,
-            column_id,
+            CREATE_ITEM_WEBHOOK_TYPE,
             FILE_COLUMN_WEBHOOK_TYPE,
-            FILE_COLUMN_ID,
         )
         return JSONResponse(content={"status": "ignored"})
 

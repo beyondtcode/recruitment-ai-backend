@@ -24,10 +24,10 @@ class MondayWebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"challenge": "abc123token"})
 
-    def test_ignores_non_file_column_events(self):
+    def test_ignores_unsupported_events(self):
         payload = {
             "event": {
-                "type": "create_pulse",
+                "type": "delete_pulse",
                 "boardId": 123,
                 "pulseId": 456,
             }
@@ -48,6 +48,21 @@ class MondayWebhookTests(unittest.TestCase):
         response = client.post("/monday-webhook", json=payload)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ignored"})
+
+    @patch("app.run_webhook_pipeline_sync")
+    def test_create_item_event_schedules_background_task(self, mock_pipeline):
+        payload = {
+            "event": {
+                "type": "create_item",
+                "boardId": 5096673346,
+                "pulseId": 1234567890,
+                "triggerUuid": "form-submit-uuid",
+            }
+        }
+        response = client.post("/monday-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("1234567890", "5096673346")
 
     @patch("app.run_webhook_pipeline_sync")
     def test_file_column_event_schedules_background_task(self, mock_pipeline):

@@ -8,9 +8,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import app
-from services.monday_service import FILE_COLUMN_ID
 
 client = TestClient(app)
+
+MAIN_HUB_FILE_COLUMN_ID = "file_mm3gnkmj"
+JOB_BOARD_FILE_COLUMN_ID = "file_mm43j6y2"
 
 
 class MondayWebhookTests(unittest.TestCase):
@@ -71,7 +73,7 @@ class MondayWebhookTests(unittest.TestCase):
                 "type": "change_column_value",
                 "boardId": 5096673346,
                 "pulseId": 9876543210,
-                "columnId": FILE_COLUMN_ID,
+                "columnId": MAIN_HUB_FILE_COLUMN_ID,
                 "triggerUuid": "test-uuid",
             }
         }
@@ -80,11 +82,27 @@ class MondayWebhookTests(unittest.TestCase):
         self.assertEqual(response.json(), {"status": "success"})
         mock_pipeline.assert_called_once_with("9876543210", "5096673346")
 
+    @patch("app.run_webhook_pipeline_sync")
+    def test_job_board_file_column_event_schedules_background_task(self, mock_pipeline):
+        payload = {
+            "event": {
+                "type": "change_column_value",
+                "boardId": 9876543210,
+                "pulseId": 1112223333,
+                "columnId": JOB_BOARD_FILE_COLUMN_ID,
+                "triggerUuid": "job-board-uuid",
+            }
+        }
+        response = client.post("/monday-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("1112223333", "9876543210")
+
     def test_missing_pulse_or_board_returns_400(self):
         payload = {
             "event": {
                 "type": "change_column_value",
-                "columnId": FILE_COLUMN_ID,
+                "columnId": MAIN_HUB_FILE_COLUMN_ID,
             }
         }
         response = client.post("/monday-webhook", json=payload)

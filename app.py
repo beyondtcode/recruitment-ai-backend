@@ -10,7 +10,6 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from services.cv_pipeline import run_webhook_pipeline_sync
-from services.monday_service import FILE_COLUMN_ID
 
 load_dotenv()
 
@@ -23,6 +22,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Recruitment AI Backend", version="1.0.0")
 
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
+
+
+def _is_monday_file_column(column_id: object) -> bool:
+    return isinstance(column_id, str) and column_id.startswith("file_")
 
 
 @app.get("/health")
@@ -56,12 +59,11 @@ async def monday_webhook(request: Request, background_tasks: BackgroundTasks) ->
     if is_form_submission:
         pass
     elif event_type == FILE_COLUMN_WEBHOOK_TYPE:
-        if str(column_id) != FILE_COLUMN_ID:
+        if not _is_monday_file_column(column_id):
             logger.info(
-                "Monday webhook ignored: type=%r columnId=%r (expected columnId=%r)",
+                "Monday webhook ignored: type=%r columnId=%r (expected a file_* column)",
                 event_type,
                 column_id,
-                FILE_COLUMN_ID,
             )
             return JSONResponse(content={"status": "ignored"})
     else:

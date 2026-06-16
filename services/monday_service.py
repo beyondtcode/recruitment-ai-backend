@@ -347,13 +347,16 @@ query ($ids: [ID!]!, $columnIds: [String!]!) {
 """
 
 ITEM_CV_FILE_QUERY = """
-query ($ids: [ID!]!, $columnId: String!) {
+query ($ids: [ID!]!) {
   items(ids: $ids) {
-    column_values(ids: [$columnId]) {
+    column_values {
+      id
+      type
       ... on FileValue {
         files {
           ... on FileAssetValue {
             name
+            created_at
             asset {
               public_url
               file_extension
@@ -365,6 +368,19 @@ query ($ids: [ID!]!, $columnId: String!) {
   }
 }
 """
+
+BOARD_FILE_COLUMNS_QUERY = """
+query ($boardId: ID!) {
+  boards(ids: [$boardId]) {
+    columns {
+      id
+      type
+    }
+  }
+}
+"""
+
+_BOARD_FILE_COLUMN_CACHE: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -1332,7 +1348,8 @@ async def create_candidate_item(
 
     item_id = str(item_id)
     if cv_file_path:
-        upload_file_to_item(item_id, str(cv_file_path))
+        file_column_id = await resolve_file_column_id(board_id)
+        upload_file_to_item(item_id, str(cv_file_path), column_id=file_column_id)
     return item_id
 
 
@@ -1464,24 +1481,11 @@ async def upsert_candidate_item(
     return item_id, False
 
 
-def _parse_item_cv_file_response(
+def _normalize_cv_filename(
     item_id: str,
-    body: dict[str, Any],
+    file_entry: dict[str, Any],
 ) -> tuple[str, str]:
-    """Parse GraphQL response into (public_url, filename). Raises ValueError if no file yet."""
-    items = body.get("data", {}).get("items") or []
-    if not items:
-        raise ValueError(f"Monday item {item_id} not found.")
-
-    column_values = items[0].get("column_values") or []
-    if not column_values:
-        raise ValueError(f"No CV file on Monday item {item_id}.")
-
-    files = column_values[0].get("files") or []
-    if not files:
-        raise ValueError(f"No CV file on Monday item {item_id}.")
-
-    file_entry = files[-1]
+    """Parse a FileAssetValue entry into (public_url, filename). Raises ValueError if invalid."""
     name = str(file_entry.get("name") or "").strip()
     asset = file_entry.get("asset") or {}
     public_url = str(asset.get("public_url") or "").strip()
@@ -1506,6 +1510,109 @@ def _parse_item_cv_file_response(
             )
 
     return public_url, name
+
+
+def _is_file_column_value(column: dict[str, Any]) -> bool:
+    column_type = str(column.get("type") or "").casefold()
+    if column_type == "file":
+        return True
+    return bool(column.get("files"))
+
+
+def _extract_cv_file_from_column_values(
+    item_id: str,
+    column_values: list[dict[str, Any]],
+) -> tuple[str, str]:
+    """
+    Scan all column values for file-type columns and return the best CV file.
+
+    When multiple file columns contain files, prefer the entry with the latest
+    ``created_at``; otherwise use the last non-empty file column in API order.
+    """
+    candidates: list[tuple[str, str, str | None, int]] = []
+
+    for column_index, column in enumerate(column_values):
+        if not _is_file_column_value(column):
+            continue
+        files = column.get("files") or []
+        if not files:
+            continue
+        file_entry = files[-1]
+        try:
+            public_url, name = _normalize_cv_filename(item_id, file_entry)
+        except ValueError:
+            continue
+        created_at = file_entry.get("created_at")
+        created_at_str = str(created_at).strip() if created_at else None
+        candidates.append((public_url, name, created_at_str, column_index))
+
+    if not candidates:
+        raise ValueError(f"No CV file on Monday item {item_id}.")
+
+    with_timestamp = [entry for entry in candidates if entry[2]]
+    if with_timestamp:
+        public_url, name, _, _ = max(with_timestamp, key=lambda entry: entry[2])
+        return public_url, name
+
+    public_url, name, _, _ = candidates[-1]
+    return public_url, name
+
+
+def _parse_item_cv_file_response(
+    item_id: str,
+    body: dict[str, Any],
+) -> tuple[str, str]:
+    """Parse GraphQL response into (public_url, filename). Raises ValueError if no file yet."""
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        raise ValueError(f"Monday item {item_id} not found.")
+
+    column_values = items[0].get("column_values") or []
+    if not column_values:
+        raise ValueError(f"No CV file on Monday item {item_id}.")
+
+    return _extract_cv_file_from_column_values(item_id, column_values)
+
+
+async def resolve_file_column_id(board_id: str) -> str:
+    """
+    Return the file column ID for a Monday board.
+
+    Results are cached per board_id. Honors MONDAY_FILE_COLUMN_ID when that
+    column exists on the board; otherwise picks the first file-type column.
+    """
+    board_key = str(board_id)
+    if board_key in _BOARD_FILE_COLUMN_CACHE:
+        return _BOARD_FILE_COLUMN_CACHE[board_key]
+
+    body = await _post_graphql(
+        BOARD_FILE_COLUMNS_QUERY,
+        {"boardId": board_key},
+    )
+    boards = body.get("data", {}).get("boards") or []
+    columns = (boards[0].get("columns") if boards else None) or []
+    if not columns:
+        raise ValueError(f"No columns found for Monday board {board_key}.")
+
+    column_ids = {str(col.get("id") or "") for col in columns}
+    env_override = os.getenv("MONDAY_FILE_COLUMN_ID")
+    if env_override and env_override in column_ids:
+        _BOARD_FILE_COLUMN_CACHE[board_key] = env_override
+        return env_override
+
+    for col in columns:
+        if str(col.get("type") or "").casefold() == "file":
+            column_id = str(col["id"])
+            _BOARD_FILE_COLUMN_CACHE[board_key] = column_id
+            return column_id
+
+    for col in columns:
+        column_id = str(col.get("id") or "")
+        if column_id.startswith("file_"):
+            _BOARD_FILE_COLUMN_CACHE[board_key] = column_id
+            return column_id
+
+    raise ValueError(f"No file column found on Monday board {board_key}.")
 
 
 _CV_FILE_RETRYABLE_ERRORS = (
@@ -1540,7 +1647,7 @@ async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
     for attempt in range(1, CV_FILE_FETCH_MAX_ATTEMPTS + 1):
         body = await _post_graphql(
             ITEM_CV_FILE_QUERY,
-            {"ids": [item_id], "columnId": FILE_COLUMN_ID},
+            {"ids": [item_id]},
         )
         try:
             public_url, name = _parse_item_cv_file_response(item_id, body)
@@ -1593,18 +1700,17 @@ def _cv_mime_type(file_path: str) -> str:
     return "application/octet-stream"
 
 
-def upload_file_to_item(item_id: str, file_path: str) -> dict:
+def upload_file_to_item(item_id: str, file_path: str, *, column_id: str) -> dict:
     """
     Attach a CV file to a Monday item via POST https://api.monday.com/v2/file.
 
-    Uses multipart/form-data with the ``add_file_to_column`` mutation (see FILE_COLUMN_ID).
+    Uses multipart/form-data with the ``add_file_to_column`` mutation.
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"CV file not found at {file_path}")
 
     api_key = _get_api_key()
-    column_id = FILE_COLUMN_ID
     query = (
         "mutation ($file: File!) { "
         "add_file_to_column ("
@@ -1653,7 +1759,7 @@ def upload_file_to_item(item_id: str, file_path: str) -> dict:
 
     if response_json.get("errors"):
         print(f"❌ Monday File Upload Error: {response_json['errors']}")
-        _print_monday_errors(response_json["errors"], column_ids=[FILE_COLUMN_ID])
+        _print_monday_errors(response_json["errors"], column_ids=[column_id])
         raise Exception(f"Monday File Upload Error: {response_json['errors']}")
 
     if response_json.get("error_message"):
@@ -1673,7 +1779,7 @@ def upload_file_to_item(item_id: str, file_path: str) -> dict:
     logger.info(
         "Monday file upload: item %s column %s file %s",
         item_id,
-        FILE_COLUMN_ID,
+        column_id,
         path.name,
     )
     return response_json

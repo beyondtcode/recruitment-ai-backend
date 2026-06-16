@@ -121,6 +121,8 @@ async def monday_webhook(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Monday webhook: invalid JSON body: %s", exc)
         return JSONResponse(status_code=400, content={"status": "error", "detail": "Invalid JSON"})
 
+    logger.info(f"Raw body received: {body}")
+
     if "challenge" in body:
         challenge = body["challenge"]
         logger.info("Monday webhook challenge received")

@@ -404,6 +404,67 @@ query ($boardId: ID!) {
 _BOARD_COLUMNS_CACHE: dict[str, list[dict[str, Any]]] = {}
 _BOARD_TYPED_COLUMN_CACHE: dict[tuple[str, str], str] = {}
 
+# Main Hub column IDs that may differ on satellite boards (email/phone).
+_REMAPPABLE_DEFAULT_COLUMNS: dict[str, str] = {
+    EMAIL_COLUMN_ID: "email",
+    PHONE_COLUMN_ID: "phone",
+}
+
+
+async def prepare_column_values_for_board(
+    board_id: str,
+    column_values: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Keep only column values whose IDs exist on ``board_id``.
+
+    Email/phone values built with Main Hub defaults are remapped to the board's
+    email/phone columns when those defaults are absent from the board schema.
+    """
+    board_key = str(board_id)
+    if board_key == MAIN_HUB_BOARD_ID:
+        return dict(column_values)
+
+    columns = await _fetch_board_columns(board_key)
+    board_column_ids = {str(col.get("id") or "") for col in columns}
+
+    prepared: dict[str, Any] = {}
+    dropped: list[str] = []
+    remapped: dict[str, str] = {}
+
+    for column_id, value in column_values.items():
+        if column_id in board_column_ids:
+            prepared[column_id] = value
+            continue
+
+        column_type = _REMAPPABLE_DEFAULT_COLUMNS.get(column_id)
+        if column_type is not None:
+            try:
+                target_id = await resolve_column_id_by_type(board_key, column_type)
+            except ValueError:
+                target_id = None
+            if target_id and target_id in board_column_ids:
+                prepared[target_id] = value
+                remapped[column_id] = target_id
+                continue
+
+        dropped.append(column_id)
+
+    if dropped:
+        logger.info(
+            "Monday board %s: skipped %d column(s) not on board: %s",
+            board_key,
+            len(dropped),
+            dropped,
+        )
+    if remapped:
+        logger.info(
+            "Monday board %s: remapped column IDs: %s",
+            board_key,
+            remapped,
+        )
+    return prepared
+
 _COLUMN_TYPE_DEFAULTS: dict[str, str] = {
     "email": EMAIL_COLUMN_ID,
     "phone": PHONE_COLUMN_ID,
@@ -434,7 +495,8 @@ async def _fetch_board_columns(board_id: str) -> list[dict[str, Any]]:
     body = await _post_graphql(BOARD_FILE_COLUMNS_QUERY, {"boardId": board_key})
     boards = body.get("data", {}).get("boards") or []
     columns = (boards[0].get("columns") if boards else None) or []
-    _BOARD_COLUMNS_CACHE[board_key] = columns
+    if columns:
+        _BOARD_COLUMNS_CACHE[board_key] = columns
     return columns
 
 
@@ -1047,7 +1109,12 @@ async def _post_column_values_with_dropdown_fallback(
     """
     Post column values to Monday; on dropdown failure retry without dropdown but keep text column.
     """
+    board_id = str(variables.get("boardId", MAIN_HUB_BOARD_ID))
+    column_values = await prepare_column_values_for_board(board_id, column_values)
+    variables = dict(variables)
+    variables["columnValues"] = json.dumps(column_values)
     column_ids = list(column_values.keys())
+
     try:
         return await _post_graphql(mutation, variables, column_ids=column_ids)
     except Exception as exc:

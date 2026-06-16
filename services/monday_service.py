@@ -352,16 +352,13 @@ query ($ids: [ID!]!) {
     column_values {
       id
       type
+      text
+      value
       ... on FileValue {
         files {
-          ... on FileAssetValue {
-            name
-            created_at
-            asset {
-              public_url
-              file_extension
-            }
-          }
+          id
+          name
+          url
         }
       }
     }
@@ -1485,31 +1482,24 @@ def _normalize_cv_filename(
     item_id: str,
     file_entry: dict[str, Any],
 ) -> tuple[str, str]:
-    """Parse a FileAssetValue entry into (public_url, filename). Raises ValueError if invalid."""
+    """Parse a FileValue file entry into (url, filename). Raises ValueError if invalid."""
     name = str(file_entry.get("name") or "").strip()
-    asset = file_entry.get("asset") or {}
-    public_url = str(asset.get("public_url") or "").strip()
-    extension = str(asset.get("file_extension") or "").strip().lower()
+    url = str(file_entry.get("url") or "").strip()
 
-    if not public_url:
-        raise ValueError(f"CV file on item {item_id} has no public_url.")
-
-    if not name and extension:
-        name = f"cv.{extension}"
+    if not url:
+        raise ValueError(f"CV file on item {item_id} has no url.")
 
     if not name:
-        raise ValueError(f"CV file on item {item_id} has no filename.")
+        url_path = Path(url.split("?")[0])
+        name = url_path.name or "cv.pdf"
 
     suffix = Path(name).suffix.lower()
     if suffix not in {".pdf", ".docx"}:
-        if extension in {"pdf", "docx"}:
-            name = f"{Path(name).stem}.{extension}" if Path(name).stem else f"cv.{extension}"
-        else:
-            raise ValueError(
-                f"Unsupported CV file type on item {item_id}: {name!r} (extension {extension!r})"
-            )
+        raise ValueError(
+            f"Unsupported CV file type on item {item_id}: {name!r}"
+        )
 
-    return public_url, name
+    return url, name
 
 
 def _is_file_column_value(column: dict[str, Any]) -> bool:
@@ -1526,10 +1516,10 @@ def _extract_cv_file_from_column_values(
     """
     Scan all column values for file-type columns and return the best CV file.
 
-    When multiple file columns contain files, prefer the entry with the latest
-    ``created_at``; otherwise use the last non-empty file column in API order.
+    When multiple file columns contain files, use the last non-empty file column
+    in API order (most recent file within each column is ``files[-1]``).
     """
-    candidates: list[tuple[str, str, str | None, int]] = []
+    candidates: list[tuple[str, str, int]] = []
 
     for column_index, column in enumerate(column_values):
         if not _is_file_column_value(column):
@@ -1539,30 +1529,23 @@ def _extract_cv_file_from_column_values(
             continue
         file_entry = files[-1]
         try:
-            public_url, name = _normalize_cv_filename(item_id, file_entry)
+            url, name = _normalize_cv_filename(item_id, file_entry)
         except ValueError:
             continue
-        created_at = file_entry.get("created_at")
-        created_at_str = str(created_at).strip() if created_at else None
-        candidates.append((public_url, name, created_at_str, column_index))
+        candidates.append((url, name, column_index))
 
     if not candidates:
         raise ValueError(f"No CV file on Monday item {item_id}.")
 
-    with_timestamp = [entry for entry in candidates if entry[2]]
-    if with_timestamp:
-        public_url, name, _, _ = max(with_timestamp, key=lambda entry: entry[2])
-        return public_url, name
-
-    public_url, name, _, _ = candidates[-1]
-    return public_url, name
+    url, name, _ = candidates[-1]
+    return url, name
 
 
 def _parse_item_cv_file_response(
     item_id: str,
     body: dict[str, Any],
 ) -> tuple[str, str]:
-    """Parse GraphQL response into (public_url, filename). Raises ValueError if no file yet."""
+    """Parse GraphQL response into (url, filename). Raises ValueError if no file yet."""
     items = body.get("data", {}).get("items") or []
     if not items:
         raise ValueError(f"Monday item {item_id} not found.")
@@ -1618,7 +1601,7 @@ async def resolve_file_column_id(board_id: str) -> str:
 _CV_FILE_RETRYABLE_ERRORS = (
     "not found",
     "no cv file",
-    "has no public_url",
+    "has no url",
     "has no filename",
 )
 

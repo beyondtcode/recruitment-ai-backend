@@ -22,23 +22,18 @@ def _file_column(
     column_id: str,
     *,
     name: str = "resume.pdf",
-    public_url: str = "https://cdn.monday.com/files/resume.pdf",
-    file_extension: str = "pdf",
-    created_at: str | None = None,
+    url: str = "https://cdn.monday.com/files/resume.pdf",
 ) -> dict:
-    entry: dict = {
-        "name": name,
-        "asset": {
-            "public_url": public_url,
-            "file_extension": file_extension,
-        },
-    }
-    if created_at is not None:
-        entry["created_at"] = created_at
     return {
         "id": column_id,
         "type": "file",
-        "files": [entry],
+        "files": [
+            {
+                "id": "file-1",
+                "name": name,
+                "url": url,
+            }
+        ],
     }
 
 
@@ -50,34 +45,15 @@ class ExtractCvFileTests(unittest.TestCase):
         self.assertEqual(name, "resume.pdf")
 
     def test_job_board_file_column(self):
-        column_values = [_file_column("file_mm43j6y2", name="cv.docx", file_extension="docx")]
+        column_values = [_file_column("file_mm43j6y2", name="cv.docx", url="https://cdn.monday.com/cv.docx")]
         url, name = _extract_cv_file_from_column_values("456", column_values)
         self.assertEqual(name, "cv.docx")
 
-    def test_multiple_file_columns_prefers_latest_created_at(self):
-        column_values = [
-            _file_column(
-                "file_old",
-                name="old.pdf",
-                public_url="https://cdn.monday.com/old.pdf",
-                created_at="2024-01-01T10:00:00Z",
-            ),
-            _file_column(
-                "file_new",
-                name="new.pdf",
-                public_url="https://cdn.monday.com/new.pdf",
-                created_at="2024-06-01T10:00:00Z",
-            ),
-        ]
-        url, name = _extract_cv_file_from_column_values("789", column_values)
-        self.assertEqual(url, "https://cdn.monday.com/new.pdf")
-        self.assertEqual(name, "new.pdf")
-
-    def test_multiple_file_columns_without_timestamps_uses_last_column(self):
+    def test_multiple_file_columns_uses_last_column(self):
         column_values = [
             {"id": "text_col", "type": "text", "text": "hello"},
-            _file_column("file_first", name="first.pdf", public_url="https://cdn.monday.com/first.pdf"),
-            _file_column("file_second", name="second.pdf", public_url="https://cdn.monday.com/second.pdf"),
+            _file_column("file_first", name="first.pdf", url="https://cdn.monday.com/first.pdf"),
+            _file_column("file_second", name="second.pdf", url="https://cdn.monday.com/second.pdf"),
         ]
         url, name = _extract_cv_file_from_column_values("789", column_values)
         self.assertEqual(url, "https://cdn.monday.com/second.pdf")

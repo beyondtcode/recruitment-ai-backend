@@ -1628,9 +1628,8 @@ async def upsert_candidate_item(
     on the target board if no verified email match exists — avoiding duplicates
     when the triggering row is not yet indexed by email search.
 
-    When ``cv_file_path`` is set, uploads the CV only for newly created items.
-    For matched existing items, update column values/name and skip file upload
-    to prevent duplicate attachments during QA reprocessing.
+    When ``cv_file_path`` is set, uploads the CV to the item's file column on
+    both create and update so recruiters always have the latest version.
 
     Returns (item_id, created) where created is True for a new row.
     """
@@ -1650,6 +1649,9 @@ async def upsert_candidate_item(
                     raw_cv_text=raw_cv_text,
                     board_id=board_id,
                 )
+                if cv_path:
+                    file_column_id = await resolve_file_column_id(board_id)
+                    upload_file_to_item(item_id, cv_path, column_id=file_column_id)
                 logger.info(
                     "Monday upsert: updated source item %s (no contact identifier)",
                     item_id,
@@ -1740,10 +1742,8 @@ async def upsert_candidate_item(
         board_id=board_id,
     )
     if cv_path:
-        logger.info(
-            "Candidate item updated with new extracted data. "
-            "Skipping file upload to prevent duplicates during QA."
-        )
+        file_column_id = await resolve_file_column_id(board_id)
+        upload_file_to_item(item_id, cv_path, column_id=file_column_id)
     contact = normalize_email(candidate.email) if has_email else normalize_phone(candidate.phone)
     logger.info("Monday upsert: updated item %s (matched %s)", item_id, contact)
     return item_id, False

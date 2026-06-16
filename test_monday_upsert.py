@@ -248,12 +248,12 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(monday_service, "create_candidate_item", new_callable=AsyncMock) as mock_create,
-            patch.object(monday_service, "find_existing_item_by_contact", new_callable=AsyncMock) as mock_find,
+            patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find_email,
         ):
             mock_create.return_value = "999"
             item_id, created = await upsert_candidate_item(candidate)
 
-        mock_find.assert_not_called()
+        mock_find_email.assert_not_called()
         mock_create.assert_awaited_once_with(
             candidate,
             cv_file_path=None,
@@ -268,7 +268,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         existing = FoundItem(item_id="111", name="Jane Doe")
 
         with (
-            patch.object(monday_service, "find_existing_item_by_contact", new_callable=AsyncMock) as mock_find,
+            patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find,
             patch.object(monday_service, "update_candidate_item", new_callable=AsyncMock) as mock_update,
             patch.object(monday_service, "create_candidate_item", new_callable=AsyncMock) as mock_create,
         ):
@@ -291,11 +291,15 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         candidate = _candidate()
 
         with (
-            patch.object(monday_service, "find_existing_item_by_contact", new_callable=AsyncMock) as mock_find,
+            patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find,
             patch.object(monday_service, "create_candidate_item", new_callable=AsyncMock) as mock_create,
             patch.object(monday_service, "update_candidate_item", new_callable=AsyncMock) as mock_update,
+            patch.object(monday_service, "_query_items_by_column", new_callable=AsyncMock) as mock_phone_query,
+            patch.object(monday_service, "_disambiguate_phone_matches", new_callable=AsyncMock) as mock_phone,
         ):
             mock_find.return_value = None
+            mock_phone_query.return_value = []
+            mock_phone.return_value = None
             mock_create.return_value = "222"
             item_id, created = await upsert_candidate_item(candidate)
 
@@ -314,7 +318,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         existing = FoundItem(item_id="111", name="Jane Doe")
 
         with (
-            patch.object(monday_service, "find_existing_item_by_contact", new_callable=AsyncMock) as mock_find,
+            patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find,
             patch.object(monday_service, "update_candidate_item", new_callable=AsyncMock) as mock_update,
             patch.object(monday_service, "upload_file_to_item") as mock_upload,
         ):
@@ -425,14 +429,17 @@ class FindExistingItemTests(unittest.IsolatedAsyncioTestCase):
         phone_item = FoundItem(item_id="phone-item", name="From Phone")
 
         with (
+            patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_email,
             patch.object(monday_service, "_query_items_by_column", new_callable=AsyncMock) as mock_query,
             patch.object(monday_service, "_disambiguate_phone_matches", new_callable=AsyncMock) as mock_phone,
         ):
-            mock_query.return_value = [email_item]
+            mock_email.return_value = email_item
+            mock_query.return_value = [phone_item]
             mock_phone.return_value = phone_item
             result = await monday_service.find_existing_item_by_contact(candidate)
 
         self.assertEqual(result, email_item)
+        mock_phone.assert_not_called()
 
 
 class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):

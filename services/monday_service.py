@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -177,6 +178,8 @@ _LANGUAGE_EXPERIENCE_ENTRY_RE = re.compile(
 )
 NAME_COLUMN_ID = "name"
 FIND_ITEMS_LIMIT = 25
+CV_FILE_FETCH_MAX_ATTEMPTS = 4
+CV_FILE_FETCH_RETRY_DELAY_SECONDS = 3
 
 # Exact Monday board labels for dropdown_mm3j8kby (case-sensitive on the API).
 MONDAY_PROGRAMMING_LANGUAGE_LABELS: tuple[str, ...] = (
@@ -594,6 +597,21 @@ def _append_note_field(existing: str | None, new: str, *, stamp: str) -> str:
     return f"{existing_text}\n\n--- {stamp} ---\n{new_text}"
 
 
+def _email_from_column(column: dict[str, Any]) -> str:
+    text = str(column.get("text") or "").strip()
+    value = column.get("value")
+    if value:
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+            if isinstance(parsed, dict):
+                email_value = parsed.get("email") or parsed.get("text") or ""
+                if email_value:
+                    text = str(email_value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return normalize_email(text) if text else ""
+
+
 def _phone_digits_from_column(column: dict[str, Any]) -> str:
     text = column.get("text") or ""
     value = column.get("value")
@@ -964,6 +982,122 @@ async def _query_items_by_column(
     ]
 
 
+async def _disambiguate_email_matches(
+    items: list[FoundItem],
+    normalized_email: str,
+) -> FoundItem | None:
+    if not items:
+        return None
+    if len(items) == 1:
+        item = items[0]
+        item_email = await _fetch_item_email(item.item_id)
+        if item_email == normalized_email or not item_email:
+            return item
+        logger.warning(
+            "Monday email lookup: single item %s email %r does not exactly match %r",
+            item.item_id,
+            item_email,
+            normalized_email,
+        )
+        return None
+
+    item_ids = [item.item_id for item in items]
+    body = await _post_graphql(
+        ITEMS_BY_IDS_QUERY,
+        {
+            "ids": item_ids,
+            "columnIds": [EMAIL_COLUMN_ID],
+        },
+    )
+    monday_items = body.get("data", {}).get("items") or []
+    exact_matches: list[FoundItem] = []
+    for monday_item in monday_items:
+        item_id = str(monday_item["id"])
+        name = str(monday_item.get("name") or "")
+        email_column = next(
+            (col for col in monday_item.get("column_values") or [] if col.get("id") == EMAIL_COLUMN_ID),
+            None,
+        )
+        item_email = _email_from_column(email_column or {})
+        if item_email == normalized_email:
+            exact_matches.append(FoundItem(item_id=item_id, name=name))
+
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        logger.error(
+            "Monday email lookup: multiple exact matches for %r: %s",
+            normalized_email,
+            [item.item_id for item in exact_matches],
+        )
+        return exact_matches[0]
+
+    logger.warning(
+        "Monday email lookup: no exact email match for %r among %d candidates",
+        normalized_email,
+        len(items),
+    )
+    return None
+
+
+async def _fetch_item_email(item_id: str) -> str:
+    body = await _post_graphql(
+        ITEMS_BY_IDS_QUERY,
+        {"ids": [item_id], "columnIds": [EMAIL_COLUMN_ID]},
+    )
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        return ""
+    email_column = next(
+        (col for col in items[0].get("column_values") or [] if col.get("id") == EMAIL_COLUMN_ID),
+        None,
+    )
+    return _email_from_column(email_column or {})
+
+
+async def _fetch_item_brief(item_id: str) -> FoundItem | None:
+    body = await _post_graphql(
+        ITEMS_BY_IDS_QUERY,
+        {"ids": [item_id], "columnIds": [EMAIL_COLUMN_ID]},
+    )
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        return None
+    return FoundItem(
+        item_id=str(items[0]["id"]),
+        name=str(items[0].get("name") or ""),
+    )
+
+
+async def find_existing_item_by_email(
+    email: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+) -> FoundItem | None:
+    """Find an existing board item by normalized email with strict verification."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+
+    email_items = await _query_items_by_column(
+        EMAIL_COLUMN_ID, [normalized], board_id=board_id
+    )
+    if not email_items:
+        return None
+
+    match = await _disambiguate_email_matches(email_items, normalized)
+    if match is not None:
+        return match
+
+    logger.warning(
+        "Monday email lookup: column search returned %d item(s) for %r but none verified; "
+        "treating as no match",
+        len(email_items),
+        normalized,
+    )
+    return None
+
+
 async def _disambiguate_phone_matches(
     items: list[FoundItem],
     normalized_phone: str,
@@ -1050,19 +1184,9 @@ async def find_existing_item_by_contact(
     phone_match: FoundItem | None = None
 
     if email:
-        email_items = await _query_items_by_column(
-            EMAIL_COLUMN_ID, [email], board_id=board_id
-        )
-        if email_items:
-            email_match = email_items[0]
-            if len(email_items) > 1:
-                logger.warning(
-                    "Monday email lookup: multiple items for %s, using %s",
-                    email,
-                    email_match.item_id,
-                )
+        email_match = await find_existing_item_by_email(email, board_id=board_id)
 
-    if phone:
+    if phone and email_match is None:
         phone_items = await _query_items_by_column(
             PHONE_COLUMN_ID, [phone], board_id=board_id
         )
@@ -1218,9 +1342,15 @@ async def upsert_candidate_item(
     cv_file_path: str | Path | None = None,
     raw_cv_text: str = "",
     board_id: str = MAIN_HUB_BOARD_ID,
+    source_item_id: str | None = None,
 ) -> tuple[str, bool]:
     """
     Create or update a Monday.com item keyed by email/phone.
+
+    Email is checked first with strict verification before any create. When
+    ``source_item_id`` is set (e.g. Monday Form webhook), that item is updated
+    on the target board if no verified email match exists — avoiding duplicates
+    when the triggering row is not yet indexed by email search.
 
     When ``cv_file_path`` is set, uploads the CV only for newly created items.
     For matched existing items, update column values/name and skip file upload
@@ -1233,6 +1363,22 @@ async def upsert_candidate_item(
     cv_path = str(cv_file_path) if cv_file_path else None
 
     if not has_email and not has_phone:
+        if source_item_id:
+            existing = await _fetch_item_brief(source_item_id)
+            if existing is not None:
+                item_id = await update_candidate_item(
+                    existing.item_id,
+                    candidate,
+                    existing_name=existing.name,
+                    raw_cv_text=raw_cv_text,
+                    board_id=board_id,
+                )
+                logger.info(
+                    "Monday upsert: updated source item %s (no contact identifier)",
+                    item_id,
+                )
+                return item_id, False
+
         logger.warning(
             "Monday upsert: no email or phone for %r; creating new item (duplicates possible)",
             candidate.name,
@@ -1246,7 +1392,50 @@ async def upsert_candidate_item(
         logger.info("Monday upsert: created item %s (no contact identifier)", item_id)
         return item_id, True
 
-    existing = await find_existing_item_by_contact(candidate, board_id=board_id)
+    existing: FoundItem | None = None
+    if has_email:
+        existing = await find_existing_item_by_email(candidate.email, board_id=board_id)
+        if existing is not None:
+            logger.info(
+                "Monday upsert: verified email match %s for %r",
+                existing.item_id,
+                normalize_email(candidate.email),
+            )
+
+    if existing is None and has_phone:
+        phone = normalize_phone(candidate.phone)
+        phone_items = await _query_items_by_column(
+            PHONE_COLUMN_ID, [phone], board_id=board_id
+        )
+        existing = await _disambiguate_phone_matches(phone_items, phone)
+
+    if existing is None and source_item_id:
+        source_item = await _fetch_item_brief(source_item_id)
+        if source_item is not None:
+            if has_email:
+                item_email = await _fetch_item_email(source_item.item_id)
+                normalized_email = normalize_email(candidate.email)
+                if item_email and item_email != normalized_email:
+                    logger.warning(
+                        "Monday upsert: source item %s email %r differs from candidate %r; "
+                        "will create new item",
+                        source_item.item_id,
+                        item_email,
+                        normalized_email,
+                    )
+                else:
+                    existing = source_item
+                    logger.info(
+                        "Monday upsert: using source item %s (no verified email match yet)",
+                        source_item.item_id,
+                    )
+            else:
+                existing = source_item
+                logger.info(
+                    "Monday upsert: using source item %s (phone-only match path)",
+                    source_item.item_id,
+                )
+
     if existing is None:
         item_id = await create_candidate_item(
             candidate,
@@ -1275,20 +1464,11 @@ async def upsert_candidate_item(
     return item_id, False
 
 
-async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
-    """
-    Fetch the public download URL and filename for the most recent CV file on an item.
-
-    Returns:
-        (public_url, filename) — URL is valid for ~1 hour per Monday API docs.
-
-    Raises:
-        ValueError: If no file is attached or the file type is unsupported.
-    """
-    body = await _post_graphql(
-        ITEM_CV_FILE_QUERY,
-        {"ids": [item_id], "columnId": FILE_COLUMN_ID},
-    )
+def _parse_item_cv_file_response(
+    item_id: str,
+    body: dict[str, Any],
+) -> tuple[str, str]:
+    """Parse GraphQL response into (public_url, filename). Raises ValueError if no file yet."""
     items = body.get("data", {}).get("items") or []
     if not items:
         raise ValueError(f"Monday item {item_id} not found.")
@@ -1320,14 +1500,83 @@ async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
     if suffix not in {".pdf", ".docx"}:
         if extension in {"pdf", "docx"}:
             name = f"{Path(name).stem}.{extension}" if Path(name).stem else f"cv.{extension}"
-            suffix = f".{extension}"
         else:
             raise ValueError(
                 f"Unsupported CV file type on item {item_id}: {name!r} (extension {extension!r})"
             )
 
-    logger.info("Fetched CV file URL for item %s: %s", item_id, name)
     return public_url, name
+
+
+_CV_FILE_RETRYABLE_ERRORS = (
+    "not found",
+    "no cv file",
+    "has no public_url",
+    "has no filename",
+)
+
+
+def _is_cv_file_retryable_error(exc: ValueError) -> bool:
+    message = str(exc).casefold()
+    return any(fragment in message for fragment in _CV_FILE_RETRYABLE_ERRORS)
+
+
+async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
+    """
+    Fetch the public download URL and filename for the most recent CV file on an item.
+
+    Monday Forms can fire the file-column webhook before the asset is attached;
+    this retries up to ``CV_FILE_FETCH_MAX_ATTEMPTS`` with
+    ``CV_FILE_FETCH_RETRY_DELAY_SECONDS`` between attempts.
+
+    Returns:
+        (public_url, filename) — URL is valid for ~1 hour per Monday API docs.
+
+    Raises:
+        ValueError: If no file is attached or the file type is unsupported.
+    """
+    last_error: ValueError | None = None
+
+    for attempt in range(1, CV_FILE_FETCH_MAX_ATTEMPTS + 1):
+        body = await _post_graphql(
+            ITEM_CV_FILE_QUERY,
+            {"ids": [item_id], "columnId": FILE_COLUMN_ID},
+        )
+        try:
+            public_url, name = _parse_item_cv_file_response(item_id, body)
+        except ValueError as exc:
+            last_error = exc
+            if (
+                attempt < CV_FILE_FETCH_MAX_ATTEMPTS
+                and _is_cv_file_retryable_error(exc)
+            ):
+                logger.info(
+                    "CV file not ready on item %s (attempt %d/%d): %s — retrying in %ds",
+                    item_id,
+                    attempt,
+                    CV_FILE_FETCH_MAX_ATTEMPTS,
+                    exc,
+                    CV_FILE_FETCH_RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(CV_FILE_FETCH_RETRY_DELAY_SECONDS)
+                continue
+            raise
+
+        if attempt > 1:
+            logger.info(
+                "CV file ready on item %s after attempt %d/%d: %s",
+                item_id,
+                attempt,
+                CV_FILE_FETCH_MAX_ATTEMPTS,
+                name,
+            )
+        else:
+            logger.info("Fetched CV file URL for item %s: %s", item_id, name)
+        return public_url, name
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"No CV file on Monday item {item_id}.")
 
 
 def _cv_mime_type(file_path: str) -> str:

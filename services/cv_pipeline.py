@@ -29,6 +29,7 @@ async def process_cv_bytes(
     board_id: str,
     cv_file_path: str | Path | None = None,
     sync_to_hub: bool = True,
+    source_item_id: str | None = None,
 ) -> None:
     """
     Parse CV bytes with Claude and upsert to the given board (and optionally Main Hub).
@@ -39,6 +40,8 @@ async def process_cv_bytes(
         board_id: Monday board that triggered processing.
         cv_file_path: Local path for file upload on create; defaults to a temp file.
         sync_to_hub: When True and board_id is not Main Hub, also upsert to Main Hub.
+        source_item_id: Monday item that triggered processing (webhook); used to avoid
+            duplicate rows when email search has not indexed the form submission yet.
     """
     cv_text = extract_text_from_file(file_bytes, filename)
     candidate = await analyze_cv_with_claude(cv_text)
@@ -63,6 +66,7 @@ async def process_cv_bytes(
             cv_file_path=str(upload_path),
             raw_cv_text=cv_text,
             board_id=board_id,
+            source_item_id=source_item_id,
         )
         action = "Created" if created else "Updated"
         logger.info("%s Monday item %s on board %s for %s", action, item_id, board_id, filename)
@@ -126,6 +130,7 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
             board_id=board_id,
             cv_file_path=temp_path,
             sync_to_hub=True,
+            source_item_id=item_id,
         )
     finally:
         temp_path.unlink(missing_ok=True)

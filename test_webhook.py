@@ -109,6 +109,60 @@ class MondayWebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["status"], "error")
 
+    @patch("app.run_webhook_pipeline_sync")
+    def test_custom_app_input_fields_schedules_background_task(self, mock_pipeline):
+        payload = {
+            "payload": {
+                "blockKind": "action",
+                "inputFields": {
+                    "itemId": 1234567890,
+                    "boardId": 5096673346,
+                },
+                "recipeId": 30440660,
+                "integrationId": 398759485,
+            },
+            "runtimeMetadata": {
+                "triggerUuid": "custom-app-uuid",
+            },
+        }
+        response = client.post("/monday-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("1234567890", "5096673346")
+
+    @patch("app.run_webhook_pipeline_sync")
+    def test_custom_app_inbound_field_values_schedules_background_task(self, mock_pipeline):
+        payload = {
+            "payload": {
+                "blockKind": "action",
+                "inboundFieldValues": {
+                    "itemId": 1112223333,
+                    "boardId": 9876543210,
+                },
+                "recipeId": 30440660,
+                "integrationId": 398759485,
+            },
+        }
+        response = client.post("/monday-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("1112223333", "9876543210")
+
+    def test_custom_app_payload_missing_ids_is_ignored(self):
+        payload = {
+            "payload": {
+                "blockKind": "action",
+                "webhookUrl": "https://api-gw.monday.com/automations/apps-events/481709001",
+                "subscriptionId": 481709001,
+                "inputFields": {},
+                "recipeId": 629280,
+                "integrationId": 398528596,
+            }
+        }
+        response = client.post("/monday-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ignored"})
+
 
 if __name__ == "__main__":
     unittest.main()

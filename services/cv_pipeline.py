@@ -116,7 +116,7 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
     """Download CV from a Monday item and run the full extraction + upsert pipeline."""
     logger.info("Processing Monday webhook: item_id=%s board_id=%s", item_id, board_id)
 
-    url, filename = await get_item_cv_file_url(item_id)
+    url, filename = await get_item_cv_file_url(item_id, board_id)
     file_bytes = await download_cv_from_url(url)
 
     TEMP_CV_DIR.mkdir(parents=True, exist_ok=True)

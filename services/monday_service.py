@@ -356,7 +356,28 @@ query ($ids: [ID!]!) {
         files {
           ... on FileAssetValue {
             name
-            created_at
+            asset {
+              public_url
+              file_extension
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+ITEM_CV_FILE_SCOPED_QUERY = """
+query ($ids: [ID!]!, $columnIds: [String!]!) {
+  items(ids: $ids) {
+    column_values(ids: $columnIds) {
+      id
+      type
+      ... on FileValue {
+        files {
+          ... on FileAssetValue {
+            name
             asset {
               public_url
               file_extension
@@ -1621,13 +1642,16 @@ def _is_cv_file_retryable_error(exc: ValueError) -> bool:
     return any(fragment in message for fragment in _CV_FILE_RETRYABLE_ERRORS)
 
 
-async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
+async def get_item_cv_file_url(item_id: str, board_id: str | None = None) -> tuple[str, str]:
     """
     Fetch the public download URL and filename for the most recent CV file on an item.
 
     Monday Forms can fire the file-column webhook before the asset is attached;
     this retries up to ``CV_FILE_FETCH_MAX_ATTEMPTS`` with
     ``CV_FILE_FETCH_RETRY_DELAY_SECONDS`` between attempts.
+
+    When ``board_id`` is provided, only the board's file column is queried (faster and
+    avoids Monday API errors from scanning unrelated columns).
 
     Returns:
         (public_url, filename) — URL is valid for ~1 hour per Monday API docs.
@@ -1636,12 +1660,21 @@ async def get_item_cv_file_url(item_id: str) -> tuple[str, str]:
         ValueError: If no file is attached or the file type is unsupported.
     """
     last_error: ValueError | None = None
+    file_column_id: str | None = None
+    if board_id:
+        file_column_id = await resolve_file_column_id(board_id)
 
     for attempt in range(1, CV_FILE_FETCH_MAX_ATTEMPTS + 1):
-        body = await _post_graphql(
-            ITEM_CV_FILE_QUERY,
-            {"ids": [item_id]},
-        )
+        if file_column_id:
+            body = await _post_graphql(
+                ITEM_CV_FILE_SCOPED_QUERY,
+                {"ids": [item_id], "columnIds": [file_column_id]},
+            )
+        else:
+            body = await _post_graphql(
+                ITEM_CV_FILE_QUERY,
+                {"ids": [item_id]},
+            )
         try:
             public_url, name = _parse_item_cv_file_response(item_id, body)
         except ValueError as exc:

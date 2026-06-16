@@ -293,6 +293,19 @@ mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
 }
 """
 
+CHANGE_COLUMN_VALUE_MUTATION = """
+mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+  change_column_value(
+    board_id: $boardId,
+    item_id: $itemId,
+    column_id: $columnId,
+    value: $value
+  ) {
+    id
+  }
+}
+"""
+
 BOARD_DROPDOWN_COLUMN_QUERY = """
 query ($boardId: ID!, $columnIds: [String!]!) {
   boards(ids: [$boardId]) {
@@ -1629,7 +1642,9 @@ async def upsert_candidate_item(
     when the triggering row is not yet indexed by email search.
 
     When ``cv_file_path`` is set, uploads the CV to the item's file column on
-    both create and update so recruiters always have the latest version.
+    both create and update so recruiters always have the latest version. On
+    update, any previous files in that column are cleared before the new CV is
+    attached so only the latest resume remains.
 
     Returns (item_id, created) where created is True for a new row.
     """
@@ -1651,7 +1666,12 @@ async def upsert_candidate_item(
                 )
                 if cv_path:
                     file_column_id = await resolve_file_column_id(board_id)
-                    upload_file_to_item(item_id, cv_path, column_id=file_column_id)
+                    await replace_file_on_item(
+                        item_id,
+                        cv_path,
+                        board_id=board_id,
+                        column_id=file_column_id,
+                    )
                 logger.info(
                     "Monday upsert: updated source item %s (no contact identifier)",
                     item_id,
@@ -1743,7 +1763,12 @@ async def upsert_candidate_item(
     )
     if cv_path:
         file_column_id = await resolve_file_column_id(board_id)
-        upload_file_to_item(item_id, cv_path, column_id=file_column_id)
+        await replace_file_on_item(
+            item_id,
+            cv_path,
+            board_id=board_id,
+            column_id=file_column_id,
+        )
     contact = normalize_email(candidate.email) if has_email else normalize_phone(candidate.phone)
     logger.info("Monday upsert: updated item %s (matched %s)", item_id, contact)
     return item_id, False
@@ -1971,6 +1996,47 @@ def _cv_mime_type(file_path: str) -> str:
     if suffix == ".doc":
         return "application/msword"
     return "application/octet-stream"
+
+
+async def clear_file_column(
+    item_id: str,
+    *,
+    board_id: str,
+    column_id: str,
+) -> None:
+    """Remove all files from a Monday file column (cannot be undone)."""
+    board_id = _resolve_board_id(board_id)
+    body = await _post_graphql(
+        CHANGE_COLUMN_VALUE_MUTATION,
+        {
+            "boardId": board_id,
+            "itemId": str(item_id),
+            "columnId": column_id,
+            "value": json.dumps({"clear_all": True}),
+        },
+        column_ids=[column_id],
+    )
+    if body.get("errors"):
+        _print_monday_errors(body["errors"], column_ids=[column_id])
+        raise Exception(f"Monday.com clear file column error: {body['errors']}")
+    logger.info(
+        "Monday file column cleared: item %s board %s column %s",
+        item_id,
+        board_id,
+        column_id,
+    )
+
+
+async def replace_file_on_item(
+    item_id: str,
+    file_path: str,
+    *,
+    board_id: str,
+    column_id: str,
+) -> dict:
+    """Clear existing files in the column, then attach the new CV."""
+    await clear_file_column(item_id, board_id=board_id, column_id=column_id)
+    return upload_file_to_item(item_id, file_path, column_id=column_id)
 
 
 def upload_file_to_item(item_id: str, file_path: str, *, column_id: str) -> dict:

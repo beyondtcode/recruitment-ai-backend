@@ -15,6 +15,8 @@ from services.monday_service import (
     _BOARD_FILE_COLUMN_CACHE,
     _extract_cv_file_from_column_values,
     _parse_item_cv_file_response,
+    clear_file_column,
+    replace_file_on_item,
     resolve_file_column_id,
     upload_file_to_item,
 )
@@ -147,6 +149,65 @@ class ResolveFileColumnIdTests(unittest.IsolatedAsyncioTestCase):
         finally:
             os.environ.pop("MONDAY_FILE_COLUMN_ID", None)
             _BOARD_FILE_COLUMN_CACHE.clear()
+
+
+class ClearFileColumnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clears_column_with_clear_all_flag(self):
+        with patch.object(
+            monday_service,
+            "_post_graphql",
+            new_callable=AsyncMock,
+            return_value={"data": {"change_column_value": {"id": "123"}}},
+        ) as mock_post:
+            await clear_file_column(
+                "12345",
+                board_id="board-1",
+                column_id="file_mm43j6y2",
+            )
+
+        mock_post.assert_awaited_once()
+        variables = mock_post.call_args.args[1]
+        self.assertEqual(variables["boardId"], "board-1")
+        self.assertEqual(variables["itemId"], "12345")
+        self.assertEqual(variables["columnId"], "file_mm43j6y2")
+        self.assertEqual(variables["value"], '{"clear_all": true}')
+
+
+class ReplaceFileOnItemTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clears_before_upload(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(b"%PDF-1.4 test")
+            tmp_path = tmp.name
+
+        try:
+            with (
+                patch.object(
+                    monday_service,
+                    "clear_file_column",
+                    new_callable=AsyncMock,
+                ) as mock_clear,
+                patch.object(monday_service, "upload_file_to_item") as mock_upload,
+            ):
+                mock_upload.return_value = {"data": {"add_file_to_column": {"id": "1"}}}
+                await replace_file_on_item(
+                    "12345",
+                    tmp_path,
+                    board_id="board-1",
+                    column_id="file_mm43j6y2",
+                )
+
+            mock_clear.assert_awaited_once_with(
+                "12345",
+                board_id="board-1",
+                column_id="file_mm43j6y2",
+            )
+            mock_upload.assert_called_once_with(
+                "12345",
+                tmp_path,
+                column_id="file_mm43j6y2",
+            )
+        finally:
+            os.unlink(tmp_path)
 
 
 class UploadFileToItemTests(unittest.TestCase):

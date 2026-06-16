@@ -318,23 +318,24 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item_id, "222")
         self.assertTrue(created)
 
-    async def test_update_flow_skips_file_upload_with_qa_log(self):
+    async def test_update_flow_uploads_cv_file(self):
         candidate = _candidate()
         existing = FoundItem(item_id="111", name="Jane Doe")
 
         with (
             patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find,
             patch.object(monday_service, "update_candidate_item", new_callable=AsyncMock) as mock_update,
-            patch.object(monday_service, "upload_file_to_item") as mock_upload,
+            patch.object(monday_service, "resolve_file_column_id", new_callable=AsyncMock) as mock_resolve_file,
+            patch.object(monday_service, "replace_file_on_item", new_callable=AsyncMock) as mock_replace,
         ):
             mock_find.return_value = existing
             mock_update.return_value = "111"
+            mock_resolve_file.return_value = monday_service.FILE_COLUMN_ID
 
-            with self.assertLogs("services.monday_service", level="INFO") as logs:
-                item_id, created = await upsert_candidate_item(
-                    candidate,
-                    cv_file_path="/tmp/candidate.pdf",
-                )
+            item_id, created = await upsert_candidate_item(
+                candidate,
+                cv_file_path="/tmp/candidate.pdf",
+            )
 
         mock_update.assert_awaited_once_with(
             "111",
@@ -343,16 +344,15 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             raw_cv_text="",
             board_id=get_main_hub_board_id(),
         )
-        mock_upload.assert_not_called()
+        mock_resolve_file.assert_awaited_once_with(get_main_hub_board_id())
+        mock_replace.assert_awaited_once_with(
+            "111",
+            "/tmp/candidate.pdf",
+            board_id=get_main_hub_board_id(),
+            column_id=monday_service.FILE_COLUMN_ID,
+        )
         self.assertEqual(item_id, "111")
         self.assertFalse(created)
-        self.assertTrue(
-            any(
-                "Candidate item updated with new extracted data. Skipping file upload to prevent duplicates during QA."
-                in line
-                for line in logs.output
-            )
-        )
 
 
 class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):

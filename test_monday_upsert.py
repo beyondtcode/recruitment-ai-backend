@@ -8,6 +8,8 @@ import unittest
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
+os.environ.setdefault("MONDAY_BOARD_ID", "5096673346")
+
 from models.candidate import CandidateSchema, ProgrammingLanguageExperience
 from services import monday_service
 from services.monday_service import (
@@ -23,7 +25,7 @@ from services.monday_service import (
     INTERVIEW_SUMMARIES_COLUMN_ID,
     JOB_CATEGORY_DROPDOWN_COLUMN_ID,
     LANGUAGE_EXPERIENCE_COLUMN_ID,
-    MAIN_HUB_BOARD_ID,
+    get_main_hub_board_id,
     PROGRAMMING_LANGUAGES_COLUMN_ID,
     RECRUITER_NOTES_COLUMN_ID,
     TEAM_LEAD_DROPDOWN_LABEL,
@@ -36,6 +38,7 @@ from services.monday_service import (
     normalize_phone,
     normalize_programming_languages,
     parse_language_experience_entries,
+    prepare_column_values_for_board,
     resolve_programming_language_labels,
     upsert_candidate_item,
 )
@@ -258,7 +261,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             candidate,
             cv_file_path=None,
             raw_cv_text="",
-            board_id=MAIN_HUB_BOARD_ID,
+            board_id=get_main_hub_board_id(),
         )
         self.assertEqual(item_id, "999")
         self.assertTrue(created)
@@ -282,7 +285,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             candidate,
             existing_name="Jane Doe",
             raw_cv_text="",
-            board_id=MAIN_HUB_BOARD_ID,
+            board_id=get_main_hub_board_id(),
         )
         self.assertEqual(item_id, "111")
         self.assertFalse(created)
@@ -294,10 +297,12 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             patch.object(monday_service, "find_existing_item_by_email", new_callable=AsyncMock) as mock_find,
             patch.object(monday_service, "create_candidate_item", new_callable=AsyncMock) as mock_create,
             patch.object(monday_service, "update_candidate_item", new_callable=AsyncMock) as mock_update,
+            patch.object(monday_service, "resolve_column_id_by_type", new_callable=AsyncMock) as mock_resolve,
             patch.object(monday_service, "_query_items_by_column", new_callable=AsyncMock) as mock_phone_query,
             patch.object(monday_service, "_disambiguate_phone_matches", new_callable=AsyncMock) as mock_phone,
         ):
             mock_find.return_value = None
+            mock_resolve.return_value = monday_service.PHONE_COLUMN_ID
             mock_phone_query.return_value = []
             mock_phone.return_value = None
             mock_create.return_value = "222"
@@ -308,7 +313,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             candidate,
             cv_file_path=None,
             raw_cv_text="",
-            board_id=MAIN_HUB_BOARD_ID,
+            board_id=get_main_hub_board_id(),
         )
         self.assertEqual(item_id, "222")
         self.assertTrue(created)
@@ -336,7 +341,7 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             candidate,
             existing_name="Jane Doe",
             raw_cv_text="",
-            board_id=MAIN_HUB_BOARD_ID,
+            board_id=get_main_hub_board_id(),
         )
         mock_upload.assert_not_called()
         self.assertEqual(item_id, "111")
@@ -400,7 +405,7 @@ class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
                 existing_name="Jane Doe",
             )
 
-        mock_rename.assert_awaited_once_with("111", "Jane D. Updated", board_id=MAIN_HUB_BOARD_ID)
+        mock_rename.assert_awaited_once_with("111", "Jane D. Updated", board_id=get_main_hub_board_id())
         self.assertEqual(mock_post.await_count, 1)
 
     async def test_skips_rename_when_name_unchanged(self):
@@ -440,6 +445,35 @@ class FindExistingItemTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, email_item)
         mock_phone.assert_not_called()
+
+
+class PrepareColumnValuesForBoardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_removes_unknown_columns_and_remaps_email_phone(self):
+        candidate = _candidate()
+        column_values = build_column_values(candidate)
+
+        form_board_columns = [
+            {"id": "email_mm438sbe", "type": "email"},
+            {"id": "phone_mm43s4mh", "type": "phone"},
+        ]
+
+        with patch.object(
+            monday_service,
+            "_fetch_board_columns",
+            new_callable=AsyncMock,
+            return_value=form_board_columns,
+        ):
+            prepared = await prepare_column_values_for_board("5098534551", column_values)
+
+        self.assertEqual(set(prepared.keys()), {"email_mm438sbe", "phone_mm43s4mh"})
+        self.assertEqual(prepared["email_mm438sbe"]["email"], "jane@example.com")
+        self.assertEqual(prepared["phone_mm43s4mh"]["phone"], "0556722091")
+
+    async def test_main_hub_board_keeps_all_columns(self):
+        candidate = _candidate()
+        column_values = build_column_values(candidate)
+        prepared = await prepare_column_values_for_board(get_main_hub_board_id(), column_values)
+        self.assertEqual(prepared, column_values)
 
 
 class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):

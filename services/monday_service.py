@@ -22,8 +22,18 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 MONDAY_FILE_API_URL = "https://api.monday.com/v2/file"
 MONDAY_API_VERSION = "2024-01"
 MONDAY_FILE_API_VERSION = "2023-10"
-MAIN_HUB_BOARD_ID = "5096673346"
-BOARD_ID = MAIN_HUB_BOARD_ID  # backward-compat alias
+
+
+def get_main_hub_board_id() -> str:
+    """Return the Main Hub Monday board ID from MONDAY_BOARD_ID (required)."""
+    board_id = os.getenv("MONDAY_BOARD_ID")
+    if not board_id:
+        raise ValueError("MONDAY_BOARD_ID environment variable is not set")
+    return board_id.strip()
+
+
+def _resolve_board_id(board_id: str | None) -> str:
+    return board_id if board_id is not None else get_main_hub_board_id()
 # Monday board file column key — override via MONDAY_FILE_COLUMN_ID in .env if needed
 FILE_COLUMN_ID = os.getenv("MONDAY_FILE_COLUMN_ID", "file_mm3gnkmj")
 EMAIL_COLUMN_ID = "email_mm3ga25b"
@@ -422,7 +432,7 @@ async def prepare_column_values_for_board(
     email/phone columns when those defaults are absent from the board schema.
     """
     board_key = str(board_id)
-    if board_key == MAIN_HUB_BOARD_ID:
+    if board_key == get_main_hub_board_id():
         return dict(column_values)
 
     columns = await _fetch_board_columns(board_key)
@@ -1034,13 +1044,14 @@ def _looks_like_dropdown_label_error(exc: Exception) -> bool:
 async def ensure_dropdown_labels_exist(
     labels: list[str],
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> None:
     """
     Best-effort fallback: append missing labels to the board dropdown column settings.
 
     Used when create_labels_if_missing fails (e.g. insufficient token permissions).
     """
+    board_id = _resolve_board_id(board_id)
     if not labels:
         return
 
@@ -1109,7 +1120,7 @@ async def _post_column_values_with_dropdown_fallback(
     """
     Post column values to Monday; on dropdown failure retry without dropdown but keep text column.
     """
-    board_id = str(variables.get("boardId", MAIN_HUB_BOARD_ID))
+    board_id = str(variables.get("boardId") or get_main_hub_board_id())
     column_values = await prepare_column_values_for_board(board_id, column_values)
     variables = dict(variables)
     variables["columnValues"] = json.dumps(column_values)
@@ -1131,7 +1142,7 @@ async def _post_column_values_with_dropdown_fallback(
 
         if _looks_like_dropdown_label_error(exc):
             try:
-                board_id = str(variables.get("boardId", MAIN_HUB_BOARD_ID))
+                board_id = str(variables.get("boardId") or get_main_hub_board_id())
                 await ensure_dropdown_labels_exist(labels, board_id=board_id)
             except Exception as provision_exc:
                 logger.warning("Dropdown label provisioning failed: %s", provision_exc)
@@ -1165,8 +1176,9 @@ async def _query_items_by_column(
     column_id: str,
     column_values: list[str],
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> list[FoundItem]:
+    board_id = _resolve_board_id(board_id)
     body = await _post_graphql(
         ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
         {
@@ -1187,9 +1199,10 @@ async def _disambiguate_email_matches(
     items: list[FoundItem],
     normalized_email: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
     email_column_id: str | None = None,
 ) -> FoundItem | None:
+    board_id = _resolve_board_id(board_id)
     resolved_email_column_id = email_column_id or await resolve_column_id_by_type(board_id, "email")
     if not items:
         return None
@@ -1252,9 +1265,10 @@ async def _disambiguate_email_matches(
 async def _fetch_item_email(
     item_id: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
     email_column_id: str | None = None,
 ) -> str:
+    board_id = _resolve_board_id(board_id)
     resolved_email_column_id = email_column_id or await resolve_column_id_by_type(
         board_id, "email"
     )
@@ -1275,8 +1289,9 @@ async def _fetch_item_email(
 async def _fetch_item_brief(
     item_id: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> FoundItem | None:
+    board_id = _resolve_board_id(board_id)
     email_column_id = await resolve_column_id_by_type(board_id, "email")
     body = await _post_graphql(
         ITEMS_BY_IDS_QUERY,
@@ -1294,9 +1309,10 @@ async def _fetch_item_brief(
 async def find_existing_item_by_email(
     email: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> FoundItem | None:
     """Find an existing board item by normalized email with strict verification."""
+    board_id = _resolve_board_id(board_id)
     normalized = normalize_email(email)
     if not normalized:
         return None
@@ -1331,11 +1347,12 @@ async def _disambiguate_phone_matches(
     items: list[FoundItem],
     normalized_phone: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
     phone_column_id: str | None = None,
 ) -> FoundItem | None:
     if not items:
         return None
+    board_id = _resolve_board_id(board_id)
     resolved_phone_column_id = phone_column_id or await resolve_column_id_by_type(
         board_id, "phone"
     )
@@ -1398,9 +1415,10 @@ async def _disambiguate_phone_matches(
 async def _fetch_item_phone_digits(
     item_id: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
     phone_column_id: str | None = None,
 ) -> str:
+    board_id = _resolve_board_id(board_id)
     resolved_phone_column_id = phone_column_id or await resolve_column_id_by_type(
         board_id, "phone"
     )
@@ -1421,9 +1439,10 @@ async def _fetch_item_phone_digits(
 async def find_existing_item_by_contact(
     candidate: CandidateSchema,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> FoundItem | None:
     """Find an existing board item by normalized email or phone."""
+    board_id = _resolve_board_id(board_id)
     email = normalize_email(candidate.email) if not _is_empty(candidate.email) else ""
     phone = normalize_phone(candidate.phone) if not _is_empty(candidate.phone) else ""
 
@@ -1482,9 +1501,10 @@ async def change_item_name(
     item_id: str,
     new_name: str,
     *,
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> None:
     """Rename board row via Monday Name column."""
+    board_id = _resolve_board_id(board_id)
     name = new_name.strip()
     if not name:
         logger.warning("Monday change_item_name skipped: empty name for item %s", item_id)
@@ -1503,9 +1523,10 @@ async def update_candidate_item(
     *,
     existing_name: str,
     raw_cv_text: str = "",
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> str:
     """Update an existing Monday.com item and return its ID."""
+    board_id = _resolve_board_id(board_id)
     existing_notes = await _fetch_existing_notes(item_id)
     column_values = build_update_column_values(candidate, existing_notes, raw_cv_text)
 
@@ -1557,9 +1578,10 @@ async def create_candidate_item(
     *,
     cv_file_path: str | Path | None = None,
     raw_cv_text: str = "",
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
 ) -> str:
     """Create a Monday.com board item and return the new item ID."""
+    board_id = _resolve_board_id(board_id)
     column_values = build_column_values(candidate, raw_cv_text)
     column_values_json = json.dumps(column_values)
     group_id = os.getenv("MONDAY_GROUP_ID", "topics")
@@ -1595,7 +1617,7 @@ async def upsert_candidate_item(
     *,
     cv_file_path: str | Path | None = None,
     raw_cv_text: str = "",
-    board_id: str = MAIN_HUB_BOARD_ID,
+    board_id: str | None = None,
     source_item_id: str | None = None,
 ) -> tuple[str, bool]:
     """
@@ -1612,6 +1634,7 @@ async def upsert_candidate_item(
 
     Returns (item_id, created) where created is True for a new row.
     """
+    board_id = _resolve_board_id(board_id)
     has_email = not _is_empty(candidate.email)
     has_phone = not _is_empty(candidate.phone)
     cv_path = str(cv_file_path) if cv_file_path else None

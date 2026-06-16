@@ -7,9 +7,11 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+os.environ.setdefault("MONDAY_BOARD_ID", "5096673346")
+
 from services import monday_service
 from services.monday_service import (
-    MAIN_HUB_BOARD_ID,
+    get_main_hub_board_id,
     _BOARD_FILE_COLUMN_CACHE,
     _extract_cv_file_from_column_values,
     _parse_item_cv_file_response,
@@ -139,7 +141,7 @@ class ResolveFileColumnIdTests(unittest.IsolatedAsyncioTestCase):
                     }
                 },
             ):
-                column_id = await resolve_file_column_id(MAIN_HUB_BOARD_ID)
+                column_id = await resolve_file_column_id(get_main_hub_board_id())
 
             self.assertEqual(column_id, "file_mm3gnkmj")
         finally:

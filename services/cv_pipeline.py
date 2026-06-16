@@ -10,8 +10,8 @@ from pydantic import ValidationError
 
 from services.ai_service import analyze_cv_with_claude
 from services.monday_service import (
-    MAIN_HUB_BOARD_ID,
     get_item_cv_file_url,
+    get_main_hub_board_id,
     upsert_candidate_item,
 )
 from utils.file_parser import download_cv_from_url, extract_text_from_file
@@ -71,13 +71,14 @@ async def process_cv_bytes(
         action = "Created" if created else "Updated"
         logger.info("%s Monday item %s on board %s for %s", action, item_id, board_id, filename)
 
-        if sync_to_hub and board_id != MAIN_HUB_BOARD_ID:
+        hub_board_id = get_main_hub_board_id()
+        if sync_to_hub and board_id != hub_board_id:
             try:
                 hub_id, hub_created = await upsert_candidate_item(
                     candidate,
                     cv_file_path=str(upload_path),
                     raw_cv_text=cv_text,
-                    board_id=MAIN_HUB_BOARD_ID,
+                    board_id=hub_board_id,
                 )
                 hub_action = "Created" if hub_created else "Updated"
                 logger.info(
@@ -98,13 +99,13 @@ async def process_cv_bytes(
             temp_path.unlink(missing_ok=True)
 
 
-async def process_cv_file(file_path: Path, *, board_id: str = MAIN_HUB_BOARD_ID) -> None:
+async def process_cv_file(file_path: Path, *, board_id: str | None = None) -> None:
     """Parse a local CV file, extract fields with Claude, and upsert to Monday."""
     file_bytes = file_path.read_bytes()
     await process_cv_bytes(
         file_bytes,
         file_path.name,
-        board_id=board_id,
+        board_id=board_id or get_main_hub_board_id(),
         cv_file_path=file_path.resolve(),
         sync_to_hub=False,
     )

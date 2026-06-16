@@ -401,7 +401,91 @@ query ($boardId: ID!) {
 }
 """
 
+_BOARD_COLUMNS_CACHE: dict[str, list[dict[str, Any]]] = {}
+_BOARD_TYPED_COLUMN_CACHE: dict[tuple[str, str], str] = {}
+
+_COLUMN_TYPE_DEFAULTS: dict[str, str] = {
+    "email": EMAIL_COLUMN_ID,
+    "phone": PHONE_COLUMN_ID,
+    "file": FILE_COLUMN_ID,
+}
+
+_COLUMN_TYPE_ENV_VARS: dict[str, str] = {
+    "email": "MONDAY_EMAIL_COLUMN_ID",
+    "phone": "MONDAY_PHONE_COLUMN_ID",
+    "file": "MONDAY_FILE_COLUMN_ID",
+}
+
+_COLUMN_TYPE_ID_PREFIXES: dict[str, tuple[str, ...]] = {
+    "email": ("email_",),
+    "phone": ("phone_",),
+    "file": ("file_",),
+}
+
+# Per-board cache for file-column resolution (see resolve_file_column_id).
 _BOARD_FILE_COLUMN_CACHE: dict[str, str] = {}
+
+
+async def _fetch_board_columns(board_id: str) -> list[dict[str, Any]]:
+    """Fetch (and cache) the column descriptors for a Monday board."""
+    board_key = str(board_id)
+    if board_key in _BOARD_COLUMNS_CACHE:
+        return _BOARD_COLUMNS_CACHE[board_key]
+    body = await _post_graphql(BOARD_FILE_COLUMNS_QUERY, {"boardId": board_key})
+    boards = body.get("data", {}).get("boards") or []
+    columns = (boards[0].get("columns") if boards else None) or []
+    _BOARD_COLUMNS_CACHE[board_key] = columns
+    return columns
+
+
+async def resolve_column_id_by_type(board_id: str, column_type: str) -> str:
+    """
+    Return the column ID of the given Monday column ``type`` for a board.
+
+    Resolution is cached per ``(board_id, column_type)``. Resolution order:
+    a matching ``MONDAY_*_COLUMN_ID`` env override that exists on the board,
+    then the first column whose ``type`` matches, then an id-prefix heuristic,
+    then the known Main Hub default constant when present on the board.
+    """
+    board_key = str(board_id)
+    type_key = column_type.casefold()
+    cache_key = (board_key, type_key)
+    if cache_key in _BOARD_TYPED_COLUMN_CACHE:
+        return _BOARD_TYPED_COLUMN_CACHE[cache_key]
+
+    columns = await _fetch_board_columns(board_key)
+    if not columns:
+        raise ValueError(f"No columns found for Monday board {board_key}.")
+
+    column_ids = {str(col.get("id") or "") for col in columns}
+
+    env_var = _COLUMN_TYPE_ENV_VARS.get(type_key)
+    env_override = os.getenv(env_var) if env_var else None
+    if env_override and env_override in column_ids:
+        _BOARD_TYPED_COLUMN_CACHE[cache_key] = env_override
+        return env_override
+
+    for col in columns:
+        if str(col.get("type") or "").casefold() == type_key:
+            column_id = str(col["id"])
+            _BOARD_TYPED_COLUMN_CACHE[cache_key] = column_id
+            return column_id
+
+    for prefix in _COLUMN_TYPE_ID_PREFIXES.get(type_key, ()):
+        for col in columns:
+            column_id = str(col.get("id") or "")
+            if column_id.startswith(prefix):
+                _BOARD_TYPED_COLUMN_CACHE[cache_key] = column_id
+                return column_id
+
+    default = _COLUMN_TYPE_DEFAULTS.get(type_key)
+    if default is not None and default in column_ids:
+        _BOARD_TYPED_COLUMN_CACHE[cache_key] = default
+        return default
+
+    raise ValueError(
+        f"No column of type {column_type!r} found on Monday board {board_key}."
+    )
 
 
 @dataclass(frozen=True)
@@ -666,6 +750,9 @@ def _phone_digits_from_column(column: dict[str, Any]) -> str:
 def build_column_values(
     candidate: CandidateSchema,
     raw_cv_text: str = "",
+    *,
+    email_column_id: str | None = None,
+    phone_column_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Build Monday.com column_values JSON for create_item / update.
@@ -674,17 +761,19 @@ def build_column_values(
     raw file bytes in column_values. Upload via upload_file_to_item() instead.
     """
     column_values: dict[str, Any] = {}
+    email_col = email_column_id or EMAIL_COLUMN_ID
+    phone_col = phone_column_id or PHONE_COLUMN_ID
 
     if not _is_empty(candidate.email):
         email = normalize_email(candidate.email)
-        column_values[EMAIL_COLUMN_ID] = {
+        column_values[email_col] = {
             "email": email,
             "text": email,
         }
 
     if not _is_empty(candidate.phone):
         phone = normalize_phone(candidate.phone)
-        column_values[PHONE_COLUMN_ID] = {
+        column_values[phone_col] = {
             "phone": phone,
             "countryShortName": "IL",
         }
@@ -746,9 +835,17 @@ def build_update_column_values(
     candidate: CandidateSchema,
     existing_notes: dict[str, str | None],
     raw_cv_text: str = "",
+    *,
+    email_column_id: str | None = None,
+    phone_column_id: str | None = None,
 ) -> dict[str, Any]:
     """Build column_values for update, appending notes and refreshing enter date."""
-    column_values = build_column_values(candidate, raw_cv_text)
+    column_values = build_column_values(
+        candidate,
+        raw_cv_text,
+        email_column_id=email_column_id,
+        phone_column_id=phone_column_id,
+    )
     stamp = date.today().strftime("%Y-%m-%d")
 
     if not _is_empty(candidate.recruiter_notes):
@@ -1022,12 +1119,20 @@ async def _query_items_by_column(
 async def _disambiguate_email_matches(
     items: list[FoundItem],
     normalized_email: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+    email_column_id: str | None = None,
 ) -> FoundItem | None:
+    resolved_email_column_id = email_column_id or await resolve_column_id_by_type(board_id, "email")
     if not items:
         return None
     if len(items) == 1:
         item = items[0]
-        item_email = await _fetch_item_email(item.item_id)
+        item_email = await _fetch_item_email(
+            item.item_id,
+            board_id=board_id,
+            email_column_id=resolved_email_column_id,
+        )
         if item_email == normalized_email or not item_email:
             return item
         logger.warning(
@@ -1043,7 +1148,7 @@ async def _disambiguate_email_matches(
         ITEMS_BY_IDS_QUERY,
         {
             "ids": item_ids,
-            "columnIds": [EMAIL_COLUMN_ID],
+            "columnIds": [resolved_email_column_id],
         },
     )
     monday_items = body.get("data", {}).get("items") or []
@@ -1052,7 +1157,7 @@ async def _disambiguate_email_matches(
         item_id = str(monday_item["id"])
         name = str(monday_item.get("name") or "")
         email_column = next(
-            (col for col in monday_item.get("column_values") or [] if col.get("id") == EMAIL_COLUMN_ID),
+            (col for col in monday_item.get("column_values") or [] if col.get("id") == resolved_email_column_id),
             None,
         )
         item_email = _email_from_column(email_column or {})
@@ -1077,25 +1182,38 @@ async def _disambiguate_email_matches(
     return None
 
 
-async def _fetch_item_email(item_id: str) -> str:
+async def _fetch_item_email(
+    item_id: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+    email_column_id: str | None = None,
+) -> str:
+    resolved_email_column_id = email_column_id or await resolve_column_id_by_type(
+        board_id, "email"
+    )
     body = await _post_graphql(
         ITEMS_BY_IDS_QUERY,
-        {"ids": [item_id], "columnIds": [EMAIL_COLUMN_ID]},
+        {"ids": [item_id], "columnIds": [resolved_email_column_id]},
     )
     items = body.get("data", {}).get("items") or []
     if not items:
         return ""
     email_column = next(
-        (col for col in items[0].get("column_values") or [] if col.get("id") == EMAIL_COLUMN_ID),
+        (col for col in items[0].get("column_values") or [] if col.get("id") == resolved_email_column_id),
         None,
     )
     return _email_from_column(email_column or {})
 
 
-async def _fetch_item_brief(item_id: str) -> FoundItem | None:
+async def _fetch_item_brief(
+    item_id: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+) -> FoundItem | None:
+    email_column_id = await resolve_column_id_by_type(board_id, "email")
     body = await _post_graphql(
         ITEMS_BY_IDS_QUERY,
-        {"ids": [item_id], "columnIds": [EMAIL_COLUMN_ID]},
+        {"ids": [item_id], "columnIds": [email_column_id]},
     )
     items = body.get("data", {}).get("items") or []
     if not items:
@@ -1116,13 +1234,20 @@ async def find_existing_item_by_email(
     if not normalized:
         return None
 
+    email_column_id = await resolve_column_id_by_type(board_id, "email")
+
     email_items = await _query_items_by_column(
-        EMAIL_COLUMN_ID, [normalized], board_id=board_id
+        email_column_id, [normalized], board_id=board_id
     )
     if not email_items:
         return None
 
-    match = await _disambiguate_email_matches(email_items, normalized)
+    match = await _disambiguate_email_matches(
+        email_items,
+        normalized,
+        board_id=board_id,
+        email_column_id=email_column_id,
+    )
     if match is not None:
         return match
 
@@ -1138,12 +1263,22 @@ async def find_existing_item_by_email(
 async def _disambiguate_phone_matches(
     items: list[FoundItem],
     normalized_phone: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+    phone_column_id: str | None = None,
 ) -> FoundItem | None:
     if not items:
         return None
+    resolved_phone_column_id = phone_column_id or await resolve_column_id_by_type(
+        board_id, "phone"
+    )
     if len(items) == 1:
         item = items[0]
-        item_phones = await _fetch_item_phone_digits(item.item_id)
+        item_phones = await _fetch_item_phone_digits(
+            item.item_id,
+            board_id=board_id,
+            phone_column_id=resolved_phone_column_id,
+        )
         if item_phones == normalized_phone or not item_phones:
             return item
         logger.warning(
@@ -1159,7 +1294,7 @@ async def _disambiguate_phone_matches(
         ITEMS_BY_IDS_QUERY,
         {
             "ids": item_ids,
-            "columnIds": [PHONE_COLUMN_ID],
+            "columnIds": [resolved_phone_column_id],
         },
     )
     monday_items = body.get("data", {}).get("items") or []
@@ -1168,7 +1303,7 @@ async def _disambiguate_phone_matches(
         item_id = str(monday_item["id"])
         name = str(monday_item.get("name") or "")
         phone_column = next(
-            (col for col in monday_item.get("column_values") or [] if col.get("id") == PHONE_COLUMN_ID),
+            (col for col in monday_item.get("column_values") or [] if col.get("id") == resolved_phone_column_id),
             None,
         )
         digits = _phone_digits_from_column(phone_column or {})
@@ -1193,16 +1328,24 @@ async def _disambiguate_phone_matches(
     return None
 
 
-async def _fetch_item_phone_digits(item_id: str) -> str:
+async def _fetch_item_phone_digits(
+    item_id: str,
+    *,
+    board_id: str = MAIN_HUB_BOARD_ID,
+    phone_column_id: str | None = None,
+) -> str:
+    resolved_phone_column_id = phone_column_id or await resolve_column_id_by_type(
+        board_id, "phone"
+    )
     body = await _post_graphql(
         ITEMS_BY_IDS_QUERY,
-        {"ids": [item_id], "columnIds": [PHONE_COLUMN_ID]},
+        {"ids": [item_id], "columnIds": [resolved_phone_column_id]},
     )
     items = body.get("data", {}).get("items") or []
     if not items:
         return ""
     phone_column = next(
-        (col for col in items[0].get("column_values") or [] if col.get("id") == PHONE_COLUMN_ID),
+        (col for col in items[0].get("column_values") or [] if col.get("id") == resolved_phone_column_id),
         None,
     )
     return _phone_digits_from_column(phone_column or {})
@@ -1224,10 +1367,16 @@ async def find_existing_item_by_contact(
         email_match = await find_existing_item_by_email(email, board_id=board_id)
 
     if phone and email_match is None:
+        phone_column_id = await resolve_column_id_by_type(board_id, "phone")
         phone_items = await _query_items_by_column(
-            PHONE_COLUMN_ID, [phone], board_id=board_id
+            phone_column_id, [phone], board_id=board_id
         )
-        phone_match = await _disambiguate_phone_matches(phone_items, phone)
+        phone_match = await _disambiguate_phone_matches(
+            phone_items,
+            phone,
+            board_id=board_id,
+            phone_column_id=phone_column_id,
+        )
 
     if email_match and phone_match and email_match.item_id != phone_match.item_id:
         logger.warning(
@@ -1402,7 +1551,7 @@ async def upsert_candidate_item(
 
     if not has_email and not has_phone:
         if source_item_id:
-            existing = await _fetch_item_brief(source_item_id)
+            existing = await _fetch_item_brief(source_item_id, board_id=board_id)
             if existing is not None:
                 item_id = await update_candidate_item(
                     existing.item_id,
@@ -1442,16 +1591,24 @@ async def upsert_candidate_item(
 
     if existing is None and has_phone:
         phone = normalize_phone(candidate.phone)
+        phone_column_id = await resolve_column_id_by_type(board_id, "phone")
         phone_items = await _query_items_by_column(
-            PHONE_COLUMN_ID, [phone], board_id=board_id
+            phone_column_id, [phone], board_id=board_id
         )
-        existing = await _disambiguate_phone_matches(phone_items, phone)
+        existing = await _disambiguate_phone_matches(
+            phone_items,
+            phone,
+            board_id=board_id,
+            phone_column_id=phone_column_id,
+        )
 
     if existing is None and source_item_id:
-        source_item = await _fetch_item_brief(source_item_id)
+        source_item = await _fetch_item_brief(source_item_id, board_id=board_id)
         if source_item is not None:
             if has_email:
-                item_email = await _fetch_item_email(source_item.item_id)
+                item_email = await _fetch_item_email(
+                    source_item.item_id, board_id=board_id
+                )
                 normalized_email = normalize_email(candidate.email)
                 if item_email and item_email != normalized_email:
                     logger.warning(

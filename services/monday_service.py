@@ -352,13 +352,16 @@ query ($ids: [ID!]!) {
     column_values {
       id
       type
-      text
-      value
       ... on FileValue {
         files {
-          id
-          name
-          url
+          ... on FileAssetValue {
+            name
+            created_at
+            asset {
+              public_url
+              file_extension
+            }
+          }
         }
       }
     }
@@ -1482,24 +1485,31 @@ def _normalize_cv_filename(
     item_id: str,
     file_entry: dict[str, Any],
 ) -> tuple[str, str]:
-    """Parse a FileValue file entry into (url, filename). Raises ValueError if invalid."""
+    """Parse a FileAssetValue entry into (public_url, filename). Raises ValueError if invalid."""
     name = str(file_entry.get("name") or "").strip()
-    url = str(file_entry.get("url") or "").strip()
+    asset = file_entry.get("asset") or {}
+    public_url = str(asset.get("public_url") or "").strip()
+    extension = str(asset.get("file_extension") or "").strip().lower()
 
-    if not url:
-        raise ValueError(f"CV file on item {item_id} has no url.")
+    if not public_url:
+        raise ValueError(f"CV file on item {item_id} has no public_url.")
+
+    if not name and extension:
+        name = f"cv.{extension}"
 
     if not name:
-        url_path = Path(url.split("?")[0])
-        name = url_path.name or "cv.pdf"
+        raise ValueError(f"CV file on item {item_id} has no filename.")
 
     suffix = Path(name).suffix.lower()
     if suffix not in {".pdf", ".docx"}:
-        raise ValueError(
-            f"Unsupported CV file type on item {item_id}: {name!r}"
-        )
+        if extension in {"pdf", "docx"}:
+            name = f"{Path(name).stem}.{extension}" if Path(name).stem else f"cv.{extension}"
+        else:
+            raise ValueError(
+                f"Unsupported CV file type on item {item_id}: {name!r} (extension {extension!r})"
+            )
 
-    return url, name
+    return public_url, name
 
 
 def _is_file_column_value(column: dict[str, Any]) -> bool:

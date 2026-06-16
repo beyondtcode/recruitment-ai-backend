@@ -24,14 +24,17 @@ def _file_column(
     name: str = "resume.pdf",
     url: str = "https://cdn.monday.com/files/resume.pdf",
 ) -> dict:
+    extension = name.rsplit(".", 1)[-1] if "." in name else "pdf"
     return {
         "id": column_id,
         "type": "file",
         "files": [
             {
-                "id": "file-1",
                 "name": name,
-                "url": url,
+                "asset": {
+                    "public_url": url,
+                    "file_extension": extension,
+                },
             }
         ],
     }

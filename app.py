@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 async def _run_daily_notetaker_batch() -> None:
     logger.info("Daily notetaker batch started")
     try:
-        summary = await process_recent_notetaker_meetings(hours=24)
+        # TODO: revert to hours=24 after testing
+        summary = await process_recent_notetaker_meetings(hours=168)
         logger.info(
             "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
             summary["processed_count"],

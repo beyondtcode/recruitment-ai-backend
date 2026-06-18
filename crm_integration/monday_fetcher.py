@@ -194,6 +194,7 @@ async def fetch_notetaker_meetings_since(
     seen_keys: set[tuple[str, str]] = set()
     cursor: str | None = None
     seen_cursors: set[str] = set()
+    raw_total = 0
 
     logger.info(
         "Fetching notetaker meetings since %s",
@@ -204,6 +205,7 @@ async def fetch_notetaker_meetings_since(
         meetings, next_cursor, has_next_page = await _fetch_notetaker_meeting_page(
             cursor=cursor,
         )
+        raw_total += len(meetings)
         for meeting in meetings:
             meeting_dt = _parse_meeting_datetime(meeting.get("start_time"))
             if meeting_dt is None or meeting_dt < since_local:
@@ -224,6 +226,10 @@ async def fetch_notetaker_meetings_since(
         seen_cursors.add(next_cursor)
         cursor = next_cursor
 
+    logger.info(
+        "Notetaker API returned %d meetings before date filtering",
+        raw_total,
+    )
     logger.info("Fetched %d notetaker meetings since %s", len(payloads), since_local.isoformat())
     return payloads
 

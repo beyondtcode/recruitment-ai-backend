@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import Any, Literal
 from crm_integration.config import CrmSettings, get_crm_settings
-from crm_integration.lookup import ContactMatch, find_contact_by_emails
+from crm_integration.lookup import ContactMatch
 from crm_integration.monday_client import (
     CREATE_ITEM_MUTATION,
     FIND_ITEMS_LIMIT,
@@ -214,28 +214,13 @@ async def gather_past_meeting_context(
     before_date: date,
     settings: CrmSettings | None = None,
 ) -> str:
-    """Collect formatted summaries from past Meeting Notes items for the given participants."""
+    """Collect formatted summaries from past Meeting Notes items matching participant emails."""
     settings = settings or get_crm_settings()
     emails = external_participant_emails(participant_emails)
     if not emails:
         return ""
 
     item_ids: set[str] = set()
-
-    match = await find_contact_by_emails(emails, settings=settings)
-    if match:
-        relation_column_id = (
-            settings.monday_crm_meeting_client_relation_column_id
-            if match.match_type == "client"
-            else settings.monday_crm_meeting_lead_relation_column_id
-        )
-        related_ids = await _query_meeting_note_items_by_column(
-            settings.monday_crm_meeting_notes_board_id,
-            relation_column_id,
-            match.item_id,
-            settings,
-        )
-        item_ids.update(related_ids)
 
     for email in emails:
         email_ids = await _query_meeting_note_items_by_column(

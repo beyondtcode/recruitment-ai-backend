@@ -57,7 +57,7 @@ TEST_CRM_SETTINGS = CrmSettings(
     future_meetings_board_id="5098793829",
     future_meetings_date_column_id="date4",
     future_meetings_status_column_id="status",
-    future_meetings_participants_column_id="text_mm4e3rd9",
+    future_meetings_participants_column_id="text_mm4dmn71",
     future_meetings_brief_column_id="text_mm4eda8z",
 )
 
@@ -670,7 +670,7 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
                     "value": json.dumps({"index": status_index}),
                 },
                 {
-                    "id": "text_mm4e3rd9",
+                    "id": "text_mm4dmn71",
                     "text": participants,
                     "value": participants,
                 },

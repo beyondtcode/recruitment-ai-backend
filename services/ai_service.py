@@ -99,6 +99,20 @@ SYSTEM_PROMPT = """You are an elite Israeli Tech Recruiter. Your task is to extr
 
 Use only exact enum labels defined in the tool schema. Use null for unknown optional fields and empty lists for unknown list fields."""
 
+MEETING_BRIEF_MAX_TOKENS = 2048
+
+MEETING_BRIEF_SYSTEM_PROMPT = """You are an expert recruitment and CRM assistant for an Israeli tech recruitment agency.
+
+Your task is to prepare a concise, sharp briefing in Hebrew for an upcoming client meeting.
+
+The briefing must cover:
+1. What happened in past meetings (based on the historical notes provided).
+2. The current status with the client.
+3. Key focus points or warnings for today's meeting.
+
+Write in clear, professional Hebrew. Be direct and actionable — recruiters should be able to scan the brief in under a minute.
+If no historical meeting notes are provided, write a short, friendly note stating that no previous meetings were found for these participants, and suggest what to cover in a first or follow-up meeting."""
+
 _client: AsyncAnthropic | None = None
 
 
@@ -264,6 +278,52 @@ async def _call_claude(cv_text: str, *, retry_message: str | None = None) -> dic
         tool_choice={"type": "tool", "name": TOOL_NAME},
     )
     return _parse_tool_input(response)
+
+
+def _extract_text_response(response: Any) -> str:
+    parts: list[str] = []
+    for block in response.content:
+        if block.type == "text":
+            parts.append(block.text)
+    text = "\n".join(parts).strip()
+    if not text:
+        raise ValueError("Claude response did not include text content")
+    return text
+
+
+async def generate_meeting_brief(
+    past_meetings_context: str,
+    current_meeting_title: str,
+    *,
+    participant_emails: list[str] | None = None,
+) -> str:
+    """Generate a Hebrew preparation brief for an upcoming meeting."""
+    title = current_meeting_title.strip()
+    if not title:
+        raise ValueError("Meeting title is empty.")
+
+    context = past_meetings_context.strip()
+    if context:
+        user_content = (
+            f"Upcoming meeting title: {title}\n\n"
+            f"Historical meeting notes:\n{context}\n\n"
+            "Write the preparation briefing in Hebrew."
+        )
+    else:
+        emails_text = ", ".join(participant_emails or []) or "לא צוינו"
+        user_content = (
+            f"Upcoming meeting title: {title}\n\n"
+            f"No previous meeting notes were found for these participants: {emails_text}.\n\n"
+            "Write a short, friendly Hebrew note for the recruiter."
+        )
+
+    response = await _get_client().messages.create(
+        model=settings.anthropic_model,
+        max_tokens=MEETING_BRIEF_MAX_TOKENS,
+        system=MEETING_BRIEF_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    return _extract_text_response(response)
 
 
 async def analyze_cv_with_claude(cv_text: str) -> CandidateSchema:

@@ -25,6 +25,11 @@ class CrmSettings(BaseSettings):
     monday_crm_meeting_action_items_column_id: str = "long_text_mm4dh8vv"
     monday_crm_meeting_type_column_id: str = "dropdown_mm4dpky"
     monday_crm_meeting_people_column_id: str = "multiple_person_mm4de6qm"
+    future_meetings_board_id: str = "5098793829"
+    future_meetings_date_column_id: str = "date4"
+    future_meetings_status_column_id: str = "status"
+    future_meetings_participants_column_id: str = "text_mm4e3rd9"
+    future_meetings_brief_column_id: str = "text_mm4eda8z"
 
 
 @lru_cache

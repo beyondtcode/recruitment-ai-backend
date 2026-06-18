@@ -15,6 +15,36 @@ query ($boardId: ID!, $limit: Int!, $columns: [ItemsPageByColumnValuesQuery!]!) 
 }
 """
 
+ITEMS_PAGE_BY_COLUMN_VALUES_WITH_COLUMNS_QUERY = """
+query ($boardId: ID!, $limit: Int!, $columns: [ItemsPageByColumnValuesQuery!]!, $columnIds: [String!]!) {
+  items_page_by_column_values(board_id: $boardId, limit: $limit, columns: $columns) {
+    items {
+      id
+      name
+      column_values(ids: $columnIds) {
+        id
+        text
+        value
+      }
+    }
+  }
+}
+"""
+
+ITEMS_BY_IDS_QUERY = """
+query ($ids: [ID!]!, $columnIds: [String!]!) {
+  items(ids: $ids) {
+    id
+    name
+    column_values(ids: $columnIds) {
+      id
+      text
+      value
+    }
+  }
+}
+"""
+
 CREATE_ITEM_MUTATION = """
 mutation ($boardId: ID!, $groupId: String!, $itemName: String!, $columnValues: JSON!) {
   create_item (

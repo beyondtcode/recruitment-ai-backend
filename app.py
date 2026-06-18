@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from crm_integration.batch import process_recent_notetaker_meetings
+from crm_integration.batch import process_morning_briefs, process_recent_notetaker_meetings
 from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
@@ -41,6 +41,20 @@ async def _run_daily_notetaker_batch() -> None:
         logger.exception("Daily notetaker batch failed")
 
 
+async def _run_morning_briefs() -> None:
+    logger.info("Morning briefing batch started")
+    try:
+        summary = await process_morning_briefs()
+        logger.info(
+            "Morning briefing batch finished: processed=%d skipped=%d errors=%d",
+            summary["processed_count"],
+            summary["skipped_count"],
+            summary["error_count"],
+        )
+    except Exception:
+        logger.exception("Morning briefing batch failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone=ISR_TZ)
@@ -52,8 +66,18 @@ async def lifespan(app: FastAPI):
         id="daily_notetaker_batch",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_morning_briefs,
+        trigger="cron",
+        hour=17,
+        minute=15,
+        id="morning_briefing_batch",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("APScheduler started: daily notetaker batch at 00:00 Asia/Jerusalem")
+    logger.info(
+        "APScheduler started: daily notetaker batch at 00:00, morning briefings at 17:15 Asia/Jerusalem"
+    )
     yield
     scheduler.shutdown(wait=False)
     logger.info("APScheduler shut down")

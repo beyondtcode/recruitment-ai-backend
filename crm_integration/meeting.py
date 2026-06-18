@@ -6,10 +6,11 @@ import re
 from datetime import date
 from typing import Any, Literal
 from crm_integration.config import CrmSettings, get_crm_settings
-from crm_integration.lookup import ContactMatch
+from crm_integration.lookup import ContactMatch, find_contact_by_emails
 from crm_integration.monday_client import (
     CREATE_ITEM_MUTATION,
     FIND_ITEMS_LIMIT,
+    ITEMS_BY_IDS_QUERY,
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
     USERS_BY_EMAILS_QUERY,
     execute_graphql,
@@ -118,6 +119,176 @@ def external_participant_emails(participant_emails: list[str]) -> list[str]:
         for email in participant_emails
         if email and not email.strip().lower().endswith(INTERNAL_EMAIL_DOMAIN)
     ]
+
+
+def parse_comma_separated_emails(raw: str) -> list[str]:
+    """Parse a comma-separated email list from a Monday text column."""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def status_column_index(column: dict[str, Any]) -> int | None:
+    """Extract the status index from a Monday status column value."""
+    value = column.get("value")
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    index = parsed.get("index")
+    return int(index) if index is not None else None
+
+
+def column_text(column: dict[str, Any]) -> str:
+    """Return human-readable text from a Monday column value."""
+    text = str(column.get("text") or "").strip()
+    if text:
+        return text
+
+    value = column.get("value")
+    if not value:
+        return ""
+
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    if isinstance(parsed, dict):
+        for key in ("text", "date", "email"):
+            field_value = parsed.get(key)
+            if field_value:
+                return str(field_value).strip()
+    return ""
+
+
+def date_column_value(column: dict[str, Any]) -> date | None:
+    """Parse a Monday date column into a date object."""
+    text = column_text(column)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _column_by_id(item: dict[str, Any], column_id: str) -> dict[str, Any] | None:
+    for column in item.get("column_values") or []:
+        if str(column.get("id")) == column_id:
+            return column
+    return None
+
+
+async def _query_meeting_note_items_by_column(
+    board_id: str,
+    column_id: str,
+    column_value: str,
+    settings: CrmSettings,
+) -> list[str]:
+    body = await execute_graphql(
+        ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+        {
+            "boardId": board_id,
+            "limit": FIND_ITEMS_LIMIT,
+            "columns": [{"column_id": column_id, "column_values": [column_value]}],
+        },
+        column_ids=[column_id],
+    )
+    items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
+    if len(items) >= FIND_ITEMS_LIMIT:
+        logger.warning(
+            "Meeting notes query hit FIND_ITEMS_LIMIT=%d for column %s value %r",
+            FIND_ITEMS_LIMIT,
+            column_id,
+            column_value,
+        )
+    return [str(item["id"]) for item in items if item.get("id") is not None]
+
+
+async def gather_past_meeting_context(
+    participant_emails: list[str],
+    *,
+    before_date: date,
+    settings: CrmSettings | None = None,
+) -> str:
+    """Collect formatted summaries from past Meeting Notes items for the given participants."""
+    settings = settings or get_crm_settings()
+    emails = external_participant_emails(participant_emails)
+    if not emails:
+        return ""
+
+    item_ids: set[str] = set()
+
+    match = await find_contact_by_emails(emails, settings=settings)
+    if match:
+        relation_column_id = (
+            settings.monday_crm_meeting_client_relation_column_id
+            if match.match_type == "client"
+            else settings.monday_crm_meeting_lead_relation_column_id
+        )
+        related_ids = await _query_meeting_note_items_by_column(
+            settings.monday_crm_meeting_notes_board_id,
+            relation_column_id,
+            match.item_id,
+            settings,
+        )
+        item_ids.update(related_ids)
+
+    for email in emails:
+        email_ids = await _query_meeting_note_items_by_column(
+            settings.monday_crm_meeting_notes_board_id,
+            settings.monday_crm_meeting_external_participants_column_id,
+            email,
+            settings,
+        )
+        item_ids.update(email_ids)
+
+    if not item_ids:
+        return ""
+
+    body = await execute_graphql(
+        ITEMS_BY_IDS_QUERY,
+        {
+            "ids": list(item_ids),
+            "columnIds": [
+                settings.monday_crm_meeting_date_column_id,
+                settings.monday_crm_meeting_summary_column_id,
+            ],
+        },
+        column_ids=[
+            settings.monday_crm_meeting_date_column_id,
+            settings.monday_crm_meeting_summary_column_id,
+        ],
+    )
+    items = body.get("data", {}).get("items") or []
+
+    past_meetings: list[tuple[date, str, str]] = []
+    for item in items:
+        date_column = _column_by_id(item, settings.monday_crm_meeting_date_column_id)
+        summary_column = _column_by_id(item, settings.monday_crm_meeting_summary_column_id)
+        meeting_date = date_column_value(date_column or {})
+        if meeting_date is None or meeting_date >= before_date:
+            continue
+
+        summary = extract_meeting_summary_intro(column_text(summary_column or {}))
+        if not summary:
+            continue
+
+        title = str(item.get("name") or "").strip() or "פגישה ללא שם"
+        past_meetings.append((meeting_date, title, summary))
+
+    if not past_meetings:
+        return ""
+
+    past_meetings.sort(key=lambda entry: entry[0], reverse=True)
+    sections = [
+        f"### {title} ({meeting_date.isoformat()})\n{summary}"
+        for meeting_date, title, summary in past_meetings
+    ]
+    return "\n\n".join(sections)
 
 
 def internal_participant_emails(participant_emails: list[str]) -> list[str]:

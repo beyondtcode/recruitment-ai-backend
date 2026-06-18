@@ -30,8 +30,7 @@ logger = logging.getLogger(__name__)
 async def _run_daily_notetaker_batch() -> None:
     logger.info("Daily notetaker batch started")
     try:
-        # TODO: revert to hours=24 after testing
-        summary = await process_recent_notetaker_meetings(hours=168)
+        summary = await process_recent_notetaker_meetings(hours=24)
         logger.info(
             "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
             summary["processed_count"],
@@ -48,13 +47,13 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _run_daily_notetaker_batch,
         trigger="cron",
-        hour=15,
-        minute=40,
+        hour=0,
+        minute=0,
         id="daily_notetaker_batch",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("APScheduler started: daily notetaker batch at 15:40 Asia/Jerusalem")
+    logger.info("APScheduler started: daily notetaker batch at 00:00 Asia/Jerusalem")
     yield
     scheduler.shutdown(wait=False)
     logger.info("APScheduler shut down")

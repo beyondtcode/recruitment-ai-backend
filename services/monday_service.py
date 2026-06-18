@@ -945,11 +945,11 @@ def build_update_column_values(
     return column_values
 
 
-def _monday_headers(api_key: str) -> dict[str, str]:
+def _monday_headers(api_key: str, *, api_version: str | None = None) -> dict[str, str]:
     return {
         "Authorization": api_key,
         "Content-Type": "application/json",
-        "API-Version": MONDAY_API_VERSION,
+        "API-Version": api_version or MONDAY_API_VERSION,
     }
 
 
@@ -1014,6 +1014,7 @@ async def _post_graphql(
     variables: dict[str, Any],
     *,
     column_ids: list[str] | None = None,
+    api_version: str | None = None,
 ) -> dict[str, Any]:
     api_key = _get_api_key()
     payload = {"query": query, "variables": variables}
@@ -1022,7 +1023,7 @@ async def _post_graphql(
         response = await client.post(
             MONDAY_API_URL,
             json=payload,
-            headers=_monday_headers(api_key),
+            headers=_monday_headers(api_key, api_version=api_version),
         )
 
     try:
@@ -1046,6 +1047,22 @@ async def _post_graphql(
     body = response.json()
     _raise_for_monday_errors(body, column_ids=column_ids)
     return body
+
+
+async def post_graphql(
+    query: str,
+    variables: dict[str, Any],
+    *,
+    column_ids: list[str] | None = None,
+    api_version: str | None = None,
+) -> dict[str, Any]:
+    """Public GraphQL transport for other modules (e.g. crm_integration)."""
+    return await _post_graphql(
+        query,
+        variables,
+        column_ids=column_ids,
+        api_version=api_version,
+    )
 
 
 def _looks_like_dropdown_label_error(exc: Exception) -> bool:

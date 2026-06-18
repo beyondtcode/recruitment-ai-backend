@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
+from datetime import date, timedelta
 from typing import Any
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from crm_integration.batch import process_recent_notetaker_meetings
+from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
+from crm_integration.pipeline import process_nodetaker_webhook
+from crm_integration.routes import router as crm_router
 from services.cv_pipeline import run_webhook_pipeline_sync
 
 load_dotenv()
@@ -19,7 +26,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Recruitment AI Backend", version="1.0.0")
+
+async def _run_daily_notetaker_batch() -> None:
+    logger.info("Daily notetaker batch started")
+    try:
+        summary = await process_recent_notetaker_meetings(hours=24)
+        logger.info(
+            "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
+            summary["processed_count"],
+            summary["skipped_count"],
+            summary["error_count"],
+        )
+    except Exception:
+        logger.exception("Daily notetaker batch failed")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = AsyncIOScheduler(timezone=ISR_TZ)
+    scheduler.add_job(
+        _run_daily_notetaker_batch,
+        trigger="cron",
+        hour=0,
+        minute=0,
+        id="daily_notetaker_batch",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("APScheduler started: daily notetaker batch at 00:00 Asia/Jerusalem")
+    yield
+    scheduler.shutdown(wait=False)
+    logger.info("APScheduler shut down")
+
+
+app = FastAPI(
+    title="Recruitment AI Backend",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+app.include_router(crm_router)
 
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
 
@@ -111,6 +156,59 @@ def _schedule_cv_pipeline(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/test-fetch-sarah")
+async def test_fetch_sarah() -> JSONResponse:
+    """Manual test: pull yesterday's Sarah meeting from Notetaker and run the CRM pipeline."""
+    yesterday = date.today() - timedelta(days=1)
+    email1 = "dev@beyondtcode.com"
+    email2 = "saramauda06@gmail.com"
+
+    logger.info(
+        "test-fetch-sarah: searching for meeting between %s and %s on %s",
+        email1,
+        email2,
+        yesterday.isoformat(),
+    )
+
+    payload = await fetch_meeting_by_participants(email1, email2, yesterday)
+    if payload is None:
+        return JSONResponse(
+            content={
+                "status": "not_found",
+                "search_date": yesterday.isoformat(),
+                "participants": [email1, email2],
+            }
+        )
+
+    logger.info(
+        "test-fetch-sarah: found meeting title=%r date=%s summary_len=%d action_items_len=%d",
+        payload.meeting_title,
+        payload.meeting_date.isoformat(),
+        len(payload.meeting_summary),
+        len(payload.action_items),
+    )
+
+    try:
+        result = await process_nodetaker_webhook(payload)
+        return JSONResponse(
+            content={
+                "status": "processed",
+                "meeting": payload.model_dump(mode="json"),
+                "pipeline": result.model_dump(mode="json"),
+            }
+        )
+    except Exception as exc:
+        logger.exception("test-fetch-sarah: pipeline failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(exc),
+                "meeting": payload.model_dump(mode="json"),
+            },
+        )
 
 
 @app.post("/monday-webhook")

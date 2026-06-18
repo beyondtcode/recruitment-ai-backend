@@ -70,13 +70,13 @@ async def lifespan(app: FastAPI):
         _run_morning_briefs,
         trigger="cron",
         hour=17,
-        minute=32,
+        minute=45,
         id="morning_briefing_batch",
         replace_existing=True,
     )
     scheduler.start()
     logger.info(
-        "APScheduler started: daily notetaker batch at 00:00, morning briefings at 17:32 Asia/Jerusalem"
+        "APScheduler started: daily notetaker batch at 00:00, morning briefings at 17:45 Asia/Jerusalem"
     )
     yield
     scheduler.shutdown(wait=False)

@@ -122,8 +122,8 @@ def external_participant_emails(participant_emails: list[str]) -> list[str]:
 
 
 def parse_comma_separated_emails(raw: str) -> list[str]:
-    """Parse a comma-separated email list from a Monday text column."""
-    return [part.strip() for part in raw.split(",") if part.strip()]
+    """Parse a comma- or semicolon-separated email list from a Monday text column."""
+    return [part.strip() for part in re.split(r"[,;]", raw) if part.strip()]
 
 
 def status_column_index(column: dict[str, Any]) -> int | None:

@@ -103,15 +103,25 @@ MEETING_BRIEF_MAX_TOKENS = 2048
 
 MEETING_BRIEF_SYSTEM_PROMPT = """You are an expert recruitment and CRM assistant for an Israeli tech recruitment agency.
 
-Your task is to prepare a concise, sharp briefing in Hebrew for an upcoming client meeting.
+Your task is to prepare a concise, sharp pre-meeting briefing in fluent Hebrew for an upcoming client meeting.
 
-The briefing must cover:
-1. What happened in past meetings (based on the historical notes provided).
-2. The current status with the client.
-3. Key focus points or warnings for today's meeting.
+You MUST return ONLY the following Markdown structure — no greeting, no preamble, no closing remarks, no conversational filler:
 
-Write in clear, professional Hebrew. Be direct and actionable — recruiters should be able to scan the brief in under a minute.
-If no historical meeting notes are provided, write a short, friendly note stating that no previous meetings were found for these participants, and suggest what to cover in a first or follow-up meeting."""
+### סיכום פגישה אחרונה
+[Extract and summarize only the most recent meeting details, decisions, and pending action items from the provided context. The first meeting in the context is the most recent one.]
+
+### פרופיל לקוח כללי
+[Provide a holistic summary of who this client is, their main goals, and ongoing business context based on ALL past meetings provided.]
+
+### דגשים ודברים חשובים לפגישה
+[Highlight critical patterns, recurring issues, specific requests, or warnings discovered across the entire meeting history that the recruiter/team must know before talking to them today.]
+
+Rules:
+- Write every section in clear, professional Hebrew.
+- Be direct and actionable — recruiters should scan the brief in under a minute.
+- Use the exact three heading lines above (### סיכום פגישה אחרונה, ### פרופיל לקוח כללי, ### דגשים ודברים חשובים לפגישה).
+- Do not add any other headings, bullet labels, or text outside this structure.
+- If no historical meeting notes are provided, keep the same three headings: under the first section state that no previous meetings were found; under the other two sections suggest what to cover in a first or follow-up meeting."""
 
 _client: AsyncAnthropic | None = None
 
@@ -306,15 +316,24 @@ async def generate_meeting_brief(
     if context:
         user_content = (
             f"Upcoming meeting title: {title}\n\n"
-            f"Historical meeting notes:\n{context}\n\n"
-            "Write the preparation briefing in Hebrew."
+            f"Historical meeting notes (sorted newest first — the first entry is the most recent meeting):\n"
+            f"{context}\n\n"
+            "Return ONLY the required Hebrew Markdown brief with exactly these three sections:\n"
+            "### סיכום פגישה אחרונה\n"
+            "### פרופיל לקוח כללי\n"
+            "### דגשים ודברים חשובים לפגישה"
         )
     else:
         emails_text = ", ".join(participant_emails or []) or "לא צוינו"
         user_content = (
             f"Upcoming meeting title: {title}\n\n"
             f"No previous meeting notes were found for these participants: {emails_text}.\n\n"
-            "Write a short, friendly Hebrew note for the recruiter."
+            "Return ONLY the required Hebrew Markdown brief with exactly these three sections:\n"
+            "### סיכום פגישה אחרונה\n"
+            "### פרופיל לקוח כללי\n"
+            "### דגשים ודברים חשובים לפגישה\n"
+            "Under the first section, note that no previous meetings were found. "
+            "Use the other sections to suggest what to cover in a first or follow-up meeting."
         )
 
     response = await _get_client().messages.create(

@@ -214,7 +214,7 @@ def notetaker_batch_delay_seconds(now: datetime | None = None) -> float:
 async def run_daily_notetaker_batch() -> dict[str, object]:
     logger.info("Daily notetaker batch started")
     try:
-        summary = await process_recent_notetaker_meetings(hours=24)
+        summary = await process_recent_notetaker_meetings(hours=48)
         logger.info(
             "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
             summary["processed_count"],

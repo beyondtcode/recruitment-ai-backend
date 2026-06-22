@@ -9,3 +9,5 @@ services:
         sync: false
       - key: MONDAY_API_KEY
         sync: false
+      - key: BATCH_SECRET
+        sync: false

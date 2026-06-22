@@ -30,6 +30,7 @@ class CrmSettings(BaseSettings):
     future_meetings_status_column_id: str = "status"
     future_meetings_participants_column_id: str = "text_mm4e3rd9"
     future_meetings_brief_column_id: str = "text_mm4eda8z"
+    batch_secret: str = ""
 
 
 @lru_cache

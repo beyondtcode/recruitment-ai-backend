@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from crm_integration.config import CrmSettings, get_crm_settings
 from crm_integration.meeting import (
@@ -26,6 +27,9 @@ from crm_integration.schemas import NodeTakerWebhookResult
 from services.ai_service import generate_meeting_brief
 
 logger = logging.getLogger(__name__)
+
+NOTETAKER_BATCH_DELAY_SECONDS = 300
+_notetaker_batch_task: asyncio.Task[None] | None = None
 
 NEW_MEETING_STATUS_INDEX = 0
 NEW_MEETING_STATUS_LABEL = "פגישה חדשה"
@@ -187,6 +191,75 @@ async def process_morning_briefs(
         len(errors),
     )
     return summary
+
+
+def notetaker_batch_run_at(now: datetime | None = None) -> datetime:
+    """Return the next 00:05 Asia/Jerusalem run time for the nightly batch."""
+    current = (now or datetime.now(ISR_TZ)).astimezone(ISR_TZ)
+    target = current.replace(hour=0, minute=5, second=0, microsecond=0)
+    if current >= target:
+        target += timedelta(days=1)
+    return target
+
+
+def notetaker_batch_delay_seconds(now: datetime | None = None) -> float:
+    """Seconds until the batch should run (00:05 ISR, or 5 minutes if already past)."""
+    current = (now or datetime.now(ISR_TZ)).astimezone(ISR_TZ)
+    target = current.replace(hour=0, minute=5, second=0, microsecond=0)
+    if current < target:
+        return (target - current).total_seconds()
+    return float(NOTETAKER_BATCH_DELAY_SECONDS)
+
+
+async def run_daily_notetaker_batch() -> dict[str, object]:
+    logger.info("Daily notetaker batch started")
+    try:
+        summary = await process_recent_notetaker_meetings(hours=24)
+        logger.info(
+            "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
+            summary["processed_count"],
+            summary["skipped_count"],
+            summary["error_count"],
+        )
+        return summary
+    except Exception:
+        logger.exception("Daily notetaker batch failed")
+        raise
+
+
+async def _run_notetaker_batch_after_delay(delay_seconds: float) -> None:
+    await asyncio.sleep(delay_seconds)
+    await run_daily_notetaker_batch()
+
+
+def schedule_notetaker_batch(
+    now: datetime | None = None,
+) -> tuple[datetime, Literal["scheduled", "already_scheduled"], float]:
+    """
+    Schedule the nightly Notetaker batch (idempotent until the current run completes).
+
+    Intended flow: external webhook at 00:00 wakes the server; batch runs at 00:05 ISR.
+    """
+    global _notetaker_batch_task
+
+    current = (now or datetime.now(ISR_TZ)).astimezone(ISR_TZ)
+    run_at = notetaker_batch_run_at(current)
+    delay_seconds = notetaker_batch_delay_seconds(current)
+
+    if _notetaker_batch_task is not None and not _notetaker_batch_task.done():
+        logger.info(
+            "Notetaker batch already scheduled; ignoring duplicate webhook (next run %s)",
+            run_at.isoformat(),
+        )
+        return run_at, "already_scheduled", delay_seconds
+
+    logger.info(
+        "Notetaker batch scheduled via webhook: runs at %s (in %.0f seconds)",
+        run_at.isoformat(),
+        delay_seconds,
+    )
+    _notetaker_batch_task = asyncio.create_task(_run_notetaker_batch_after_delay(delay_seconds))
+    return run_at, "scheduled", delay_seconds
 
 
 async def process_recent_notetaker_meetings(

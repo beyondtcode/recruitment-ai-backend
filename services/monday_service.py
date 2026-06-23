@@ -1015,8 +1015,9 @@ async def _post_graphql(
     *,
     column_ids: list[str] | None = None,
     api_version: str | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
-    api_key = _get_api_key()
+    api_key = api_key or _get_api_key()
     payload = {"query": query, "variables": variables}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1055,6 +1056,7 @@ async def post_graphql(
     *,
     column_ids: list[str] | None = None,
     api_version: str | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """Public GraphQL transport for other modules (e.g. crm_integration)."""
     return await _post_graphql(
@@ -1062,6 +1064,7 @@ async def post_graphql(
         variables,
         column_ids=column_ids,
         api_version=api_version,
+        api_key=api_key,
     )
 
 

@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from crm_integration.config import get_notetaker_api_keys
 from crm_integration.monday_client import execute_graphql
 from crm_integration.schemas import NodeTakerWebhookPayload
 from services.monday_service import normalize_email
@@ -15,12 +16,14 @@ ISR_TZ = ZoneInfo("Asia/Jerusalem")
 
 NOTETAKER_API_VERSION = "2026-04"
 NOTETAKER_PAGE_LIMIT = 100
+NOTETAKER_ACCESS_LEVELS = ("ALL", "SHARED_WITH_ACCOUNT", "SHARED_WITH_ME")
 
 NOTETAKER_MEETINGS_QUERY = """
 query ($limit: Int!, $cursor: String, $filters: MeetingsFilterInput) {
   notetaker {
     meetings(limit: $limit, cursor: $cursor, filters: $filters) {
       meetings {
+        id
         title
         start_time
         end_time
@@ -95,6 +98,16 @@ def _participant_emails(meeting: dict[str, Any]) -> set[str]:
     return emails
 
 
+def _meeting_dedupe_key(meeting: dict[str, Any]) -> str:
+    meeting_id = str(meeting.get("id") or "").strip()
+    if meeting_id:
+        return f"id:{meeting_id}"
+
+    title = str(meeting.get("title") or "").strip()
+    start_time = str(meeting.get("start_time") or "").strip()
+    return f"title_date:{title}|{start_time}"
+
+
 def _meeting_matches_participants(
     meeting: dict[str, Any],
     email1: str,
@@ -156,8 +169,10 @@ async def _fetch_notetaker_meeting_page(
     *,
     cursor: str | None = None,
     search: str | None = None,
+    access: str = "ALL",
+    api_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
-    filters: dict[str, Any] = {"access": "ALL"}
+    filters: dict[str, Any] = {"access": access}
     if search:
         filters["search"] = search
 
@@ -172,6 +187,7 @@ async def _fetch_notetaker_meeting_page(
         NOTETAKER_MEETINGS_QUERY,
         variables,
         api_version=NOTETAKER_API_VERSION,
+        api_key=api_key,
     )
     meetings_response = body.get("data", {}).get("notetaker", {}).get("meetings") or {}
     meetings = meetings_response.get("meetings") or []
@@ -179,6 +195,56 @@ async def _fetch_notetaker_meeting_page(
     next_cursor = page_info.get("cursor")
     has_next_page = bool(page_info.get("has_next_page"))
     return meetings, next_cursor, has_next_page
+
+
+async def _fetch_all_notetaker_meetings(
+    *,
+    search: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch and merge Notetaker meetings across all configured API keys and access levels.
+    """
+    api_keys = get_notetaker_api_keys()
+    merged: dict[str, dict[str, Any]] = {}
+
+    logger.info(
+        "Fetching notetaker meetings using %d API key(s)%s",
+        len(api_keys),
+        f" with search={search!r}" if search else "",
+    )
+
+    for key_index, api_key in enumerate(api_keys, start=1):
+        key_count = 0
+        for access in NOTETAKER_ACCESS_LEVELS:
+            cursor: str | None = None
+            seen_cursors: set[str] = set()
+            while True:
+                meetings, next_cursor, has_next_page = await _fetch_notetaker_meeting_page(
+                    cursor=cursor,
+                    search=search,
+                    access=access,
+                    api_key=api_key,
+                )
+                for meeting in meetings:
+                    dedupe_key = _meeting_dedupe_key(meeting)
+                    if dedupe_key not in merged:
+                        key_count += 1
+                    merged[dedupe_key] = meeting
+
+                if not has_next_page or not next_cursor or next_cursor in seen_cursors:
+                    break
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+
+        logger.info(
+            "Notetaker API key %d/%d contributed %d unique meeting(s)",
+            key_index,
+            len(api_keys),
+            key_count,
+        )
+
+    logger.info("Notetaker fetch merged %d unique meeting(s) total", len(merged))
+    return list(merged.values())
 
 
 async def fetch_notetaker_meetings_since(
@@ -191,38 +257,28 @@ async def fetch_notetaker_meetings_since(
     """
     since_local = since.astimezone(ISR_TZ)
     payloads: list[NodeTakerWebhookPayload] = []
-    seen_keys: set[tuple[str, str]] = set()
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
+    seen_keys: set[str] = set()
 
     logger.info(
         "Fetching notetaker meetings since %s",
         since_local.isoformat(),
     )
 
-    while True:
-        meetings, next_cursor, has_next_page = await _fetch_notetaker_meeting_page(
-            cursor=cursor,
-        )
-        for meeting in meetings:
-            meeting_dt = _parse_meeting_datetime(meeting.get("start_time"))
-            if meeting_dt is None or meeting_dt < since_local:
-                continue
-            try:
-                payload = meeting_to_payload(meeting)
-            except ValueError as exc:
-                logger.warning("Skipping notetaker meeting: %s", exc)
-                continue
-            dedupe_key = (payload.meeting_title.strip(), payload.meeting_date.isoformat())
-            if dedupe_key in seen_keys:
-                continue
-            seen_keys.add(dedupe_key)
-            payloads.append(payload)
-
-        if not has_next_page or not next_cursor or next_cursor in seen_cursors:
-            break
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+    meetings = await _fetch_all_notetaker_meetings()
+    for meeting in meetings:
+        meeting_dt = _parse_meeting_datetime(meeting.get("start_time"))
+        if meeting_dt is None or meeting_dt < since_local:
+            continue
+        try:
+            payload = meeting_to_payload(meeting)
+        except ValueError as exc:
+            logger.warning("Skipping notetaker meeting: %s", exc)
+            continue
+        dedupe_key = _meeting_dedupe_key(meeting)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        payloads.append(payload)
 
     logger.info("Fetched %d notetaker meetings since %s", len(payloads), since_local.isoformat())
     return payloads
@@ -248,29 +304,18 @@ async def fetch_meeting_by_participants(
         target_date.isoformat(),
     )
 
-    seen_cursors: set[str] = set()
     for search in [search_terms[0] if search_terms else None, None]:
-        cursor: str | None = None
-        while True:
-            meetings, next_cursor, has_next_page = await _fetch_notetaker_meeting_page(
-                cursor=cursor,
-                search=search,
-            )
-            for meeting in meetings:
-                if _meeting_matches_participants(meeting, email1, email2, target_date):
-                    payload = meeting_to_payload(meeting)
-                    logger.info(
-                        "Found notetaker meeting: title=%r date=%s participants=%s",
-                        payload.meeting_title,
-                        payload.meeting_date.isoformat(),
-                        payload.participant_emails,
-                    )
-                    return payload
-
-            if not has_next_page or not next_cursor or next_cursor in seen_cursors:
-                break
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
+        meetings = await _fetch_all_notetaker_meetings(search=search)
+        for meeting in meetings:
+            if _meeting_matches_participants(meeting, email1, email2, target_date):
+                payload = meeting_to_payload(meeting)
+                logger.info(
+                    "Found notetaker meeting: title=%r date=%s participants=%s",
+                    payload.meeting_title,
+                    payload.meeting_date.isoformat(),
+                    payload.participant_emails,
+                )
+                return payload
 
     logger.warning(
         "No notetaker meeting found for participants=%s on %s",

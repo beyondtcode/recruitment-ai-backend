@@ -31,8 +31,28 @@ class CrmSettings(BaseSettings):
     future_meetings_participants_column_id: str = "text_mm4e3rd9"
     future_meetings_brief_column_id: str = "text_mm4eda8z"
     batch_secret: str = ""
+    monday_notetaker_api_keys: str = ""
 
 
 @lru_cache
 def get_crm_settings() -> CrmSettings:
     return CrmSettings()
+
+
+def get_notetaker_api_keys(settings: CrmSettings | None = None) -> list[str]:
+    """
+    API keys used to pull Notetaker meetings.
+
+    Monday scopes Notetaker results to the authenticated user, so provide one token
+    per internal team member (comma-separated) to cover organization-wide meetings.
+    Falls back to ``MONDAY_API_KEY`` when unset.
+    """
+    from services.monday_service import _get_api_key
+
+    settings = settings or get_crm_settings()
+    raw = settings.monday_notetaker_api_keys.strip()
+    if raw:
+        keys = [part.strip() for part in raw.split(",") if part.strip()]
+        if keys:
+            return keys
+    return [_get_api_key()]

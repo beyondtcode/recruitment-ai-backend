@@ -16,7 +16,7 @@ from crm_integration.batch import (
     notetaker_batch_run_at,
     process_morning_briefs,
 )
-from crm_integration.config import CrmSettings
+from crm_integration.config import CrmSettings, get_notetaker_api_keys
 from crm_integration.lookup import ContactMatch, find_contact_by_emails
 from crm_integration.meeting import (
     _build_column_values,
@@ -33,6 +33,7 @@ from crm_integration.meeting import (
 )
 from crm_integration.monday_fetcher import (
     _format_action_items,
+    _meeting_dedupe_key,
     _meeting_matches_participants,
     fetch_meeting_by_participants,
     meeting_to_payload,
@@ -388,26 +389,34 @@ class MondayFetcherTests(unittest.TestCase):
         )
         self.assertEqual(formatted, "- Follow up\n- Share notes")
 
+    def test_meeting_dedupe_key_prefers_id(self):
+        self.assertEqual(
+            _meeting_dedupe_key({"id": "abc-123", "title": "A", "start_time": "2026-06-17"}),
+            "id:abc-123",
+        )
+
+    def test_meeting_dedupe_key_falls_back_to_title_and_start_time(self):
+        self.assertEqual(
+            _meeting_dedupe_key({"title": "Sync", "start_time": "2026-06-17T10:00:00Z"}),
+            "title_date:Sync|2026-06-17T10:00:00Z",
+        )
+
 
 class FetchMeetingByParticipantsTests(unittest.IsolatedAsyncioTestCase):
-    @patch("crm_integration.monday_fetcher._fetch_notetaker_meeting_page", new_callable=AsyncMock)
-    async def test_returns_payload_when_match_found(self, mock_page):
-        mock_page.return_value = (
-            [
-                {
-                    "title": "Sarah Sync",
-                    "start_time": "2026-06-17T10:00:00Z",
-                    "summary": "Quick sync.",
-                    "participants": [
-                        {"email": "dev@beyondtcode.com"},
-                        {"email": "saramauda06@gmail.com"},
-                    ],
-                    "action_items": [{"content": "Send recap"}],
-                }
-            ],
-            None,
-            False,
-        )
+    @patch("crm_integration.monday_fetcher._fetch_all_notetaker_meetings", new_callable=AsyncMock)
+    async def test_returns_payload_when_match_found(self, mock_fetch):
+        mock_fetch.return_value = [
+            {
+                "title": "Sarah Sync",
+                "start_time": "2026-06-17T10:00:00Z",
+                "summary": "Quick sync.",
+                "participants": [
+                    {"email": "dev@beyondtcode.com"},
+                    {"email": "saramauda06@gmail.com"},
+                ],
+                "action_items": [{"content": "Send recap"}],
+            }
+        ]
 
         payload = await fetch_meeting_by_participants(
             "dev@beyondtcode.com",
@@ -420,9 +429,9 @@ class FetchMeetingByParticipantsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.meeting_title, "Sarah Sync")
         self.assertEqual(payload.meeting_summary, "Quick sync.")
 
-    @patch("crm_integration.monday_fetcher._fetch_notetaker_meeting_page", new_callable=AsyncMock)
-    async def test_returns_none_when_no_match(self, mock_page):
-        mock_page.return_value = ([], None, False)
+    @patch("crm_integration.monday_fetcher._fetch_all_notetaker_meetings", new_callable=AsyncMock)
+    async def test_returns_none_when_no_match(self, mock_fetch):
+        mock_fetch.return_value = []
 
         payload = await fetch_meeting_by_participants(
             "dev@beyondtcode.com",
@@ -431,6 +440,40 @@ class FetchMeetingByParticipantsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(payload)
+
+
+class NotetakerApiKeysTests(unittest.TestCase):
+    @patch.dict("os.environ", {"MONDAY_API_KEY": "primary-key"}, clear=False)
+    def test_get_notetaker_api_keys_falls_back_to_monday_api_key(self):
+        settings = CrmSettings(
+            monday_crm_active_clients_board_id="1",
+            monday_crm_active_clients_email_column_id="email",
+            monday_crm_leads_board_id="2",
+            monday_crm_leads_email_column_id="email",
+            monday_crm_meeting_notes_board_id="3",
+            monday_crm_meeting_date_column_id="date",
+            monday_crm_meeting_client_relation_column_id="client",
+            monday_crm_meeting_lead_relation_column_id="lead",
+            monday_crm_meeting_doc_column_id="doc",
+            monday_crm_meeting_summary_column_id="summary",
+        )
+        self.assertEqual(get_notetaker_api_keys(settings), ["primary-key"])
+
+    def test_get_notetaker_api_keys_parses_comma_separated_list(self):
+        settings = CrmSettings(
+            monday_crm_active_clients_board_id="1",
+            monday_crm_active_clients_email_column_id="email",
+            monday_crm_leads_board_id="2",
+            monday_crm_leads_email_column_id="email",
+            monday_crm_meeting_notes_board_id="3",
+            monday_crm_meeting_date_column_id="date",
+            monday_crm_meeting_client_relation_column_id="client",
+            monday_crm_meeting_lead_relation_column_id="lead",
+            monday_crm_meeting_doc_column_id="doc",
+            monday_crm_meeting_summary_column_id="summary",
+            monday_notetaker_api_keys="key-a, key-b",
+        )
+        self.assertEqual(get_notetaker_api_keys(settings), ["key-a", "key-b"])
 
 
 class TestFetchSarahEndpointTests(unittest.TestCase):

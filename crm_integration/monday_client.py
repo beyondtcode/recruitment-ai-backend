@@ -112,10 +112,12 @@ async def execute_graphql(
     *,
     column_ids: list[str] | None = None,
     api_version: str | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     return await post_graphql(
         query,
         variables,
         column_ids=column_ids,
         api_version=api_version,
+        api_key=api_key,
     )

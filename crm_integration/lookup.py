@@ -10,12 +10,9 @@ from crm_integration.monday_client import (
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
     execute_graphql,
 )
-from services.monday_service import normalize_email
+from services.monday_service import _fetch_board_columns, normalize_email
 
 logger = logging.getLogger(__name__)
-
-# Active Clients / Leads boards expose two contact email columns.
-CONTACT_EMAIL_COLUMN_IDS = ("email_mm4k349w", "email_mm4kbdnc")
 
 
 @dataclass(frozen=True)
@@ -37,20 +34,61 @@ def _dedupe_emails(emails: list[str]) -> list[str]:
     return result
 
 
+def _is_column_not_found_error(exc: BaseException) -> bool:
+    return "column not found" in str(exc).casefold()
+
+
+async def _resolve_email_column_ids_for_board(
+    board_id: str,
+    configured_email_column_id: str,
+) -> tuple[str, ...]:
+    """Return email column IDs that exist on ``board_id``, configured column first."""
+    configured = configured_email_column_id.strip()
+    columns = await _fetch_board_columns(board_id)
+    if not columns:
+        return (configured,) if configured else ()
+
+    board_column_ids = {str(col.get("id") or "") for col in columns}
+    resolved: list[str] = []
+
+    if configured and configured in board_column_ids:
+        resolved.append(configured)
+
+    for col in columns:
+        col_id = str(col.get("id") or "")
+        if not col_id or col_id in resolved:
+            continue
+        col_type = str(col.get("type") or "").casefold()
+        if col_type == "email" or col_id.startswith("email_"):
+            resolved.append(col_id)
+
+    return tuple(resolved)
+
+
 async def _query_items_by_email(
     board_id: str,
     email_column_ids: tuple[str, ...],
     email: str,
 ) -> list[dict[str, str]]:
     for email_column_id in email_column_ids:
-        body = await execute_graphql(
-            ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
-            {
-                "boardId": board_id,
-                "limit": FIND_ITEMS_LIMIT,
-                "columns": [{"column_id": email_column_id, "column_values": [email]}],
-            },
-        )
+        try:
+            body = await execute_graphql(
+                ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+                {
+                    "boardId": board_id,
+                    "limit": FIND_ITEMS_LIMIT,
+                    "columns": [{"column_id": email_column_id, "column_values": [email]}],
+                },
+            )
+        except Exception as exc:
+            if _is_column_not_found_error(exc):
+                logger.info(
+                    "Email column %s not found on board %s; skipping",
+                    email_column_id,
+                    board_id,
+                )
+                continue
+            raise
         items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
         if not items:
             continue
@@ -66,10 +104,22 @@ async def _find_on_board(
     emails: list[str],
     *,
     board_id: str,
-    email_column_ids: tuple[str, ...],
+    configured_email_column_id: str,
     board_label: str,
     match_type: Literal["client", "lead"],
 ) -> ContactMatch | None:
+    email_column_ids = await _resolve_email_column_ids_for_board(
+        board_id,
+        configured_email_column_id,
+    )
+    if not email_column_ids:
+        logger.warning(
+            "No email columns resolved for %s board %s; skipping",
+            board_label,
+            board_id,
+        )
+        return None
+
     for email in emails:
         items = await _query_items_by_email(board_id, email_column_ids, email)
         if not items:
@@ -110,7 +160,7 @@ async def find_contact_by_emails(
     client_match = await _find_on_board(
         emails,
         board_id=settings.monday_crm_active_clients_board_id,
-        email_column_ids=CONTACT_EMAIL_COLUMN_IDS,
+        configured_email_column_id=settings.monday_crm_active_clients_email_column_id,
         board_label="Active Clients",
         match_type="client",
     )
@@ -120,7 +170,7 @@ async def find_contact_by_emails(
     lead_match = await _find_on_board(
         emails,
         board_id=settings.monday_crm_leads_board_id,
-        email_column_ids=CONTACT_EMAIL_COLUMN_IDS,
+        configured_email_column_id=settings.monday_crm_leads_email_column_id,
         board_label="Leads",
         match_type="lead",
     )

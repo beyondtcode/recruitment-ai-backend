@@ -544,8 +544,27 @@ class BuildMeetingDetailsMarkdownTests(unittest.TestCase):
 
 
 class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
+    async def _mock_board_columns(self, board_id: str) -> list[dict[str, str]]:
+        if board_id == TEST_CRM_SETTINGS.monday_crm_active_clients_board_id:
+            return [
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_active_clients_email_column_id,
+                    "type": "email",
+                }
+            ]
+        if board_id == TEST_CRM_SETTINGS.monday_crm_leads_board_id:
+            return [
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_leads_email_column_id,
+                    "type": "email",
+                }
+            ]
+        return []
+
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
     @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
-    async def test_prioritizes_active_clients_over_leads(self, mock_graphql):
+    async def test_prioritizes_active_clients_over_leads(self, mock_graphql, mock_board_columns):
+        mock_board_columns.side_effect = self._mock_board_columns
         mock_graphql.side_effect = [
             {
                 "data": {
@@ -567,10 +586,11 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(mock_graphql.call_count, 1)
 
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
     @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
-    async def test_falls_back_to_leads_when_no_client_match(self, mock_graphql):
+    async def test_falls_back_to_leads_when_no_client_match(self, mock_graphql, mock_board_columns):
+        mock_board_columns.side_effect = self._mock_board_columns
         mock_graphql.side_effect = [
-            {"data": {"items_page_by_column_values": {"items": []}}},
             {"data": {"items_page_by_column_values": {"items": []}}},
             {
                 "data": {
@@ -590,13 +610,13 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
             match,
             ContactMatch(item_id="222", match_type="lead", matched_email="lead@example.com"),
         )
-        self.assertEqual(mock_graphql.call_count, 3)
+        self.assertEqual(mock_graphql.call_count, 2)
 
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
     @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
-    async def test_returns_none_when_no_match(self, mock_graphql):
+    async def test_returns_none_when_no_match(self, mock_graphql, mock_board_columns):
+        mock_board_columns.side_effect = self._mock_board_columns
         mock_graphql.side_effect = [
-            {"data": {"items_page_by_column_values": {"items": []}}},
-            {"data": {"items_page_by_column_values": {"items": []}}},
             {"data": {"items_page_by_column_values": {"items": []}}},
             {"data": {"items_page_by_column_values": {"items": []}}},
         ]
@@ -607,6 +627,47 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(match)
+
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
+    @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
+    async def test_skips_column_not_found_and_continues(self, mock_graphql, mock_board_columns):
+        async def board_columns_with_extra(board_id: str) -> list[dict[str, str]]:
+            if board_id == TEST_CRM_SETTINGS.monday_crm_active_clients_board_id:
+                return [
+                    {
+                        "id": TEST_CRM_SETTINGS.monday_crm_active_clients_email_column_id,
+                        "type": "email",
+                    },
+                    {
+                        "id": "email_missing_on_monday",
+                        "type": "email",
+                    },
+                ]
+            return await self._mock_board_columns(board_id)
+
+        mock_board_columns.side_effect = board_columns_with_extra
+        mock_graphql.side_effect = [
+            {"data": {"items_page_by_column_values": {"items": []}}},
+            Exception("Monday.com API error: Column not found"),
+            {
+                "data": {
+                    "items_page_by_column_values": {
+                        "items": [{"id": "333", "name": "Lead Co"}],
+                    }
+                }
+            },
+        ]
+
+        match = await find_contact_by_emails(
+            ["lead@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertEqual(
+            match,
+            ContactMatch(item_id="333", match_type="lead", matched_email="lead@example.com"),
+        )
+        self.assertEqual(mock_graphql.call_count, 3)
 
 
 class NodeTakerWebhookEndpointTests(unittest.TestCase):

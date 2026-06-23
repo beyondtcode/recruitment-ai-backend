@@ -14,6 +14,9 @@ from services.monday_service import normalize_email
 
 logger = logging.getLogger(__name__)
 
+# Active Clients / Leads boards expose two contact email columns.
+CONTACT_EMAIL_COLUMN_IDS = ("email_mm4k349w", "email_mm4kbdnc")
+
 
 @dataclass(frozen=True)
 class ContactMatch:
@@ -36,35 +39,39 @@ def _dedupe_emails(emails: list[str]) -> list[str]:
 
 async def _query_items_by_email(
     board_id: str,
-    email_column_id: str,
+    email_column_ids: tuple[str, ...],
     email: str,
 ) -> list[dict[str, str]]:
-    body = await execute_graphql(
-        ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
-        {
-            "boardId": board_id,
-            "limit": FIND_ITEMS_LIMIT,
-            "columns": [{"column_id": email_column_id, "column_values": [email]}],
-        },
-    )
-    items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
-    return [
-        {"item_id": str(item["id"]), "name": str(item.get("name") or "")}
-        for item in items
-        if item.get("id") is not None
-    ]
+    for email_column_id in email_column_ids:
+        body = await execute_graphql(
+            ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+            {
+                "boardId": board_id,
+                "limit": FIND_ITEMS_LIMIT,
+                "columns": [{"column_id": email_column_id, "column_values": [email]}],
+            },
+        )
+        items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
+        if not items:
+            continue
+        return [
+            {"item_id": str(item["id"]), "name": str(item.get("name") or "")}
+            for item in items
+            if item.get("id") is not None
+        ]
+    return []
 
 
 async def _find_on_board(
     emails: list[str],
     *,
     board_id: str,
-    email_column_id: str,
+    email_column_ids: tuple[str, ...],
     board_label: str,
     match_type: Literal["client", "lead"],
 ) -> ContactMatch | None:
     for email in emails:
-        items = await _query_items_by_email(board_id, email_column_id, email)
+        items = await _query_items_by_email(board_id, email_column_ids, email)
         if not items:
             continue
         if len(items) > 1:
@@ -103,7 +110,7 @@ async def find_contact_by_emails(
     client_match = await _find_on_board(
         emails,
         board_id=settings.monday_crm_active_clients_board_id,
-        email_column_id=settings.monday_crm_active_clients_email_column_id,
+        email_column_ids=CONTACT_EMAIL_COLUMN_IDS,
         board_label="Active Clients",
         match_type="client",
     )
@@ -113,7 +120,7 @@ async def find_contact_by_emails(
     lead_match = await _find_on_board(
         emails,
         board_id=settings.monday_crm_leads_board_id,
-        email_column_id=settings.monday_crm_leads_email_column_id,
+        email_column_ids=CONTACT_EMAIL_COLUMN_IDS,
         board_label="Leads",
         match_type="lead",
     )

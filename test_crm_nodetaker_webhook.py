@@ -21,6 +21,7 @@ from crm_integration.lookup import ContactMatch, find_contact_by_emails
 from crm_integration.meeting import (
     _build_column_values,
     _people_column_value,
+    build_meeting_logs_for_profile,
     classify_meeting_type,
     column_text,
     extract_meeting_summary_intro,
@@ -31,6 +32,10 @@ from crm_integration.meeting import (
     resolve_monday_user_ids_by_emails,
     status_column_index,
 )
+from crm_integration.contact_profile import (
+    CONTACT_PROFILE_COLUMNS,
+    update_contact_ai_profile,
+)
 from crm_integration.monday_fetcher import (
     _format_action_items,
     _meeting_dedupe_key,
@@ -40,6 +45,7 @@ from crm_integration.monday_fetcher import (
 )
 from crm_integration.schemas import NodeTakerWebhookPayload
 from crm_integration.workdoc import build_meeting_details_markdown, build_meeting_doc_blocks
+from services.ai_service import _parse_client_meeting_profile_response
 
 client = TestClient(app)
 
@@ -761,15 +767,122 @@ class RunNotetakerBatchWebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
 
 
+class ClientMeetingProfileParserTests(unittest.TestCase):
+    def test_parses_valid_json(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '{"profile": "החברה היא סטארטאפ.\\nשורה 2.\\nשורה 3.\\nשורה 4.\\nשורה 5.", '
+            '"latest_date": "2022-09-05"}'
+        )
+        self.assertTrue(profile.startswith("החברה היא"))
+        self.assertEqual(latest_date, "2022-09-05")
+
+    def test_strips_json_fences(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '```json\n{"profile": "החברה היא חברת תוכנה.", "latest_date": "2022-08-04"}\n```'
+        )
+        self.assertIn("החברה היא", profile)
+        self.assertEqual(latest_date, "2022-08-04")
+
+    def test_rejects_missing_profile(self):
+        with self.assertRaises(ValueError):
+            _parse_client_meeting_profile_response(
+                '{"profile": "", "latest_date": "2022-08-04"}'
+            )
+
+    def test_rejects_invalid_date(self):
+        with self.assertRaises(ValueError):
+            _parse_client_meeting_profile_response(
+                '{"profile": "החברה היא חברה.", "latest_date": "4.8"}'
+            )
+
+
+class BuildMeetingLogsForProfileTests(unittest.TestCase):
+    def test_current_meeting_first_then_past_context(self):
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        past = "### Older call (2022-06-01)\nPrior discussion."
+        logs = build_meeting_logs_for_profile(payload, past)
+        self.assertTrue(logs.startswith("### Q1 Planning (2026-06-17)"))
+        self.assertIn("Discussed roadmap priorities.", logs)
+        self.assertIn("Send proposal", logs)
+        self.assertIn("Older call", logs)
+        current_index = logs.find("Q1 Planning")
+        past_index = logs.find("Older call")
+        self.assertLess(current_index, past_index)
+
+
+class UpdateContactAiProfileTests(unittest.IsolatedAsyncioTestCase):
+    @patch("crm_integration.contact_profile.execute_graphql", new_callable=AsyncMock)
+    async def test_writes_client_profile_and_date_columns(self, mock_graphql):
+        match = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="client@example.com",
+        )
+        await update_contact_ai_profile(
+            match,
+            "החברה היא חברת תוכנה.",
+            "2022-09-05",
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        mock_graphql.assert_awaited_once()
+        variables = mock_graphql.await_args.args[1]
+        self.assertEqual(variables["boardId"], TEST_CRM_SETTINGS.monday_crm_active_clients_board_id)
+        self.assertEqual(variables["itemId"], "111")
+        column_values = json.loads(variables["columnValues"])
+        client_cols = CONTACT_PROFILE_COLUMNS["client"]
+        self.assertEqual(
+            column_values[client_cols["profile_column_id"]],
+            "החברה היא חברת תוכנה.",
+        )
+        self.assertEqual(
+            column_values[client_cols["latest_date_column_id"]],
+            {"date": "2022-09-05"},
+        )
+
+    @patch("crm_integration.contact_profile.execute_graphql", new_callable=AsyncMock)
+    async def test_writes_lead_profile_and_date_columns(self, mock_graphql):
+        match = ContactMatch(
+            item_id="222",
+            match_type="lead",
+            matched_email="lead@example.com",
+        )
+        await update_contact_ai_profile(
+            match,
+            "החברה היא ליד חדש.",
+            "2022-08-04",
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        variables = mock_graphql.await_args.args[1]
+        self.assertEqual(variables["boardId"], TEST_CRM_SETTINGS.monday_crm_leads_board_id)
+        column_values = json.loads(variables["columnValues"])
+        lead_cols = CONTACT_PROFILE_COLUMNS["lead"]
+        self.assertEqual(
+            column_values[lead_cols["profile_column_id"]],
+            "החברה היא ליד חדש.",
+        )
+        self.assertEqual(
+            column_values[lead_cols["latest_date_column_id"]],
+            {"date": "2022-08-04"},
+        )
+
+
 class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
+    @patch("crm_integration.pipeline.update_contact_ai_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
-    async def test_orchestrates_lookup_create_item_and_workdoc(
+    async def test_orchestrates_lookup_create_item_workdoc_and_profile(
         self,
         mock_find,
         mock_create_item,
         mock_create_doc,
+        mock_gather,
+        mock_extract,
+        mock_update_profile,
     ):
         from crm_integration.pipeline import process_nodetaker_webhook
 
@@ -780,6 +893,8 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
         mock_create_item.return_value = "555"
         mock_create_doc.return_value = ("777", True, [])
+        mock_gather.return_value = "### Past meeting (2022-01-01)\nOlder notes."
+        mock_extract.return_value = ("החברה היא חברה.", "2022-09-05")
 
         payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
         result = await process_nodetaker_webhook(payload, settings=TEST_CRM_SETTINGS)
@@ -789,9 +904,47 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.match_type, "client")
         self.assertEqual(result.doc_id, "777")
         self.assertTrue(result.doc_created)
+        self.assertEqual(result.warnings, [])
         mock_find.assert_awaited_once()
         mock_create_item.assert_awaited_once()
         mock_create_doc.assert_awaited_once()
+        mock_gather.assert_awaited_once()
+        mock_extract.assert_awaited_once()
+        mock_update_profile.assert_awaited_once_with(
+            mock_find.return_value,
+            "החברה היא חברה.",
+            "2022-09-05",
+            TEST_CRM_SETTINGS,
+        )
+
+    @patch("crm_integration.pipeline.update_contact_ai_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
+    async def test_skips_profile_update_when_no_match(
+        self,
+        mock_find,
+        mock_create_item,
+        mock_create_doc,
+        mock_gather,
+        mock_extract,
+        mock_update_profile,
+    ):
+        from crm_integration.pipeline import process_nodetaker_webhook
+
+        mock_find.return_value = None
+        mock_create_item.return_value = "555"
+        mock_create_doc.return_value = ("777", True, [])
+
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        result = await process_nodetaker_webhook(payload, settings=TEST_CRM_SETTINGS)
+
+        mock_gather.assert_not_awaited()
+        mock_extract.assert_not_awaited()
+        mock_update_profile.assert_not_awaited()
+        self.assertIn("No client/lead match; profile update skipped", result.warnings)
 
 
 class MorningBriefHelperTests(unittest.TestCase):

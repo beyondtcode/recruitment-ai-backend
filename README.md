@@ -207,11 +207,7 @@ Expects JSON matching `NodeTakerWebhookPayload`:
 }
 ```
 
-Flow: match participant emails to a client or lead → create meeting item → create and fill a Workdoc. 
-
-
-
----
+Flow: match participant emails to a client or lead → create meeting item → create and fill a Workdoc → Claude extracts a Hebrew company profile + latest meeting date → update the matched Client/Lead item on Monday (column IDs hardcoded in `crm_integration/contact_profile.py`).
 
 ## System 1: CV pipeline
 
@@ -258,6 +254,10 @@ crm_integration/lookup.py — search Active Clients, then Leads, by participant 
 crm_integration/meeting.py — create item on Meeting Notes board
         ↓
 crm_integration/workdoc.py — create Monday Workdoc with title, participants, summary, action items
+        ↓
+services/ai_service.py — extract_client_meeting_profile (JSON: profile + latest_date)
+        ↓
+crm_integration/contact_profile.py — update matched Client/Lead item on Monday
 ```
 
 ### Two ways meetings enter the system

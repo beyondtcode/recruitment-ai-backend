@@ -276,6 +276,26 @@ async def gather_past_meeting_context(
     return "\n\n".join(sections)
 
 
+def build_meeting_logs_for_profile(
+    payload: NodeTakerWebhookPayload,
+    past_context: str,
+) -> str:
+    """Assemble meeting logs for client profile AI (current meeting first, then history)."""
+    title = payload.meeting_title.strip() or "פגישה ללא שם"
+    summary = extract_meeting_summary_intro(payload.meeting_summary)
+    sections: list[str] = [f"### {title} ({payload.meeting_date.isoformat()})\n{summary}"]
+
+    action_items = payload.action_items.strip()
+    if action_items:
+        sections[-1] += f"\n\nAction Items:\n{action_items}"
+
+    past = past_context.strip()
+    if past:
+        sections.append(past)
+
+    return "\n\n".join(sections)
+
+
 def internal_participant_emails(participant_emails: list[str]) -> list[str]:
     """Return participant emails that belong to internal @beyondtcode.com addresses."""
     return [

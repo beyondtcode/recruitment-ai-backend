@@ -123,6 +123,24 @@ Rules:
 - Do not add any other headings, bullet labels, or text outside this structure.
 - If no historical meeting notes are provided, keep the same three headings: under the first section state that no previous meetings were found; under the other two sections suggest what to cover in a first or follow-up meeting."""
 
+CLIENT_MEETING_PROFILE_MAX_TOKENS = 1024
+
+CLIENT_MEETING_PROFILE_SYSTEM_PROMPT = """You are an expert CRM data analyst. Analyze the provided company meeting logs and return a STRICTLY valid raw JSON object.
+Do not include any markdown styling, no backticks (```json), and no text outside the JSON object.
+The JSON must contain exactly two keys: 'profile' and 'latest_date'.
+
+For the 'profile' key, generate a concise, exactly 5-line executive summary profile about this client in Hebrew.
+
+CRITICAL STYLE GUIDELINES FOR THE PROFILE:
+1. Focus strictly on the COMPANY itself, its core business operations, capabilities, and industrial metrics. Always start the profile directly with 'החברה היא...'.
+2. Do NOT write it as a chronological narrative of individuals reaching out (AVOID starting with names like 'X פנה בשם...'). Integrate key people (like the CEO or HR) naturally as part of the corporate structure.
+3. Explicitly extract and highlight the core business needs, technical requirements, and pain points mentioned.
+4. Clearly mention the specific commercial arrangement, proposals, or next steps concluded between us and the client (e.g., specific terms discussed, or the decision to proceed with standard vendor-customer relations instead of partnerships).
+
+For the 'latest_date' key: Identify the single most recent meeting date from the logs and convert it strictly into 'YYYY-MM-DD' format. The data is from the year 2022, so if you see shorthand dates like '4.8' (August 4th) or '5.9' (September 5th), assume the year is 2022 (e.g., '2022-09-05')."""
+
+_LATEST_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 _client: AsyncAnthropic | None = None
 
 
@@ -343,6 +361,58 @@ async def generate_meeting_brief(
         messages=[{"role": "user", "content": user_content}],
     )
     return _extract_text_response(response)
+
+
+def _strip_json_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _parse_client_meeting_profile_response(text: str) -> tuple[str, str]:
+    """Parse Claude JSON response into (profile, latest_date)."""
+    raw = _strip_json_fences(text)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Client profile response is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("Client profile response must be a JSON object")
+
+    profile = str(data.get("profile") or "").strip()
+    latest_date = str(data.get("latest_date") or "").strip()
+
+    if not profile:
+        raise ValueError("Client profile response missing non-empty 'profile'")
+    if not _LATEST_DATE_RE.fullmatch(latest_date):
+        raise ValueError(
+            f"Client profile response 'latest_date' must be YYYY-MM-DD, got: {latest_date!r}"
+        )
+
+    return profile, latest_date
+
+
+async def extract_client_meeting_profile(meeting_logs: str) -> tuple[str, str]:
+    """Extract Hebrew client profile and latest meeting date from meeting logs."""
+    logs = meeting_logs.strip()
+    if not logs:
+        raise ValueError("Meeting logs are empty.")
+
+    user_content = (
+        "Company meeting logs (newest meeting first):\n\n"
+        f"{logs}"
+    )
+
+    response = await _get_client().messages.create(
+        model=settings.anthropic_model,
+        max_tokens=CLIENT_MEETING_PROFILE_MAX_TOKENS,
+        system=CLIENT_MEETING_PROFILE_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    return _parse_client_meeting_profile_response(_extract_text_response(response))
 
 
 async def analyze_cv_with_claude(cv_text: str) -> CandidateSchema:

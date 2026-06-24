@@ -3,10 +3,16 @@ from __future__ import annotations
 import logging
 
 from crm_integration.config import CrmSettings, get_crm_settings
+from crm_integration.contact_profile import update_contact_ai_profile
 from crm_integration.lookup import find_contact_by_emails
-from crm_integration.meeting import create_meeting_item
+from crm_integration.meeting import (
+    build_meeting_logs_for_profile,
+    create_meeting_item,
+    gather_past_meeting_context,
+)
 from crm_integration.schemas import NodeTakerWebhookPayload, NodeTakerWebhookResult
 from crm_integration.workdoc import create_meeting_workdoc
+from services.ai_service import extract_client_meeting_profile
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,24 @@ async def process_nodetaker_webhook(
     except Exception as exc:
         logger.error("Unexpected Workdoc error for item %s: %s", meeting_item_id, exc)
         warnings.append(f"Workdoc step failed: {exc}")
+
+    if match and payload.meeting_summary.strip():
+        try:
+            past_context = await gather_past_meeting_context(
+                payload.participant_emails,
+                before_date=payload.meeting_date,
+                settings=settings,
+            )
+            logs = build_meeting_logs_for_profile(payload, past_context)
+            profile, latest_date = await extract_client_meeting_profile(logs)
+            await update_contact_ai_profile(match, profile, latest_date, settings)
+        except Exception as exc:
+            logger.exception("Client profile update failed for match %s", match.item_id)
+            warnings.append(f"Client profile update failed: {exc}")
+    elif not match:
+        warnings.append("No client/lead match; profile update skipped")
+    elif not payload.meeting_summary.strip():
+        warnings.append("Empty meeting summary; profile update skipped")
 
     return NodeTakerWebhookResult(
         status="success",

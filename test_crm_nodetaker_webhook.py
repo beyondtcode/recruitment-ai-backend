@@ -1002,6 +1002,7 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.generate_meeting_brief", new_callable=AsyncMock)
     @patch("crm_integration.batch.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.batch.execute_graphql", new_callable=AsyncMock)
@@ -1012,9 +1013,15 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         mock_graphql,
         mock_gather,
         mock_brief,
+        mock_find,
     ):
         mock_datetime.now.return_value = datetime(
             2026, 6, 18, 8, 0, tzinfo=ZoneInfo("Asia/Jerusalem")
+        )
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="client@example.com",
         )
         mock_graphql.side_effect = [
             {
@@ -1086,6 +1093,7 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         mock_gather.assert_not_awaited()
         mock_brief.assert_not_awaited()
 
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.generate_meeting_brief", new_callable=AsyncMock)
     @patch("crm_integration.batch.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.batch.execute_graphql", new_callable=AsyncMock)
@@ -1096,9 +1104,15 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         mock_graphql,
         mock_gather,
         mock_brief,
+        mock_find,
     ):
         mock_datetime.now.return_value = datetime(
             2026, 6, 18, 8, 0, tzinfo=ZoneInfo("Asia/Jerusalem")
+        )
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="first@example.com",
         )
         mock_graphql.side_effect = [
             {
@@ -1130,47 +1144,89 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["error_count"], 1)
         self.assertEqual(summary["errors"][0]["item_id"], "200")
 
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.generate_meeting_brief", new_callable=AsyncMock)
     @patch("crm_integration.batch.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.batch.execute_graphql", new_callable=AsyncMock)
     @patch("crm_integration.batch.datetime")
-    async def test_no_history_still_generates_brief(
+    async def test_skips_when_no_past_meeting_history(
         self,
         mock_datetime,
         mock_graphql,
         mock_gather,
         mock_brief,
+        mock_find,
     ):
         mock_datetime.now.return_value = datetime(
             2026, 6, 18, 8, 0, tzinfo=ZoneInfo("Asia/Jerusalem")
         )
-        mock_graphql.side_effect = [
-            {
-                "data": {
-                    "items_page_by_column_values": {
-                        "items": [
-                            self._future_meeting_item(
-                                item_id="300",
-                                title="New Client",
-                                participants="new@example.com",
-                            )
-                        ]
-                    }
+        mock_graphql.return_value = {
+            "data": {
+                "items_page_by_column_values": {
+                    "items": [
+                        self._future_meeting_item(
+                            item_id="300",
+                            title="New Client",
+                            participants="new@example.com",
+                        )
+                    ]
                 }
-            },
-            {"data": {"change_multiple_column_values": {"id": "300"}}},
-        ]
+            }
+        }
+        mock_find.return_value = ContactMatch(
+            item_id="333",
+            match_type="lead",
+            matched_email="new@example.com",
+        )
         mock_gather.return_value = ""
-        mock_brief.return_value = "אין פגישות קודמות"
 
         summary = await process_morning_briefs(settings=TEST_CRM_SETTINGS)
 
-        self.assertEqual(summary["processed_count"], 1)
-        mock_brief.assert_awaited_once_with(
-            "",
-            "New Client",
-            participant_emails=["new@example.com"],
+        self.assertEqual(summary["processed_count"], 0)
+        self.assertEqual(summary["skipped_count"], 1)
+        self.assertEqual(summary["skipped"][0]["reason"], "no_past_meeting_context")
+        mock_brief.assert_not_awaited()
+        mock_graphql.assert_awaited_once()
+
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.batch.generate_meeting_brief", new_callable=AsyncMock)
+    @patch("crm_integration.batch.gather_past_meeting_context", new_callable=AsyncMock)
+    @patch("crm_integration.batch.execute_graphql", new_callable=AsyncMock)
+    @patch("crm_integration.batch.datetime")
+    async def test_skips_when_no_crm_contact_match(
+        self,
+        mock_datetime,
+        mock_graphql,
+        mock_gather,
+        mock_brief,
+        mock_find,
+    ):
+        mock_datetime.now.return_value = datetime(
+            2026, 6, 18, 8, 0, tzinfo=ZoneInfo("Asia/Jerusalem")
         )
+        mock_graphql.return_value = {
+            "data": {
+                "items_page_by_column_values": {
+                    "items": [
+                        self._future_meeting_item(
+                            item_id="301",
+                            title="Unknown Contact",
+                            participants="unknown@example.com",
+                        )
+                    ]
+                }
+            }
+        }
+        mock_find.return_value = None
+
+        summary = await process_morning_briefs(settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(summary["processed_count"], 0)
+        self.assertEqual(summary["skipped_count"], 1)
+        self.assertEqual(summary["skipped"][0]["reason"], "no_crm_contact_match")
+        mock_gather.assert_not_awaited()
+        mock_brief.assert_not_awaited()
+        mock_graphql.assert_awaited_once()
 
     @patch("crm_integration.batch.generate_meeting_brief", new_callable=AsyncMock)
     @patch("crm_integration.batch.gather_past_meeting_context", new_callable=AsyncMock)

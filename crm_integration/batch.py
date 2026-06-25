@@ -21,6 +21,7 @@ from crm_integration.monday_client import (
     ITEMS_PAGE_BY_COLUMN_VALUES_WITH_COLUMNS_QUERY,
     execute_graphql,
 )
+from crm_integration.lookup import find_contact_by_emails
 from crm_integration.monday_fetcher import ISR_TZ, fetch_notetaker_meetings_since
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.schemas import NodeTakerWebhookResult
@@ -153,18 +154,46 @@ async def process_morning_briefs(
             continue
 
         try:
+            match = await find_contact_by_emails(emails, settings=settings)
+            if not match:
+                logger.warning(
+                    "Skipping morning brief for item %s (%r): no CRM client/lead match for %s",
+                    item_id,
+                    title,
+                    emails,
+                )
+                skipped.append({**meeting_key, "reason": "no_crm_contact_match"})
+                continue
+
             past_context = await gather_past_meeting_context(
                 emails,
                 before_date=today,
                 settings=settings,
             )
+            if not past_context.strip():
+                logger.warning(
+                    "Skipping morning brief for item %s (%r): no past meeting history for %s",
+                    item_id,
+                    title,
+                    emails,
+                )
+                skipped.append({**meeting_key, "reason": "no_past_meeting_context"})
+                continue
+
             brief = await generate_meeting_brief(
                 past_context,
                 title,
                 participant_emails=emails,
             )
             await _update_future_meeting_brief(item_id, brief, settings)
-            processed.append({**meeting_key, "participant_emails": emails})
+            processed.append(
+                {
+                    **meeting_key,
+                    "participant_emails": emails,
+                    "match_type": match.match_type,
+                    "matched_email": match.matched_email,
+                }
+            )
         except Exception as exc:
             logger.exception(
                 "Failed to process morning brief for item %s title=%r",

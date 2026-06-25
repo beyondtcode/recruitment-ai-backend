@@ -10,8 +10,10 @@ from pydantic import ValidationError
 
 from services.ai_service import analyze_cv_with_claude
 from services.monday_service import (
+    fetch_board_job_requirements,
     get_item_cv_file_url,
     get_main_hub_board_id,
+    is_job_board,
     upsert_candidate_item,
 )
 from utils.file_parser import download_cv_from_url, extract_text_from_file
@@ -30,6 +32,7 @@ async def process_cv_bytes(
     cv_file_path: str | Path | None = None,
     sync_to_hub: bool = True,
     source_item_id: str | None = None,
+    job_requirements: str | None = None,
 ) -> None:
     """
     Parse CV bytes with Claude and upsert to the given board (and optionally Main Hub).
@@ -42,9 +45,11 @@ async def process_cv_bytes(
         sync_to_hub: When True and board_id is not Main Hub, also upsert to Main Hub.
         source_item_id: Monday item that triggered processing (webhook); used to avoid
             duplicate rows when email search has not indexed the form submission yet.
+        job_requirements: דרישות משרה text from the job board's static info item; when set,
+            Claude evaluates job fit and scores are written back on job boards only.
     """
     cv_text = extract_text_from_file(file_bytes, filename)
-    candidate = await analyze_cv_with_claude(cv_text)
+    candidate = await analyze_cv_with_claude(cv_text, job_requirements=job_requirements)
 
     logger.info(
         "Extracted candidate from %s: %s",
@@ -117,6 +122,18 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
     """Download CV from a Monday item and run the full extraction + upsert pipeline."""
     logger.info("Processing Monday webhook: item_id=%s board_id=%s", item_id, board_id)
 
+    job_requirements: str | None = None
+    if is_job_board(board_id):
+        job_requirements = await fetch_board_job_requirements(board_id)
+        if job_requirements:
+            logger.info(
+                "Loaded job requirements (%d chars) for board %s",
+                len(job_requirements),
+                board_id,
+            )
+        else:
+            logger.warning("No job requirements found on job board %s", board_id)
+
     url, filename = await get_item_cv_file_url(item_id, board_id)
     file_bytes = await download_cv_from_url(url)
 
@@ -132,6 +149,7 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
             cv_file_path=temp_path,
             sync_to_hub=True,
             source_item_id=item_id,
+            job_requirements=job_requirements,
         )
     finally:
         temp_path.unlink(missing_ok=True)

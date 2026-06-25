@@ -46,6 +46,7 @@ JOB_CATEGORY_DROPDOWN_COLUMN_ID = "dropdown_mm3fyv0t"
 AI_SUMMARY_COLUMN_ID = "text_mm3gs8ec"
 TEAM_LEAD_DROPDOWN_LABEL = "ראש צוות"
 RECRUITER_NOTES_COLUMN_ID = "long_text_mm3g3yhw"
+EXTRACTION_CONFIDENCE_COLUMN_ID = "color_mm4nx466"
 
 ECOSYSTEM_DOTNET_COLUMN_ID = "numeric_mm467xsd"
 ECOSYSTEM_ANGULAR_COLUMN_ID = "numeric_mm46yqhz"
@@ -418,11 +419,67 @@ query ($boardId: ID!) {
   boards(ids: [$boardId]) {
     columns {
       id
+      title
       type
     }
   }
 }
 """
+
+BOARD_GROUPS_AND_COLUMNS_QUERY = """
+query ($boardId: ID!) {
+  boards(ids: [$boardId]) {
+    groups {
+      id
+      title
+    }
+    columns {
+      id
+      title
+      type
+    }
+  }
+}
+"""
+
+BOARD_GROUP_ITEMS_MIRROR_QUERY = """
+query ($boardId: ID!, $groupId: String!, $columnIds: [String!]) {
+  boards(ids: [$boardId]) {
+    groups(ids: [$groupId]) {
+      id
+      title
+      items_page(limit: 10) {
+        items {
+          id
+          name
+          column_values(ids: $columnIds) {
+            id
+            type
+            ... on MirrorValue {
+              display_value
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+JOB_INFO_GROUP_TITLE = os.getenv("MONDAY_JOB_INFO_GROUP_TITLE", "מידע כללי על המשרה")
+JOB_REQUIREMENTS_MIRROR_COLUMN_TITLE = os.getenv(
+    "MONDAY_JOB_REQUIREMENTS_MIRROR_COLUMN_TITLE",
+    "דרישות משרה",
+)
+JOB_FIT_SCORE_COLUMN_ID = os.getenv("MONDAY_JOB_FIT_SCORE_COLUMN_ID", "numeric_mm4np5tt")
+JOB_FIT_SCORE_COLUMN_TITLE = os.getenv(
+    "MONDAY_JOB_FIT_SCORE_COLUMN_TITLE",
+    "מדד התאמה למשרה",
+)
+JOB_FIT_REASONING_COLUMN_TITLE = os.getenv(
+    "MONDAY_JOB_FIT_REASONING_COLUMN_TITLE",
+    "נימוק התאמה למשרה",
+)
 
 _BOARD_COLUMNS_CACHE: dict[str, list[dict[str, Any]]] = {}
 _BOARD_TYPED_COLUMN_CACHE: dict[tuple[str, str], str] = {}
@@ -508,6 +565,8 @@ _COLUMN_TYPE_ID_PREFIXES: dict[str, tuple[str, ...]] = {
 
 # Per-board cache for file-column resolution (see resolve_file_column_id).
 _BOARD_FILE_COLUMN_CACHE: dict[str, str] = {}
+_BOARD_GROUPS_CACHE: dict[str, list[dict[str, Any]]] = {}
+_BOARD_COLUMN_TITLE_CACHE: dict[tuple[str, str], str | None] = {}
 
 
 async def _fetch_board_columns(board_id: str) -> list[dict[str, Any]]:
@@ -571,6 +630,285 @@ async def resolve_column_id_by_type(board_id: str, column_type: str) -> str:
     raise ValueError(
         f"No column of type {column_type!r} found on Monday board {board_key}."
     )
+
+
+def is_job_board(board_id: str | None) -> bool:
+    """True when the board is a per-job satellite board (not the Main Hub)."""
+    if board_id is None:
+        return False
+    return str(board_id) != get_main_hub_board_id()
+
+
+def _normalize_title_key(title: str) -> str:
+    return re.sub(r"\s+", " ", title.strip().casefold())
+
+
+async def _fetch_board_groups(board_id: str) -> list[dict[str, Any]]:
+    board_key = str(board_id)
+    if board_key in _BOARD_GROUPS_CACHE:
+        return _BOARD_GROUPS_CACHE[board_key]
+    body = await _post_graphql(BOARD_GROUPS_AND_COLUMNS_QUERY, {"boardId": board_key})
+    boards = body.get("data", {}).get("boards") or []
+    if not boards:
+        return []
+    board = boards[0]
+    groups = list(board.get("groups") or [])
+    columns = list(board.get("columns") or [])
+    if groups:
+        _BOARD_GROUPS_CACHE[board_key] = groups
+    if columns:
+        _BOARD_COLUMNS_CACHE[board_key] = columns
+    return groups
+
+
+async def _resolve_column_id_by_title(
+    board_id: str,
+    title: str,
+    *,
+    column_type: str | None = None,
+) -> str | None:
+    board_key = str(board_id)
+    title_key = _normalize_title_key(title)
+    cache_key = (board_key, title_key)
+    if cache_key in _BOARD_COLUMN_TITLE_CACHE:
+        return _BOARD_COLUMN_TITLE_CACHE[cache_key]
+
+    env_overrides = {
+        _normalize_title_key(JOB_REQUIREMENTS_MIRROR_COLUMN_TITLE): os.getenv(
+            "MONDAY_JOB_REQUIREMENTS_MIRROR_COLUMN_ID"
+        ),
+        _normalize_title_key(JOB_FIT_SCORE_COLUMN_TITLE): JOB_FIT_SCORE_COLUMN_ID,
+        _normalize_title_key(JOB_FIT_REASONING_COLUMN_TITLE): os.getenv(
+            "MONDAY_JOB_FIT_REASONING_COLUMN_ID"
+        ),
+    }
+    env_column_id = env_overrides.get(title_key)
+    if env_column_id:
+        _BOARD_COLUMN_TITLE_CACHE[cache_key] = env_column_id
+        return env_column_id
+
+    columns = await _fetch_board_columns(board_key)
+    for column in columns:
+        column_title = _normalize_title_key(str(column.get("title") or ""))
+        if column_title != title_key:
+            continue
+        if column_type and str(column.get("type") or "").casefold() != column_type.casefold():
+            continue
+        column_id = str(column["id"])
+        _BOARD_COLUMN_TITLE_CACHE[cache_key] = column_id
+        return column_id
+
+    _BOARD_COLUMN_TITLE_CACHE[cache_key] = None
+    return None
+
+
+async def _resolve_job_info_group_id(board_id: str) -> str | None:
+    env_group_id = os.getenv("MONDAY_JOB_INFO_GROUP_ID")
+    if env_group_id:
+        return env_group_id.strip()
+
+    groups = await _fetch_board_groups(str(board_id))
+    target_key = _normalize_title_key(JOB_INFO_GROUP_TITLE)
+
+    for group in groups:
+        if _normalize_title_key(str(group.get("title") or "")) == target_key:
+            return str(group["id"])
+
+    # Cloned job boards may suffix the template group title (e.g. "_copy").
+    for group in groups:
+        if _job_info_group_title_matches(str(group.get("title") or "")):
+            return str(group["id"])
+    return None
+
+
+def _job_info_group_title_matches(group_title: str) -> bool:
+    """True when a board group title contains the job-info template label."""
+    normalized_group = _normalize_title_key(group_title)
+    normalized_target = _normalize_title_key(JOB_INFO_GROUP_TITLE)
+    if not normalized_target:
+        return False
+    return normalized_target in normalized_group
+
+
+def _mirror_column_text(column: dict[str, Any]) -> str:
+    """Read mirror column content; Mirror types must use display_value only."""
+    display_value = str(column.get("display_value") or "").strip()
+    if str(column.get("type") or "").casefold() == "mirror":
+        return display_value
+    if display_value:
+        return display_value
+    return str(column.get("text") or "").strip()
+
+
+def _format_job_fit_numeric_value(score: int) -> str:
+    """Monday Numbers columns expect a plain numeric string, not a JSON object."""
+    return str(int(score))
+
+
+async def fetch_board_job_requirements(board_id: str) -> str | None:
+    """
+    Load דרישות משרה from the static job-info item on a per-job board.
+
+    Looks up the item in the job-info group (default ``מידע כללי על המשרה``) and
+    reads the mirror column titled ``דרישות משרה`` (or the first non-empty mirror
+    on that item when the titled column is absent).
+    """
+    board_key = str(board_id)
+    if not is_job_board(board_key):
+        return None
+
+    group_id = await _resolve_job_info_group_id(board_key)
+    if not group_id:
+        logger.warning(
+            "Monday board %s: job-info group %r not found",
+            board_key,
+            JOB_INFO_GROUP_TITLE,
+        )
+        return None
+
+    columns = await _fetch_board_columns(board_key)
+    mirror_column_ids = [
+        str(column["id"])
+        for column in columns
+        if str(column.get("type") or "").casefold() == "mirror"
+    ]
+    if not mirror_column_ids:
+        logger.warning("Monday board %s: no mirror columns found", board_key)
+        return None
+
+    requirements_column_id = await _resolve_column_id_by_title(
+        board_key,
+        JOB_REQUIREMENTS_MIRROR_COLUMN_TITLE,
+        column_type="mirror",
+    )
+
+    body = await _post_graphql(
+        BOARD_GROUP_ITEMS_MIRROR_QUERY,
+        {
+            "boardId": board_key,
+            "groupId": group_id,
+            "columnIds": mirror_column_ids,
+        },
+    )
+    boards = body.get("data", {}).get("boards") or []
+    groups = (boards[0].get("groups") if boards else None) or []
+    if not groups:
+        logger.warning(
+            "Monday board %s: job-info group %s returned no items",
+            board_key,
+            group_id,
+        )
+        return None
+
+    items = groups[0].get("items_page", {}).get("items") or []
+    if not items:
+        logger.warning(
+            "Monday board %s: no items in job-info group %s",
+            board_key,
+            group_id,
+        )
+        return None
+
+    for item in items:
+        column_values = item.get("column_values") or []
+        if requirements_column_id:
+            requirements_column = next(
+                (col for col in column_values if col.get("id") == requirements_column_id),
+                None,
+            )
+            if requirements_column is not None:
+                text = _mirror_column_text(requirements_column)
+                if text:
+                    logger.info(
+                        "Monday board %s: loaded job requirements from item %s column %s",
+                        board_key,
+                        item.get("id"),
+                        requirements_column_id,
+                    )
+                    return text
+
+        for column in column_values:
+            if str(column.get("type") or "").casefold() != "mirror":
+                continue
+            text = _mirror_column_text(column)
+            if text:
+                logger.info(
+                    "Monday board %s: loaded job requirements from item %s mirror column %s",
+                    board_key,
+                    item.get("id"),
+                    column.get("id"),
+                )
+                return text
+
+    logger.warning(
+        "Monday board %s: job-info item(s) found but mirror column %r is empty",
+        board_key,
+        JOB_REQUIREMENTS_MIRROR_COLUMN_TITLE,
+    )
+    return None
+
+
+async def apply_job_fit_columns(
+    board_id: str,
+    column_values: dict[str, Any],
+    candidate: CandidateSchema,
+) -> None:
+    """Add job-fit score/reasoning columns when present on a per-job board."""
+    if not is_job_board(board_id):
+        return
+    if candidate.job_fit_score is None and _is_empty(candidate.job_fit_reasoning):
+        return
+
+    columns = await _fetch_board_columns(str(board_id))
+    board_column_ids = {str(column.get("id") or "") for column in columns}
+
+    score_column_id: str | None = None
+    if JOB_FIT_SCORE_COLUMN_ID in board_column_ids:
+        score_column_id = JOB_FIT_SCORE_COLUMN_ID
+    if score_column_id is None:
+        score_column_id = await _resolve_column_id_by_title(
+            board_id,
+            JOB_FIT_SCORE_COLUMN_TITLE,
+            column_type="numbers",
+        )
+    if score_column_id is None:
+        score_column_id = await _resolve_column_id_by_title(
+            board_id,
+            JOB_FIT_SCORE_COLUMN_TITLE,
+            column_type="numeric",
+        )
+
+    reasoning_column_id = await _resolve_column_id_by_title(
+        board_id,
+        JOB_FIT_REASONING_COLUMN_TITLE,
+        column_type="text",
+    )
+    if reasoning_column_id is None:
+        reasoning_column_id = await _resolve_column_id_by_title(
+            board_id,
+            JOB_FIT_REASONING_COLUMN_TITLE,
+            column_type="long_text",
+        )
+
+    if score_column_id and candidate.job_fit_score is not None:
+        column_values[score_column_id] = _format_job_fit_numeric_value(
+            candidate.job_fit_score
+        )
+
+    if reasoning_column_id and not _is_empty(candidate.job_fit_reasoning):
+        reasoning_text = candidate.job_fit_reasoning.strip()
+        column_type = next(
+            (
+                str(column.get("type") or "").casefold()
+                for column in columns
+                if str(column.get("id") or "") == reasoning_column_id
+            ),
+            "text",
+        )
+        if column_type == "long_text":
+            column_values[reasoning_column_id] = {"text": reasoning_text}
+        else:
+            column_values[reasoning_column_id] = reasoning_text
 
 
 @dataclass(frozen=True)
@@ -793,6 +1131,18 @@ def _status_label(label: str) -> dict[str, str]:
     return {"label": label}
 
 
+def _status_index(index: int) -> dict[str, int]:
+    """Monday API v2 status column payload by board option index."""
+    return {"index": index}
+
+
+_EXTRACTION_CONFIDENCE_STATUS_INDEX: dict[str, int] = {
+    "high": 1,
+    "medium": 0,
+    "low": 2,
+}
+
+
 def _append_note_field(existing: str | None, new: str, *, stamp: str) -> str:
     existing_text = (existing or "").strip()
     new_text = new.strip()
@@ -844,6 +1194,8 @@ def build_column_values(
 
     CV files (FILE_COLUMN_ID) are intentionally excluded — Monday does not accept
     raw file bytes in column_values. Upload via upload_file_to_item() instead.
+
+    confidence_reasoning is intentionally excluded — debug/logging only, not a board column.
     """
     column_values: dict[str, Any] = {}
     email_col = email_column_id or EMAIL_COLUMN_ID
@@ -880,6 +1232,10 @@ def build_column_values(
 
     if not _is_empty(candidate.company_type):
         column_values["color_mm3n87tr"] = _status_label(candidate.company_type)
+
+    confidence_index = _EXTRACTION_CONFIDENCE_STATUS_INDEX.get(candidate.extraction_confidence)
+    if confidence_index is not None:
+        column_values[EXTRACTION_CONFIDENCE_COLUMN_ID] = _status_index(confidence_index)
 
     if not _is_empty(candidate.ai_summary):
         column_values[AI_SUMMARY_COLUMN_ID] = candidate.ai_summary
@@ -1572,6 +1928,8 @@ async def update_candidate_item(
         if compact:
             column_values[LANGUAGE_EXPERIENCE_COLUMN_ID] = compact
 
+    await apply_job_fit_columns(board_id, column_values, candidate)
+
     column_values_json = json.dumps(column_values)
     column_ids = list(column_values.keys())
 
@@ -1616,6 +1974,7 @@ async def create_candidate_item(
     """Create a Monday.com board item and return the new item ID."""
     board_id = _resolve_board_id(board_id)
     column_values = build_column_values(candidate, raw_cv_text)
+    await apply_job_fit_columns(board_id, column_values, candidate)
     column_values_json = json.dumps(column_values)
     group_id = os.getenv("MONDAY_GROUP_ID", "topics")
 

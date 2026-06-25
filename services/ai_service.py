@@ -70,34 +70,49 @@ SYSTEM_PROMPT = """You are an elite Israeli Tech Recruiter. Your task is to extr
 25. Sort by `years` descending; keep only the top 5. Drop minor tools (Git, Jira, Postman, peripheral libraries). Use Monday-compatible technology names (core languages and major frameworks only).
 26. Example: If React appears in a Skills list but never in any job description under employment history, exclude it entirely.
 
+## extraction_confidence (self-reflection on skills / languages / tech stack)
+27. **Mandatory self-assessment:** After extracting `programming_languages` and related tech-stack fields, critically evaluate how reliable that extraction is and set `extraction_confidence` to exactly one of: `high`, `medium`, or `low`.
+28. **`high`:** Technologies and years of experience are explicitly, clearly, and unambiguously stated in the CV without contradictions. Employment timelines support the extracted stack with minimal interpretation.
+29. **`medium`:** Technologies are listed, but context or years of experience are partial, vague, or require slight inference (e.g. skills section partially aligned with jobs, approximate date ranges, implied but not stated tenure).
+30. **`low`:** The CV is poorly formatted or messy, lacks crucial tech-stack details, or forces significant assumptions or complex interpretations to produce `programming_languages` (e.g. keyword soup, contradictory dates, no clear employment history, heavy guessing from generic skills lists).
+31. **`confidence_reasoning` (mandatory):** Always populate with a short paragraph in English or Hebrew that justifies the chosen `extraction_confidence`. Explain exactly what in the CV drove the rating — e.g. clear dated job bullets vs. vague skills lists, contradictions, missing employment history, or messy layout. Do not repeat the enum label alone; cite concrete evidence from the document. This field is for server debug logging only and is never written to Monday.
+
 ## linkedin (adaptive URL extraction — including hidden hyperlinks)
-27. Our CV parser inlines hyperlink targets next to anchor text using bracket notation, e.g. `LinkedIn [https://www.linkedin.com/in/jane-doe]`, `Profile [https://...]`, `קישור [https://...]`, or the candidate's name followed by `[https://...]`. ALWAYS parse these bracketed URLs — the absolute `https://...` inside `[...]` is the true destination even when the visible text is only "LinkedIn" or "פרופיל".
-28. Search for LinkedIn profile URLs in: bracket pairs `[https://www.linkedin.com/in/...]`, plain text URLs, and lines like `LinkedIn [https://...]` appended by the PDF/DOCX extractor.
-29. Normalize any valid personal profile to `https://www.linkedin.com/in/{handle}` (include `/in/` paths; ignore `/company/` unless no personal profile exists).
-30. If multiple LinkedIn URLs appear, prioritize the personal `/in/` profile link over company pages or share links.
-31. If a LinkedIn username/handle appears next to the word "LinkedIn" without a bracketed URL (e.g., "LinkedIn: johndoe"), reconstruct as `https://www.linkedin.com/in/{username}`.
-32. Use `קיים בקובץ (לינק מוסתר)` ONLY when the CV mentions "LinkedIn" / "פרופיל" / "קישור" but there is neither a bracketed URL, nor a plain URL, nor a recoverable handle.
-33. NEVER put GitHub, Netlify, Vercel, portfolio, or other non-LinkedIn URLs in `linkedin`. If only those links exist and no LinkedIn evidence is present, return `null`.
+34. Our CV parser inlines hyperlink targets next to anchor text using bracket notation, e.g. `LinkedIn [https://www.linkedin.com/in/jane-doe]`, `Profile [https://...]`, `קישור [https://...]`, or the candidate's name followed by `[https://...]`. ALWAYS parse these bracketed URLs — the absolute `https://...` inside `[...]` is the true destination even when the visible text is only "LinkedIn" or "פרופיל".
+35. Search for LinkedIn profile URLs in: bracket pairs `[https://www.linkedin.com/in/...]`, plain text URLs, and lines like `LinkedIn [https://...]` appended by the PDF/DOCX extractor.
+36. Normalize any valid personal profile to `https://www.linkedin.com/in/{handle}` (include `/in/` paths; ignore `/company/` unless no personal profile exists).
+37. If multiple LinkedIn URLs appear, prioritize the personal `/in/` profile link over company pages or share links.
+38. If a LinkedIn username/handle appears next to the word "LinkedIn" without a bracketed URL (e.g., "LinkedIn: johndoe"), reconstruct as `https://www.linkedin.com/in/{username}`.
+39. Use `קיים בקובץ (לינק מוסתר)` ONLY when the CV mentions "LinkedIn" / "פרופיל" / "קישור" but there is neither a bracketed URL, nor a plain URL, nor a recoverable handle.
+40. NEVER put GitHub, Netlify, Vercel, portfolio, or other non-LinkedIn URLs in `linkedin`. If only those links exist and no LinkedIn evidence is present, return `null`.
 
 ## recruiter_notes (city derivation note + red flags)
-34. Leave `recruiter_notes` as `null` by default. Do NOT use this field to explain general reasoning, show calculations, or justify how you derived years_of_experience or any other field.
-35. **Mandatory — city derived from education:** ONLY when `city` is a non-empty string that you set via rules 6/8 (not rule 5, not rule 7). Then set `recruiter_notes` to exactly: `העיר נגזרה אוטומטית ממוסד הלימודים ([שם המוסד])` (replace the bracketed part with the actual school name from the CV). If a red-flag note also applies (rule 37), prepend this city sentence and append the red-flag sentence separated by a space or newline.
-35b. **Forbidden — no city, no city note:** If `city` is null — including when education is mentioned but campus city is unknown, remote-only, or excluded (rule 7) — leave `recruiter_notes` null unless rule 37 (red flag) applies. Do NOT write that city was removed, skipped, could not be inferred, or excluded because of the institution.
-35c. **Consistency check:** Never output the derivation sentence from rule 35 unless `city` is also populated in the same tool response.
-36. **Red flags:** Additionally populate `recruiter_notes` (alone, or appended after the mandatory city sentence from rule 35) when there is a critical red flag a recruiter must act on immediately (e.g., "פער של 3 שנים ללא תעסוקה", suspected resume inflation, visa/relocation blocker). Keep each note short and actionable in Hebrew.
+41. Leave `recruiter_notes` as `null` by default. Do NOT use this field to explain general reasoning, show calculations, or justify how you derived years_of_experience or any other field.
+42. **Mandatory — city derived from education:** ONLY when `city` is a non-empty string that you set via rules 6/8 (not rule 5, not rule 7). Then set `recruiter_notes` to exactly: `העיר נגזרה אוטומטית ממוסד הלימודים ([שם המוסד])` (replace the bracketed part with the actual school name from the CV). If a red-flag note also applies (rule 44), prepend this city sentence and append the red-flag sentence separated by a space or newline.
+42b. **Forbidden — no city, no city note:** If `city` is null — including when education is mentioned but campus city is unknown, remote-only, or excluded (rule 7) — leave `recruiter_notes` null unless rule 44 (red flag) applies. Do NOT write that city was removed, skipped, could not be inferred, or excluded because of the institution.
+42c. **Consistency check:** Never output the derivation sentence from rule 42 unless `city` is also populated in the same tool response.
+43. **Red flags:** Additionally populate `recruiter_notes` (alone, or appended after the mandatory city sentence from rule 42) when there is a critical red flag a recruiter must act on immediately (e.g., "פער של 3 שנים ללא תעסוקה", suspected resume inflation, visa/relocation blocker). Keep each note short and actionable in Hebrew.
 
 ## Contact (name, email, phone)
-37. **Priority sources:** Extract contact fields from the earliest content in the CV text — especially the `--- DOCX_HEADER ---` block (if present), the first lines of the document, and top-of-page tables — before experience or education sections.
-38. **`name` (English only):** MUST be in English (Latin script). If the CV name is in Hebrew (e.g. "יעל כהן"), transliterate/translate to English (e.g. "Yael Cohen"). Preserve standard English spelling for names already in English. Use the candidate's personal full name from the contact area. Do NOT use employer names, university names, or section headings as the candidate name.
-39. **`email`:** Extract a valid email address from the contact area. Prefer explicit emails and `mailto:` hyperlinks; also parse bracketed URLs from the CV parser (e.g. `Email [mailto:user@example.com]`).
-40. **`phone`:** Extract Israeli mobile or landline numbers from the contact area only. Do NOT use GPA, test scores, ID numbers, or years as phone values.
-41. **Phone Number Cleanliness:** For the `phone` field, extract ONLY the raw digits. Strictly remove any dashes, spaces, parentheses, or special characters (e.g., convert "055-6722091" or "055 (672) 2091" into "0556722091").
+44. **Priority sources:** Extract contact fields from the earliest content in the CV text — especially the `--- DOCX_HEADER ---` block (if present), the first lines of the document, and top-of-page tables — before experience or education sections.
+45. **`name` (English only):** MUST be in English (Latin script). If the CV name is in Hebrew (e.g. "יעל כהן"), transliterate/translate to English (e.g. "Yael Cohen"). Preserve standard English spelling for names already in English. Use the candidate's personal full name from the contact area. Do NOT use employer names, university names, or section headings as the candidate name.
+46. **`email`:** Extract a valid email address from the contact area. Prefer explicit emails and `mailto:` hyperlinks; also parse bracketed URLs from the CV parser (e.g. `Email [mailto:user@example.com]`).
+47. **`phone`:** Extract Israeli mobile or landline numbers from the contact area only. Do NOT use GPA, test scores, ID numbers, or years as phone values.
+48. **Phone Number Cleanliness:** For the `phone` field, extract ONLY the raw digits. Strictly remove any dashes, spaces, parentheses, or special characters (e.g., convert "055-6722091" or "055 (672) 2091" into "0556722091").
 
 ## test_score (ציון מבחן — never from CV)
-42. **Always null from CV:** When parsing a CV, ALWAYS set `test_score` to `null`. This field is for recruiter-entered test scores on Monday only.
-43. **Never map academic grades:** Do NOT put GPA, ממוצע, degree grades, course scores, matriculation scores, or any numeric grade from education sections into `test_score`.
+49. **Always null from CV:** When parsing a CV, ALWAYS set `test_score` to `null`. This field is for recruiter-entered test scores on Monday only.
+50. **Never map academic grades:** Do NOT put GPA, ממוצע, degree grades, course scores, matriculation scores, or any numeric grade from education sections into `test_score`.
 
 Use only exact enum labels defined in the tool schema. Use null for unknown optional fields and empty lists for unknown list fields."""
+
+JOB_FIT_EVALUATION_APPENDIX = """
+
+## job_fit_score / job_fit_reasoning (only when Job requirements are provided)
+51. When the user message includes a "Job requirements (דרישות משרה)" section below the CV, evaluate the candidate's **professional** skills and paid employment experience against those requirements.
+52. Set `job_fit_score` to an integer from 1 (poor fit) to 10 (excellent fit). Use the full scale — reserve 9–10 for strong matches on most critical requirements.
+53. Set `job_fit_reasoning` to a brief paragraph in Hebrew (preferred) or English explaining the score — cite specific CV strengths and gaps relative to the דרישות משרה.
+54. When NO "Job requirements (דרישות משרה)" section is present in the user message, ALWAYS set both `job_fit_score` and `job_fit_reasoning` to `null` — never guess job fit without requirements context."""
 
 MEETING_BRIEF_MAX_TOKENS = 2048
 
@@ -267,12 +282,39 @@ def _sanitize_programming_languages(candidate: CandidateSchema) -> CandidateSche
     return candidate.model_copy(update={"programming_languages": filtered})
 
 
-def _sanitize_candidate(candidate: CandidateSchema) -> CandidateSchema:
+def _sanitize_job_fit(
+    candidate: CandidateSchema,
+    *,
+    job_requirements: str | None,
+) -> CandidateSchema:
+    """Clear job-fit fields when no דרישות משרה context was supplied."""
+    if (job_requirements or "").strip():
+        return candidate
+    if candidate.job_fit_score is None and not (candidate.job_fit_reasoning or "").strip():
+        return candidate
+    logger.info("Cleared job_fit fields (no job requirements context)")
+    return candidate.model_copy(update={"job_fit_score": None, "job_fit_reasoning": None})
+
+
+def _sanitize_candidate(
+    candidate: CandidateSchema,
+    *,
+    job_requirements: str | None = None,
+) -> CandidateSchema:
     """Apply post-validation fixes before Monday upsert."""
     candidate = _sanitize_recruiter_notes(candidate)
     candidate = _sanitize_test_score(candidate)
     candidate = _sanitize_interview_summaries(candidate)
+    candidate = _sanitize_job_fit(candidate, job_requirements=job_requirements)
     return _sanitize_programming_languages(candidate)
+
+
+def _log_extraction_confidence_debug(candidate: CandidateSchema) -> None:
+    print("\n" + "=" * 40)
+    print(f"DEBUG - CANDIDATE: {candidate.name}")
+    print(f"CONFIDENCE LEVEL: {candidate.extraction_confidence.upper()}")
+    print(f"REASONING: {candidate.confidence_reasoning}")
+    print("=" * 40 + "\n")
 
 
 def _format_retry_message(errors: list[dict[str, Any]]) -> str:
@@ -286,20 +328,40 @@ def _format_retry_message(errors: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def _call_claude(cv_text: str, *, retry_message: str | None = None) -> dict[str, Any]:
+async def _call_claude(
+    cv_text: str,
+    *,
+    retry_message: str | None = None,
+    job_requirements: str | None = None,
+) -> dict[str, Any]:
     content = _truncate_cv(cv_text)
+    requirements = (job_requirements or "").strip()
+    if requirements:
+        content = f"{content}\n\n---\nJob requirements (דרישות משרה):\n{requirements}"
     if retry_message:
         content = f"{content}\n\n---\n{retry_message}"
+
+    system_prompt = SYSTEM_PROMPT + JOB_FIT_EVALUATION_APPENDIX if requirements else SYSTEM_PROMPT
+    tool_description = (
+        "Extract structured candidate fields from CV text. "
+        "Always set extraction_confidence and confidence_reasoning after assessing "
+        "programming_languages and tech-stack reliability (high / medium / low)."
+    )
+    if requirements:
+        tool_description += (
+            " When job requirements are provided, also set job_fit_score (1-10) and "
+            "job_fit_reasoning based on professional fit vs. דרישות משרה."
+        )
 
     response = await _get_client().messages.create(
         model=settings.anthropic_model,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": content}],
         tools=[
             {
                 "name": TOOL_NAME,
-                "description": "Extract structured candidate fields from CV text.",
+                "description": tool_description,
                 "input_schema": _tool_input_schema(),
             }
         ],
@@ -415,22 +477,40 @@ async def extract_client_meeting_profile(meeting_logs: str) -> tuple[str, str]:
     return _parse_client_meeting_profile_response(_extract_text_response(response))
 
 
-async def analyze_cv_with_claude(cv_text: str) -> CandidateSchema:
+async def analyze_cv_with_claude(
+    cv_text: str,
+    *,
+    job_requirements: str | None = None,
+) -> CandidateSchema:
     """Extract and validate structured candidate fields from CV text."""
     if not cv_text or not cv_text.strip():
         raise ValueError("CV text is empty.")
 
-    raw = await _call_claude(cv_text)
+    raw = await _call_claude(cv_text, job_requirements=job_requirements)
     try:
-        return _sanitize_candidate(CandidateSchema.model_validate(raw))
+        result = _sanitize_candidate(
+            CandidateSchema.model_validate(raw),
+            job_requirements=job_requirements,
+        )
+        _log_extraction_confidence_debug(result)
+        return result
     except ValidationError as first_error:
         logger.warning(
             "CV analysis validation failed, retrying: %s",
             json.dumps(first_error.errors(), ensure_ascii=False),
         )
-        raw = await _call_claude(cv_text, retry_message=_format_retry_message(list(first_error.errors())))
+        raw = await _call_claude(
+            cv_text,
+            retry_message=_format_retry_message(list(first_error.errors())),
+            job_requirements=job_requirements,
+        )
         try:
-            return _sanitize_candidate(CandidateSchema.model_validate(raw))
+            result = _sanitize_candidate(
+                CandidateSchema.model_validate(raw),
+                job_requirements=job_requirements,
+            )
+            _log_extraction_confidence_debug(result)
+            return result
         except ValidationError as second_error:
             fields = [".".join(str(p) for p in err.get("loc", ())) for err in second_error.errors()]
             raise ValueError(f"CV parse failed after retry. Invalid fields: {', '.join(fields)}") from second_error

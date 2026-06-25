@@ -62,6 +62,25 @@ class CandidateSchema(BaseModel):
         ),
         json_schema_extra={"monday_id": "dropdown_mm3j8kby"},
     )
+    extraction_confidence: Literal["high", "medium", "low"] = Field(
+        ...,
+        description=(
+            "Self-assessed confidence in programming_languages and tech-stack extraction. "
+            "'high' — technologies and years explicitly stated without contradictions; "
+            "'medium' — technologies listed but context/years partial or require slight inference; "
+            "'low' — poorly formatted CV, missing tech details, or significant assumptions required."
+        ),
+        json_schema_extra={"monday_id": "color_mm4nx466"},
+    )
+    confidence_reasoning: str = Field(
+        ...,
+        description=(
+            "Detailed reasoning for the selected extraction_confidence level based on CV clarity. "
+            "Short paragraph (English or Hebrew) explaining what made the tech-stack extraction "
+            "high, medium, or low — cite specific CV evidence (formatting, explicit dates, "
+            "contradictions, missing employment detail, etc.). Server logging only; not synced to Monday."
+        ),
+    )
     education: Optional[
         Literal["תואר ראשון", "תואר שני ומעלה", "תעודת הנדסאי", "קורס מקצועי", "בגרות מלאה"]
     ] = Field(None, json_schema_extra={"monday_id": "dropdown_mm3fxr2k"})
@@ -109,4 +128,21 @@ class CandidateSchema(BaseModel):
             "Always null when parsing a CV via the backend pipeline; never extract from the resume."
         ),
         json_schema_extra={"monday_id": "text_mm3nx5vz"},
+    )
+    job_fit_score: Optional[int] = Field(
+        None,
+        ge=1,
+        le=10,
+        description=(
+            "מדד התאמה למשרה — only when job requirements (דרישות משרה) context was provided. "
+            "Integer 1 (poor fit) to 10 (excellent fit) based on professional skills vs. requirements."
+        ),
+        json_schema_extra={"monday_id": "numeric_mm4np5tt"},
+    )
+    job_fit_reasoning: Optional[str] = Field(
+        None,
+        description=(
+            "נימוק התאמה למשרה — brief Hebrew or English paragraph justifying job_fit_score "
+            "against the provided דרישות משרה. null when no job requirements context was supplied."
+        ),
     )

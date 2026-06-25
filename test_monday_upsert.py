@@ -21,11 +21,16 @@ from services.monday_service import (
     ECOSYSTEM_NUMERIC_COLUMN_IDS,
     ECOSYSTEM_REACT_COLUMN_ID,
     ENTER_DATE_COLUMN_ID,
+    EXTRACTION_CONFIDENCE_COLUMN_ID,
     FoundItem,
     INTERVIEW_SUMMARIES_COLUMN_ID,
     JOB_CATEGORY_DROPDOWN_COLUMN_ID,
     LANGUAGE_EXPERIENCE_COLUMN_ID,
+    JOB_FIT_SCORE_COLUMN_ID,
+    apply_job_fit_columns,
+    fetch_board_job_requirements,
     get_main_hub_board_id,
+    is_job_board,
     PROGRAMMING_LANGUAGES_COLUMN_ID,
     RECRUITER_NOTES_COLUMN_ID,
     TEAM_LEAD_DROPDOWN_LABEL,
@@ -50,6 +55,8 @@ def _candidate(**overrides) -> CandidateSchema:
         "email": "Jane@Example.com",
         "phone": "055-672-2091",
         "recruiter_notes": "New note",
+        "extraction_confidence": "medium",
+        "confidence_reasoning": "Test reasoning",
     }
     defaults.update(overrides)
     return CandidateSchema(**defaults)
@@ -214,6 +221,16 @@ class BuildColumnValuesTests(unittest.TestCase):
         candidate = _candidate(interview_summaries="CV-derived interview notes")
         column_values = build_column_values(candidate)
         self.assertNotIn(INTERVIEW_SUMMARIES_COLUMN_ID, column_values)
+
+    def test_maps_extraction_confidence_to_status_index(self):
+        for confidence, expected_index in (("high", 1), ("medium", 0), ("low", 2)):
+            with self.subTest(confidence=confidence):
+                candidate = _candidate(extraction_confidence=confidence)
+                column_values = build_column_values(candidate)
+                self.assertEqual(
+                    column_values[EXTRACTION_CONFIDENCE_COLUMN_ID],
+                    {"index": expected_index},
+                )
 
 
 class MutationConstantsTests(unittest.TestCase):
@@ -519,6 +536,131 @@ class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         column_values = json.loads(variables["columnValues"])
         self.assertEqual(column_values[monday_service.EMAIL_COLUMN_ID]["email"], "jane@example.com")
         self.assertEqual(column_values[monday_service.PHONE_COLUMN_ID]["phone"], "0556722091")
+
+
+class JobBoardRequirementsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_is_job_board_false_for_main_hub(self):
+        self.assertFalse(is_job_board(get_main_hub_board_id()))
+
+    async def test_is_job_board_true_for_satellite(self):
+        self.assertTrue(is_job_board("5098534551"))
+
+    async def test_fetch_job_requirements_reads_mirror_from_job_info_group(self):
+        board_columns = [
+            {"id": "mirror_req", "title": "דרישות משרה", "type": "mirror"},
+            {"id": "mirror_other", "title": "ציון", "type": "mirror"},
+        ]
+        mirror_response = {
+            "data": {
+                "boards": [
+                    {
+                        "groups": [
+                            {
+                                "items_page": {
+                                    "items": [
+                                        {
+                                            "id": "job-info-item",
+                                            "name": "פרטי המשרה ודרישות",
+                                            "column_values": [
+                                                {
+                                                    "id": "mirror_req",
+                                                    "type": "mirror",
+                                                    "display_value": "5+ years Python, Django",
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        with (
+            patch.object(monday_service, "_fetch_board_groups", new_callable=AsyncMock) as mock_groups,
+            patch.object(monday_service, "_fetch_board_columns", new_callable=AsyncMock) as mock_columns,
+            patch.object(monday_service, "_post_graphql", new_callable=AsyncMock) as mock_post,
+        ):
+            mock_groups.return_value = [
+                {"id": "group_job_info", "title": "מידע כללי על המשרה"},
+            ]
+            mock_columns.return_value = board_columns
+            mock_post.return_value = mirror_response
+
+            result = await fetch_board_job_requirements("5098534551")
+
+        self.assertEqual(result, "5+ years Python, Django")
+        mock_post.assert_awaited_once()
+
+    async def test_resolve_job_info_group_matches_copy_suffix_title(self):
+        with patch.object(
+            monday_service,
+            "_fetch_board_groups",
+            new_callable=AsyncMock,
+            return_value=[{"id": "group_copy", "title": "מידע כללי על המשרה_copy"}],
+        ):
+            result = await monday_service._resolve_job_info_group_id("5098534551")
+
+        self.assertEqual(result, "group_copy")
+
+    def test_mirror_column_text_uses_display_value_only_for_mirror_type(self):
+        column = {
+            "type": "mirror",
+            "display_value": "Python, Django required",
+            "text": "stale mirror text",
+        }
+        self.assertEqual(
+            monday_service._mirror_column_text(column),
+            "Python, Django required",
+        )
+        empty_display = {"type": "mirror", "display_value": "", "text": "do not use"}
+        self.assertEqual(monday_service._mirror_column_text(empty_display), "")
+
+    def test_format_job_fit_numeric_value_is_plain_string(self):
+        self.assertEqual(monday_service._format_job_fit_numeric_value(8), "8")
+        self.assertIsInstance(monday_service._format_job_fit_numeric_value(8), str)
+
+    async def test_apply_job_fit_columns_uses_job_template_score_column(self):
+        candidate = _candidate(job_fit_score=8, job_fit_reasoning="Strong Python match")
+        column_values: dict = {}
+        board_columns = [
+            {
+                "id": JOB_FIT_SCORE_COLUMN_ID,
+                "type": "numbers",
+                "title": "מדד התאמה למשרה",
+            },
+            {"id": "text_reason", "type": "text", "title": "נימוק התאמה למשרה"},
+        ]
+
+        with (
+            patch.object(
+                monday_service,
+                "_fetch_board_columns",
+                new_callable=AsyncMock,
+                return_value=board_columns,
+            ),
+            patch.object(
+                monday_service,
+                "_resolve_column_id_by_title",
+                new_callable=AsyncMock,
+                return_value="text_reason",
+            ) as mock_resolve,
+        ):
+            await apply_job_fit_columns("5098534551", column_values, candidate)
+
+        self.assertEqual(column_values[JOB_FIT_SCORE_COLUMN_ID], "8")
+        self.assertIsInstance(column_values[JOB_FIT_SCORE_COLUMN_ID], str)
+        self.assertNotIsInstance(column_values[JOB_FIT_SCORE_COLUMN_ID], dict)
+        self.assertEqual(column_values["text_reason"], "Strong Python match")
+        mock_resolve.assert_awaited_once()
+
+    async def test_apply_job_fit_columns_skipped_on_main_hub(self):
+        candidate = _candidate(job_fit_score=9, job_fit_reasoning="Excellent fit")
+        column_values: dict = {}
+        await apply_job_fit_columns(get_main_hub_board_id(), column_values, candidate)
+        self.assertEqual(column_values, {})
 
 
 if __name__ == "__main__":

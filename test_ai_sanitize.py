@@ -8,6 +8,7 @@ from models.candidate import CandidateSchema, ProgrammingLanguageExperience
 from services.ai_service import (
     _sanitize_candidate,
     _sanitize_interview_summaries,
+    _sanitize_job_fit,
     _sanitize_programming_languages,
     _sanitize_recruiter_notes,
     _sanitize_test_score,
@@ -16,7 +17,11 @@ from services.ai_service import (
 
 
 def _minimal_candidate(**overrides) -> CandidateSchema:
-    defaults = {"name": "Test User"}
+    defaults = {
+        "name": "Test User",
+        "extraction_confidence": "medium",
+        "confidence_reasoning": "Test reasoning",
+    }
     defaults.update(overrides)
     return CandidateSchema(**defaults)
 
@@ -76,6 +81,26 @@ class InterviewSummariesSanitizeTests(unittest.TestCase):
         candidate = _minimal_candidate(interview_summaries=None)
         result = _sanitize_interview_summaries(candidate)
         self.assertIsNone(result.interview_summaries)
+
+
+class JobFitSanitizeTests(unittest.TestCase):
+    def test_clears_job_fit_without_requirements_context(self):
+        candidate = _minimal_candidate(job_fit_score=8, job_fit_reasoning="Strong backend match")
+        result = _sanitize_job_fit(candidate, job_requirements=None)
+        self.assertIsNone(result.job_fit_score)
+        self.assertIsNone(result.job_fit_reasoning)
+
+    def test_keeps_job_fit_when_requirements_provided(self):
+        candidate = _minimal_candidate(job_fit_score=7, job_fit_reasoning="Good React fit")
+        result = _sanitize_job_fit(candidate, job_requirements="Must know React and Node.js")
+        self.assertEqual(result.job_fit_score, 7)
+        self.assertEqual(result.job_fit_reasoning, "Good React fit")
+
+    def test_sanitize_candidate_clears_job_fit_without_context(self):
+        candidate = _minimal_candidate(job_fit_score=6, job_fit_reasoning="Partial match")
+        result = _sanitize_candidate(candidate, job_requirements=None)
+        self.assertIsNone(result.job_fit_score)
+        self.assertIsNone(result.job_fit_reasoning)
 
 
 class ProgrammingLanguagesSanitizeTests(unittest.TestCase):

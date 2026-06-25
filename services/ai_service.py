@@ -108,11 +108,62 @@ Use only exact enum labels defined in the tool schema. Use null for unknown opti
 
 JOB_FIT_EVALUATION_APPENDIX = """
 
-## job_fit_score / job_fit_reasoning (only when Job requirements are provided)
-51. When the user message includes a "Job requirements (דרישות משרה)" section below the CV, evaluate the candidate's **professional** skills and paid employment experience against those requirements.
-52. Set `job_fit_score` to an integer from 1 (poor fit) to 10 (excellent fit). Use the full scale — reserve 9–10 for strong matches on most critical requirements.
-53. Set `job_fit_reasoning` to a brief paragraph in Hebrew (preferred) or English explaining the score — cite specific CV strengths and gaps relative to the דרישות משרה.
-54. When NO "Job requirements (דרישות משרה)" section is present in the user message, ALWAYS set both `job_fit_score` and `job_fit_reasoning` to `null` — never guess job fit without requirements context."""
+## job_fit_score / job_fit_reasoning — multi-layered gap analysis (only when Job requirements are provided)
+51. When the user message includes a "Job requirements (דרישות משרה)" section below the CV, perform an explicit, multi-layered gap analysis between the JD and the parsed candidate profile. Evaluate **professional** skills and paid employment experience only — academic projects, bootcamp work, personal projects, and self-study do NOT count as professional years of experience.
+52. When NO "Job requirements (דרישות משרה)" section is present, ALWAYS set both `job_fit_score` and `job_fit_reasoning` to `null` — never guess job fit without requirements context.
+
+### Evaluation algorithm & weights
+53. Compute `job_fit_score` (integer 1–10) using this strict hierarchy:
+   - **Hard Requirements (תנאי חובה)** = **80%** of the weight.
+   - **Nice-to-Haves / Advantages (יתרונות)** = **20%** of the weight.
+54. **CRITICAL GATEKEEPING RULE:** If the candidate does NOT meet even **ONE** hard requirement (חובה), their **MAXIMUM** allowed `job_fit_score` is **3/10**. No exceptions. A partial degree, 0 professional years when 3+ are required, or academic-only tech knowledge all trigger this cap.
+55. Only after all hard requirements are satisfied may the score exceed 3; then apply the 80/20 blend and use the full 1–10 scale (reserve 9–10 for strong matches on nearly all hard requirements plus most advantages).
+
+### Dynamic mapping — four JD pillars
+56. Extract requirements from the JD and map the candidate against these **four pillars** (adapt labels to the specific role):
+   1. **Academic Degree** — e.g. BA / B.Sc / exact sciences vs. practical engineer / other.
+   2. **Professional Experience** — years in industry for the relevant stack; exclude bootcamp time, degree study, and academic projects.
+   3. **Primary Tech Stack** — e.g. C++, Linux, RT Embedded; production use in paid roles only.
+   4. **Tools & Methodologies** — e.g. GIT, JIRA, OOD, Design Patterns; must be evidenced in employment, not skills lists alone.
+57. For each pillar, classify the gap as **Pass**, **Partial**, or **Fail** internally before scoring. Any **Fail** on a hard-requirement pillar triggers rule 54.
+
+### Output fields
+58. Set `job_fit_reasoning` to a brief paragraph in **Hebrew** (preferred) citing pillar-by-pillar strengths and gaps relative to דרישות משרה — name specific hard requirements missed when applicable.
+59. When a hard requirement fails, set `recruiter_notes` to a short, actionable Hebrew disqualification note (e.g. `פסילה אוטומטית - פער ניסיון קריטי: ...`) — prepend any mandatory city note from rule 42 if applicable.
+60. When job-fit evaluation reveals thin or contradictory employment history, reflect that in `extraction_confidence` and `confidence_reasoning` (e.g. role starting in the current calendar year = 0 completed professional years).
+
+### System example — Senior Real-Time C++ position (ground truth for scoring)
+CURRENT SYSTEM YEAR: 2026
+
+JOB DESCRIPTION INPUT:
+"לחברה ביטחונית מובילה דרוש/ה מפתח/ת C++ למערכות Real Time.
+דרישות:
+• תואר ראשון במדעי המחשב / הנדסת תוכנה – חובה
+• 3+ שנות ניסיון ב-Modern C++ ב-Linux – חובה
+• ניסיון ב-RT Embedded ו-GIT/JIRA – חובה
+• ניסיון ב-OOD ודיזיין פטרנס – חובה"
+
+CANDIDATE CV INPUT (Sara Mauda):
+{
+  "name": "Sara Mauda",
+  "education": "הנדסת תוכנה מעשיים",
+  "years_of_experience": 0.0,
+  "experience_details": "BeyondCode (2026 - Present): AI Automation Engineer. Built Claude API and Monday integrations. Academic projects in C++, Angular, Spring Boot."
+}
+
+EXPECTED OUTPUT EVALUATION:
+- Degree Check: Partial/Fail (Practical Engineer vs. Required B.Sc/BA).
+- Experience Check: CRITICAL FAIL (0 years professional C++ experience vs. 3+ years required. The 2026 position just started and is in AI Automation, not core RT/C++).
+- Core Stack Check: Fail (Academic knowledge only, no production-grade Linux/C++ experience).
+
+FINAL JSON OUTPUT FOR THIS CANDIDATE:
+{
+  "job_fit_score": 2,
+  "extraction_confidence": "low",
+  "confidence_reasoning": "Candidate claims a role starting in 2026 (current year), representing 0 actual years of professional history. Most experience is academic/projects.",
+  "recruiter_notes": "פסילה אוטומטית - פער ניסיון קריטי: המשרה דורשת לפחות 3 שנות ניסיון תעסוקתי ב-C++ ו-Linux, בעוד שלמועמדת יש 0 שנות ניסיון מוכח בתעשייה ורק רקע אקדמי.",
+  "job_fit_reasoning": "אי התאמה לתנאי הסף (חובה). המועמדת היא בוגרת טרייה ללא ניסיון תעסוקתי בפיתוח מערכות Real Time או Linux (0 שנים בפועל מול 3 נדרשות). בנוסף, התואר הוא הנדסאי ולא תואר אקדמי ראשון כפי שנדרש כחובה במשרה."
+}"""
 
 MEETING_BRIEF_MAX_TOKENS = 2048
 
@@ -349,8 +400,9 @@ async def _call_claude(
     )
     if requirements:
         tool_description += (
-            " When job requirements are provided, also set job_fit_score (1-10) and "
-            "job_fit_reasoning based on professional fit vs. דרישות משרה."
+            " When job requirements are provided, perform four-pillar gap analysis "
+            "(degree, experience, tech stack, tools/methodologies) and set job_fit_score "
+            "(1-10, max 3 if any hard requirement fails) and job_fit_reasoning in Hebrew."
         )
 
     response = await _get_client().messages.create(

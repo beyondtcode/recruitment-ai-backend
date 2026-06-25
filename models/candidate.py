@@ -135,14 +135,16 @@ class CandidateSchema(BaseModel):
         le=10,
         description=(
             "מדד התאמה למשרה — only when job requirements (דרישות משרה) context was provided. "
-            "Integer 1 (poor fit) to 10 (excellent fit) based on professional skills vs. requirements."
+            "Integer 1–10 from four-pillar gap analysis: hard requirements (חובה) 80%, "
+            "advantages (יתרונות) 20%. MAX 3 if any single hard requirement is not met."
         ),
         json_schema_extra={"monday_id": "numeric_mm4np5tt"},
     )
     job_fit_reasoning: Optional[str] = Field(
         None,
         description=(
-            "נימוק התאמה למשרה — brief Hebrew or English paragraph justifying job_fit_score "
-            "against the provided דרישות משרה. null when no job requirements context was supplied."
+            "נימוק התאמה למשרה — brief Hebrew paragraph with pillar-by-pillar gaps "
+            "(degree, experience, tech stack, tools) vs. דרישות משרה. "
+            "null when no job requirements context was supplied."
         ),
     )

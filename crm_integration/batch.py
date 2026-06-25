@@ -313,12 +313,15 @@ async def process_recent_notetaker_meetings(
         }
         try:
             if await meeting_already_exists(payload, settings=settings):
-                skipped.append(meeting_key)
+                skipped.append({**meeting_key, "reason": "already_exists"})
                 continue
             result: NodeTakerWebhookResult = await process_nodetaker_webhook(
                 payload,
                 settings=settings,
             )
+            if result.status == "skipped":
+                skipped.append({**meeting_key, "reason": "no_crm_contact_match"})
+                continue
             processed.append(
                 {
                     **meeting_key,

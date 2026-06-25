@@ -31,10 +31,19 @@ async def process_nodetaker_webhook(
         len(payload.participant_emails),
     )
 
-    if not payload.participant_emails:
-        warnings.append("No participant emails provided; board relation will be skipped")
-
     match = await find_contact_by_emails(payload.participant_emails, settings=settings)
+    if not match:
+        logger.warning(
+            "Skipping meeting summary: no CRM client/lead match for title=%r date=%s emails=%s",
+            payload.meeting_title,
+            payload.meeting_date.isoformat(),
+            payload.participant_emails,
+        )
+        return NodeTakerWebhookResult(
+            status="skipped",
+            match_type="none",
+            warnings=["No CRM client/lead match; meeting summary skipped"],
+        )
 
     meeting_item_id = await create_meeting_item(payload, match, settings=settings)
 
@@ -51,7 +60,7 @@ async def process_nodetaker_webhook(
         logger.error("Unexpected Workdoc error for item %s: %s", meeting_item_id, exc)
         warnings.append(f"Workdoc step failed: {exc}")
 
-    if match and payload.meeting_summary.strip():
+    if payload.meeting_summary.strip():
         try:
             past_context = await gather_past_meeting_context(
                 payload.participant_emails,
@@ -64,16 +73,14 @@ async def process_nodetaker_webhook(
         except Exception as exc:
             logger.exception("Client profile update failed for match %s", match.item_id)
             warnings.append(f"Client profile update failed: {exc}")
-    elif not match:
-        warnings.append("No client/lead match; profile update skipped")
-    elif not payload.meeting_summary.strip():
+    else:
         warnings.append("Empty meeting summary; profile update skipped")
 
     return NodeTakerWebhookResult(
         status="success",
         meeting_item_id=meeting_item_id,
-        match_type=match.match_type if match else "none",
-        matched_email=match.matched_email if match else None,
+        match_type=match.match_type,
+        matched_email=match.matched_email,
         doc_id=doc_id,
         doc_created=doc_created,
         warnings=warnings,

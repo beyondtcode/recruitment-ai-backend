@@ -332,6 +332,75 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["skipped_count"], 1)
         mock_process.assert_awaited_once()
 
+    @patch("crm_integration.batch.process_nodetaker_webhook", new_callable=AsyncMock)
+    @patch("crm_integration.batch.meeting_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.fetch_notetaker_meetings_since", new_callable=AsyncMock)
+    async def test_skips_when_no_crm_contact_match(
+        self,
+        mock_fetch,
+        mock_exists,
+        mock_process,
+    ):
+        from crm_integration.batch import process_recent_notetaker_meetings
+        from crm_integration.schemas import NodeTakerWebhookResult
+
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        mock_fetch.return_value = [payload]
+        mock_exists.return_value = False
+        mock_process.return_value = NodeTakerWebhookResult(
+            status="skipped",
+            match_type="none",
+            warnings=["No CRM client/lead match; meeting summary skipped"],
+        )
+
+        summary = await process_recent_notetaker_meetings(hours=24, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(summary["fetched"], 1)
+        self.assertEqual(summary["processed_count"], 0)
+        self.assertEqual(summary["skipped_count"], 1)
+        self.assertEqual(summary["error_count"], 0)
+        self.assertEqual(summary["skipped"][0]["reason"], "no_crm_contact_match")
+        mock_process.assert_awaited_once()
+
+    @patch("crm_integration.batch.process_nodetaker_webhook", new_callable=AsyncMock)
+    @patch("crm_integration.batch.meeting_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.fetch_notetaker_meetings_since", new_callable=AsyncMock)
+    async def test_continues_loop_when_one_meeting_has_no_crm_match(
+        self,
+        mock_fetch,
+        mock_exists,
+        mock_process,
+    ):
+        from crm_integration.batch import process_recent_notetaker_meetings
+        from crm_integration.schemas import NodeTakerWebhookResult
+
+        payload_skipped = NodeTakerWebhookPayload.model_validate(
+            {**VALID_PAYLOAD, "meeting_title": "Unknown Contact"}
+        )
+        payload_processed = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        mock_fetch.return_value = [payload_skipped, payload_processed]
+        mock_exists.return_value = False
+        mock_process.side_effect = [
+            NodeTakerWebhookResult(
+                status="skipped",
+                match_type="none",
+                warnings=["No CRM client/lead match; meeting summary skipped"],
+            ),
+            NodeTakerWebhookResult(
+                status="success",
+                meeting_item_id="999",
+                doc_created=True,
+            ),
+        ]
+
+        summary = await process_recent_notetaker_meetings(hours=24, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(summary["fetched"], 2)
+        self.assertEqual(summary["processed_count"], 1)
+        self.assertEqual(summary["skipped_count"], 1)
+        self.assertEqual(summary["error_count"], 0)
+        self.assertEqual(mock_process.await_count, 2)
+
 
 class MondayFetcherTests(unittest.TestCase):
     def test_meeting_matches_participants_on_same_date(self):
@@ -923,7 +992,7 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
-    async def test_skips_profile_update_when_no_match(
+    async def test_skips_entire_pipeline_when_no_crm_match(
         self,
         mock_find,
         mock_create_item,
@@ -935,16 +1004,21 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         from crm_integration.pipeline import process_nodetaker_webhook
 
         mock_find.return_value = None
-        mock_create_item.return_value = "555"
-        mock_create_doc.return_value = ("777", True, [])
 
         payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
         result = await process_nodetaker_webhook(payload, settings=TEST_CRM_SETTINGS)
 
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.meeting_item_id)
+        self.assertFalse(result.doc_created)
+        self.assertEqual(result.match_type, "none")
+        mock_find.assert_awaited_once()
+        mock_create_item.assert_not_awaited()
+        mock_create_doc.assert_not_awaited()
         mock_gather.assert_not_awaited()
         mock_extract.assert_not_awaited()
         mock_update_profile.assert_not_awaited()
-        self.assertIn("No client/lead match; profile update skipped", result.warnings)
+        self.assertIn("No CRM client/lead match; meeting summary skipped", result.warnings)
 
 
 class MorningBriefHelperTests(unittest.TestCase):

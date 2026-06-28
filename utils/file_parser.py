@@ -328,6 +328,54 @@ def _extract_docx(file_bytes: bytes) -> str:
     return result
 
 
+def validate_cv_attachment_bytes(filename: str, file_bytes: bytes) -> str | None:
+    """Return ``.pdf`` / ``.docx`` when magic bytes match, else ``None``."""
+    if not file_bytes:
+        return None
+    ext = Path(filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return None
+    if file_bytes.startswith(PDF_MAGIC):
+        return ".pdf"
+    if file_bytes.startswith(DOCX_MAGIC):
+        return ".docx"
+    return None
+
+
+_CV_SIGNAL_KEYWORDS_RE = re.compile(
+    r"(קורות\s*חיים|ניסיון|השכלה|תעסוקה|מיומנויות|"
+    r"education|experience|skills|employment|resume|curriculum\s*vitae|"
+    r"work\s*history|professional)",
+    re.IGNORECASE,
+)
+
+_BOILERPLATE_LINE_RE = re.compile(
+    r"(unsubscribe|opt[\s-]?out|confidential|privacy\s*policy|"
+    r"כל\s*הזכויות|הודעה\s*זו\s*נשלחה|להסרה\s*מהרשימה)",
+    re.IGNORECASE,
+)
+
+
+def is_plausible_cv_text(text: str) -> bool:
+    """Heuristic check that extracted text resembles a CV, not a signature or footer."""
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+
+    if not _CV_SIGNAL_KEYWORDS_RE.search(normalized):
+        return False
+
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    boilerplate_lines = sum(1 for line in lines if _BOILERPLATE_LINE_RE.search(line))
+    if boilerplate_lines / len(lines) > 0.6:
+        return False
+
+    return True
+
+
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     """
     Extract plain text from an uploaded file held in memory.

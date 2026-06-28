@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from models.candidate import CandidateSchema
 from services.ai_service import analyze_cv_with_claude
 from services.monday_service import (
     fetch_board_job_requirements,
@@ -23,6 +25,32 @@ logger = logging.getLogger(__name__)
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 TEMP_CV_DIR = _BACKEND_ROOT / "temp_received_cvs"
 
+_GENERIC_NAMES = frozenset({"", "unknown", "לא ידוע", "n/a", "na"})
+
+
+@dataclass(frozen=True)
+class UpsertResult:
+    item_id: str
+    created: bool
+
+
+class CvPipelineSkipped(Exception):
+    """Raised when a CV attachment is intentionally not upserted."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _is_low_confidence_no_identity(candidate: CandidateSchema) -> bool:
+    if candidate.extraction_confidence != "low":
+        return False
+    name = (candidate.name or "").strip().lower()
+    has_name = bool(name) and name not in _GENERIC_NAMES
+    has_email = bool((candidate.email or "").strip())
+    has_phone = bool((candidate.phone or "").strip())
+    return not has_name and not has_email and not has_phone
+
 
 async def process_cv_bytes(
     file_bytes: bytes,
@@ -33,7 +61,8 @@ async def process_cv_bytes(
     sync_to_hub: bool = True,
     source_item_id: str | None = None,
     job_requirements: str | None = None,
-) -> None:
+    reject_low_confidence_no_identity: bool = False,
+) -> UpsertResult:
     """
     Parse CV bytes with Claude and upsert to the given board (and optionally Main Hub).
 
@@ -50,6 +79,9 @@ async def process_cv_bytes(
     """
     cv_text = extract_text_from_file(file_bytes, filename)
     candidate = await analyze_cv_with_claude(cv_text, job_requirements=job_requirements)
+
+    if reject_low_confidence_no_identity and _is_low_confidence_no_identity(candidate):
+        raise CvPipelineSkipped("low_confidence_no_identity")
 
     logger.info(
         "Extracted candidate from %s: %s",
@@ -99,23 +131,33 @@ async def process_cv_bytes(
                     filename,
                     board_id,
                 )
+        return UpsertResult(item_id=item_id, created=created)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
 
 
-async def process_cv_file(file_path: Path, *, board_id: str | None = None) -> None:
+async def process_cv_file(
+    file_path: Path,
+    *,
+    board_id: str | None = None,
+    reject_low_confidence_no_identity: bool = False,
+) -> UpsertResult:
     """Parse a local CV file, extract fields with Claude, and upsert to Monday."""
     file_bytes = file_path.read_bytes()
-    await process_cv_bytes(
-        file_bytes,
-        file_path.name,
-        board_id=board_id or get_main_hub_board_id(),
-        cv_file_path=file_path.resolve(),
-        sync_to_hub=False,
-    )
-    file_path.unlink(missing_ok=True)
+    try:
+        result = await process_cv_bytes(
+            file_bytes,
+            file_path.name,
+            board_id=board_id or get_main_hub_board_id(),
+            cv_file_path=file_path.resolve(),
+            sync_to_hub=False,
+            reject_low_confidence_no_identity=reject_low_confidence_no_identity,
+        )
+    finally:
+        file_path.unlink(missing_ok=True)
     logger.info("Processed and removed temporary file: %s", file_path.name)
+    return result
 
 
 async def process_monday_webhook(item_id: str, board_id: str) -> None:

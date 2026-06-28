@@ -35,7 +35,9 @@ flowchart TB
         Claude[ai_service.py — Claude]
         MondayCV[monday_service.py — upsert candidate]
         Email --> main_py[main.py CLI]
+        Email --> email_batch[email_batch.py daily 08:00]
         main_py --> Parser
+        email_batch --> Parser
         MondayForm --> WebhookCV
         WebhookCV --> Parser
         Parser --> Claude
@@ -67,8 +69,8 @@ flowchart TB
 
 | Entry point              | When to use it                                                 |
 | ------------------------ | -------------------------------------------------------------- |
-| `app.py` (via `uvicorn`) | Production server: webhooks, health check, scheduled CRM batch |
-| `main.py`                | One-off CLI: poll email inbox and process new CV attachments   |
+| `app.py` (via `uvicorn`) | Production server: webhooks, health check, scheduled CRM + email CV jobs |
+| `main.py`                | One-off CLI: poll today's email inbox and process CV attachments           |
 
 
 ---
@@ -97,6 +99,7 @@ This starts FastAPI with:
 - CV webhook at `POST /monday-webhook`
 - CRM webhook at `POST /nodetaker-webhook`
 - A **morning briefing cron** at 07:00 Asia/Jerusalem (in-process; requires the server to be awake)
+- A **daily email CV batch** at 08:00 Asia/Jerusalem (in-process; scans IMAP and upserts to Main Hub)
 - A **Notetaker batch webhook** at `POST /run-notetaker-batch` — call at 00:00 from an external cron to wake the server; batch runs at 00:05
 
 ### Run email CV ingestion (CLI)
@@ -105,7 +108,17 @@ This starts FastAPI with:
 python main.py
 ```
 
-Polls the configured IMAP inbox for **unseen** messages from **today**, saves PDF/DOCX attachments, runs the CV pipeline, then deletes the temp files.
+Polls the configured IMAP inbox for **all messages from today** (read and unread), applies strict CV attachment filtering, and upserts candidates to the Main Hub.
+
+### Email ingestion behavior
+
+The scheduled job (`app.py`, 08:00) and CLI (`main.py`, today only) share `services/email_batch.py`:
+
+1. **Lookback window** — scheduler scans all emails from the past ~24 hours (`date_gte=yesterday`); CLI scans today only.
+2. **No UNSEEN dependency** — read and unread messages are both included; `\Seen` is not used for filtering or dedup.
+3. **Attachment filtering** — only `.pdf` / `.docx` with valid magic bytes, minimum 2 KB size, and non-denylisted filenames.
+4. **CV content validation** — minimum text length and keyword heuristics before Claude; schema validation failures count as skipped, not errors.
+5. **Deduplication** — `Message-ID` + SHA-256 state file (7-day retention) avoids re-processing the same attachment; Main Hub upsert by email/phone updates existing profiles instead of creating duplicates.
 
 ### Health check
 
@@ -132,7 +145,7 @@ Create a `.env` file. Variables are grouped by which system needs them.
 | `MONDAY_GROUP_ID`       | No       | Group for new items (default: `topics`)                  |
 
 
-### Email ingestion (`main.py` only)
+### Email ingestion (scheduled job + CLI)
 
 
 | Variable         | Required    | Purpose              |
@@ -140,6 +153,8 @@ Create a `.env` file. Variables are grouped by which system needs them.
 | `EMAIL_HOST`     | Yes (email) | IMAP server hostname |
 | `EMAIL_USER`     | Yes (email) | IMAP username        |
 | `EMAIL_PASSWORD` | Yes (email) | IMAP password        |
+
+Required for the **08:00 daily email CV batch** in `app.py` and for manual runs via `main.py`. If unset, the scheduled job logs a warning and skips without crashing the server.
 
 
 ### CRM meeting pipeline (`crm_integration/`)
@@ -232,7 +247,7 @@ Monday board updated (name, skills, city, summary, file, ecosystem columns, etc.
 - **Upsert, not always create:** If a candidate with the same email or phone already exists on the board, the item is updated instead of duplicated.
 - **Main Hub sync:** Webhook-triggered CVs are written to the triggering board *and* the Main Hub (`MONDAY_BOARD_ID`), unless the trigger already came from the Hub.
 - **AI rules are strict:** `ai_service.py` contains a long system prompt tuned for Israeli tech recruiting (city inference, Haredi sector, professional-only experience years, etc.). Post-processing sanitizers clear fields that must never come from CVs (`test_score`, `interview_summaries`).
-- **Email path:** `main.py` only processes **unseen** emails received **today** with PDF/DOCX attachments.
+- **Email path:** `email_batch.py` scans IMAP for PDF/DOCX CVs (read + unread), validates content, deduplicates via Message-ID + file hash and Main Hub email/phone upsert. Runs daily at **08:00** in `app.py` or manually via `main.py` (today only).
 
 ### Data model
 
@@ -297,7 +312,8 @@ recruitment-ai-backend/
 ├── services/
 │   ├── ai_service.py       # Claude CV extraction + validation + sanitizers
 │   ├── cv_pipeline.py      # Shared CV flow used by email, webhook, and tests
-│   ├── email_service.py    # IMAP: fetch unseen PDF/DOCX attachments from inbox
+│   ├── email_batch.py      # Daily email CV batch orchestration, validation, dedup
+│   ├── email_service.py    # IMAP: fetch PDF/DOCX attachments (all messages in window)
 │   └── monday_service.py   # Monday GraphQL: upsert candidates, column mapping, file upload
 │
 ├── utils/
@@ -324,8 +340,8 @@ recruitment-ai-backend/
 
 | File                   | Role                                                                                                                                                                   |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for the nightly Notetaker batch, exposes `/health` and a dev test endpoint. |
-| `**main.py**`          | Standalone script: `fetch_new_cv_attachments()` → `process_cv_file()` for each file. Use when CVs arrive by email rather than Monday forms.                            |
+| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for morning briefings (07:00) and email CV batch (08:00), exposes `/health` and a dev test endpoint. |
+| `**main.py**`          | Standalone script: `process_email_cv_batch(lookback_days=0)` for same-day manual email CV ingestion.                                                                                                 |
 | `**requirements.txt**` | Dependencies: FastAPI, Anthropic SDK, httpx, pypdf, python-docx, imap-tools, APScheduler, Pydantic, etc.                                                               |
 | `**render.yaml**`      | Deploys as a Render web service running `uvicorn app:app`.                                                                                                             |
 
@@ -352,8 +368,9 @@ recruitment-ai-backend/
 | File                    | Role                                                                                                                                                                                                                                                                      |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `**ai_service.py**`     | Sends CV text to Claude with a structured tool call. Validates against `CandidateSchema`, retries once on validation errors, then sanitizes output (e.g. strips city notes when city is empty, caps programming languages at 5).                                          |
-| `**cv_pipeline.py**`    | **The shared CV orchestrator.** `process_cv_bytes()` — parse → AI → Monday upsert. `process_monday_webhook()` — download file from Monday item first. `run_webhook_pipeline_sync()` — sync wrapper for FastAPI background tasks.                                          |
-| `**email_service.py`**  | Connects to IMAP, downloads PDF/DOCX from unseen today's emails to `temp_received_cvs/`, marks messages as read.                                                                                                                                                          |
+| `**cv_pipeline.py**`    | **The shared CV orchestrator.** `process_cv_bytes()` / `process_cv_file()` — parse → AI → Monday upsert (returns `UpsertResult`). `process_monday_webhook()` — download file from Monday item first. |
+| `**email_batch.py**`    | `process_email_cv_batch()` — IMAP fetch, text/CV validation, Message-ID + SHA-256 dedup, Main Hub upsert stats. Used by scheduler and `main.py`.                                                       |
+| `**email_service.py**`  | Connects to IMAP, downloads validated PDF/DOCX from all messages in the lookback window to `temp_received_cvs/`. Does not mutate `\Seen`.                                                               |
 | `**monday_service.py**` | Large module: all Monday.com API interaction for **candidates**. Maps `CandidateSchema` fields to column JSON, resolves dropdown labels, uploads CV files, searches for existing items by email/phone, upserts items, and provides `post_graphql()` used by CRM code too. |
 
 
@@ -387,7 +404,7 @@ recruitment-ai-backend/
 
 | Path                             | Role                                                                     |
 | -------------------------------- | ------------------------------------------------------------------------ |
-| `temp_received_cvs/`             | Created at runtime for downloaded CV files; cleaned up after processing. |
+| `temp_received_cvs/`             | Downloaded CV files and `.processed_attachments.json` dedup state; cleaned up after processing. |
 | `.env`                           | Local secrets — **never commit**.                                        |
 | `__pycache__/`, `.pytest_cache/` | Python/test caches — ignore.                                             |
 
@@ -406,6 +423,7 @@ pytest
 | Test file                       | What it covers                                                                                          |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `test_crm_nodetaker_webhook.py` | CRM webhook endpoint, contact lookup, meeting classification, Workdoc building, Notetaker fetch helpers |
+| `test_email_batch.py`           | Email attachment gate, CV text heuristics, hash dedup, batch summary stats                          |
 | `test_pipeline.py`              | CV pipeline integration                                                                                 |
 | `test_ai_sanitize.py`           | AI output sanitizers (recruiter notes, test_score, etc.)                                                |
 | `test_file_parser.py`           | PDF/DOCX text extraction                                                                                |
@@ -438,7 +456,7 @@ Point Monday webhooks at:
 | Question                            | Answer                                                                     |
 | ----------------------------------- | -------------------------------------------------------------------------- |
 | Where does the server run?          | `app.py` via uvicorn (Render in prod)                                      |
-| How do CVs get in?                  | Email (`main.py`) or Monday upload (`/monday-webhook`)                     |
+| How do CVs get in?                  | Email (daily 08:00 batch or `main.py` CLI) or Monday upload (`/monday-webhook`) |
 | Who reads the CV?                   | Claude in `ai_service.py`                                                  |
 | Where does candidate data go?       | Monday boards via `monday_service.py`                                      |
 | How do meetings get in?             | NodeTaker webhook or daily Notetaker batch                                 |

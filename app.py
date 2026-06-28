@@ -17,6 +17,7 @@ from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
 from services.cv_pipeline import run_webhook_pipeline_sync
+from services.email_batch import process_email_cv_batch
 
 load_dotenv()
 
@@ -41,6 +42,23 @@ async def _run_morning_briefs() -> None:
         logger.exception("Morning briefing batch failed")
 
 
+async def _run_email_cv_batch() -> None:
+    logger.info("Daily email CV batch started")
+    try:
+        summary = await process_email_cv_batch()
+        logger.info(
+            "Daily email CV batch finished: attachments=%d created=%d updated=%d "
+            "skipped=%d errors=%d",
+            summary.get("attachment_count", 0),
+            summary.get("created_count", 0),
+            summary.get("updated_count", 0),
+            summary.get("skipped_count", 0),
+            summary.get("error_count", 0),
+        )
+    except Exception:
+        logger.exception("Daily email CV batch failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone=ISR_TZ)
@@ -52,10 +70,18 @@ async def lifespan(app: FastAPI):
         id="morning_briefing_batch",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_email_cv_batch,
+        trigger="cron",
+        hour=8,
+        minute=0,
+        id="daily_email_cv_batch",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(
-        "APScheduler started: morning briefings at 07:00 Asia/Jerusalem "
-        "(notetaker batch is triggered via POST /run-notetaker-batch webhook)"
+        "APScheduler started: morning briefings at 07:00, email CV batch at 08:00 "
+        "Asia/Jerusalem (notetaker batch is triggered via POST /run-notetaker-batch webhook)"
     )
     yield
     scheduler.shutdown(wait=False)

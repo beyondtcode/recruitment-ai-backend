@@ -189,6 +189,10 @@ _LANGUAGE_EXPERIENCE_ENTRY_RE = re.compile(
 )
 NAME_COLUMN_ID = "name"
 FIND_ITEMS_LIMIT = 25
+
+MIRLY_REMINDERS_BOARD_ID = "5099196766"
+MIRLY_REMINDERS_DATE_COLUMN_ID = "date4"
+MIRLY_REMINDERS_INFO_COLUMN_ID = "long_text_mm4nf3z8"
 CV_FILE_FETCH_MAX_ATTEMPTS = 4
 CV_FILE_FETCH_RETRY_DELAY_SECONDS = 3
 
@@ -351,6 +355,24 @@ query ($boardId: ID!, $limit: Int!, $columns: [ItemsPageByColumnValuesQuery!]!) 
     items {
       id
       name
+    }
+  }
+}
+"""
+
+ITEMS_PAGE_WITH_COLUMNS_QUERY = """
+query ($boardId: ID!, $limit: Int!, $columnIds: [String!]!, $queryParams: ItemsQuery!) {
+  boards(ids: [$boardId]) {
+    items_page(limit: $limit, query_params: $queryParams) {
+      items {
+        id
+        name
+        column_values(ids: $columnIds) {
+          id
+          text
+          value
+        }
+      }
     }
   }
 }
@@ -1582,6 +1604,106 @@ async def _query_items_by_column(
         for item in items
         if item.get("id") is not None
     ]
+
+
+def _mirly_column_text(column: dict[str, Any]) -> str:
+    text = str(column.get("text") or "").strip()
+    if text:
+        return text
+
+    value = column.get("value")
+    if not value:
+        return ""
+
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    if isinstance(parsed, dict):
+        for key in ("text", "date", "email"):
+            field_value = parsed.get(key)
+            if field_value:
+                return str(field_value).strip()
+    return ""
+
+
+def _mirly_item_column_by_id(item: dict[str, Any], column_id: str) -> dict[str, Any] | None:
+    for column in item.get("column_values") or []:
+        if str(column.get("id")) == column_id:
+            return column
+    return None
+
+
+async def get_mirly_reminder_by_title(meeting_title: str) -> dict | None:
+    """Look up a Mirly reminder item by meeting title on board 5099196766."""
+    title = meeting_title.strip()
+    if not title:
+        return None
+
+    title_key = title.casefold()
+    column_ids = [MIRLY_REMINDERS_DATE_COLUMN_ID, MIRLY_REMINDERS_INFO_COLUMN_ID]
+
+    body = await _post_graphql(
+        ITEMS_PAGE_WITH_COLUMNS_QUERY,
+        {
+            "boardId": MIRLY_REMINDERS_BOARD_ID,
+            "limit": FIND_ITEMS_LIMIT,
+            "columnIds": column_ids,
+            "queryParams": {
+                "rules": [
+                    {
+                        "column_id": "name",
+                        "compare_value": [title],
+                        "operator": "contains_text",
+                    }
+                ],
+            },
+        },
+    )
+
+    boards = body.get("data", {}).get("boards") or []
+    items: list[dict[str, Any]] = []
+    if boards:
+        items = (boards[0].get("items_page") or {}).get("items") or []
+
+    if len(items) >= FIND_ITEMS_LIMIT:
+        logger.warning(
+            "Mirly reminders query hit FIND_ITEMS_LIMIT=%d for title=%r",
+            FIND_ITEMS_LIMIT,
+            title,
+        )
+
+    matches = [
+        item
+        for item in items
+        if str(item.get("name") or "").strip().casefold() == title_key
+    ]
+    if not matches:
+        return None
+
+    if len(matches) > 1:
+        logger.warning(
+            "Multiple Mirly reminders found for title=%r; using first match",
+            title,
+        )
+
+    reminder_item = matches[0]
+    result: dict[str, str] = {}
+
+    date_column = _mirly_item_column_by_id(reminder_item, MIRLY_REMINDERS_DATE_COLUMN_ID)
+    if date_column:
+        date_text = _mirly_column_text(date_column)
+        if date_text:
+            result["date"] = date_text[:10]
+
+    info_column = _mirly_item_column_by_id(reminder_item, MIRLY_REMINDERS_INFO_COLUMN_ID)
+    if info_column:
+        info_text = _mirly_column_text(info_column)
+        if info_text:
+            result["info"] = info_text
+
+    return result or None
 
 
 async def _disambiguate_email_matches(

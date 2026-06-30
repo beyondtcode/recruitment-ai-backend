@@ -24,6 +24,7 @@ from crm_integration.meeting import (
     build_meeting_logs_for_profile,
     classify_meeting_type,
     column_text,
+    create_meeting_item,
     extract_meeting_summary_intro,
     external_participant_emails,
     internal_participant_emails,
@@ -1051,6 +1052,175 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         mock_extract.assert_not_awaited()
         mock_update_profile.assert_not_awaited()
         self.assertIn("No CRM client/lead match; meeting summary skipped", result.warnings)
+
+
+class GetMirlyReminderByTitleTests(unittest.IsolatedAsyncioTestCase):
+    def _reminder_item(
+        self,
+        *,
+        item_id: str,
+        title: str,
+        reminder_date: str = "",
+        info_text: str = "",
+    ) -> dict:
+        date_value = json.dumps({"date": reminder_date}) if reminder_date else ""
+        info_value = json.dumps({"text": info_text}) if info_text else ""
+        return {
+            "id": item_id,
+            "name": title,
+            "column_values": [
+                {
+                    "id": "date4",
+                    "text": reminder_date,
+                    "value": date_value,
+                },
+                {
+                    "id": "long_text_mm4nf3z8",
+                    "text": info_text,
+                    "value": info_value,
+                },
+            ],
+        }
+
+    def _reminder_search_response(self, items: list[dict]) -> dict:
+        return {
+            "data": {
+                "boards": [
+                    {
+                        "items_page": {
+                            "items": items,
+                        }
+                    }
+                ]
+            }
+        }
+
+    @patch("services.monday_service._post_graphql", new_callable=AsyncMock)
+    async def test_returns_date_and_info_on_case_insensitive_title_match(
+        self,
+        mock_graphql,
+    ):
+        from services.monday_service import get_mirly_reminder_by_title
+
+        mock_graphql.return_value = self._reminder_search_response(
+            [
+                self._reminder_item(
+                    item_id="900",
+                    title="  Q1 Planning  ",
+                    reminder_date="2026-06-25",
+                    info_text="Follow up on contract",
+                )
+            ]
+        )
+
+        result = await get_mirly_reminder_by_title("q1 planning")
+
+        self.assertEqual(
+            result,
+            {"date": "2026-06-25", "info": "Follow up on contract"},
+        )
+        mock_graphql.assert_awaited_once()
+        variables = mock_graphql.await_args.args[1]
+        self.assertEqual(variables["boardId"], "5099196766")
+        self.assertEqual(variables["columnIds"], ["date4", "long_text_mm4nf3z8"])
+
+    @patch("services.monday_service._post_graphql", new_callable=AsyncMock)
+    async def test_returns_none_when_no_title_match(self, mock_graphql):
+        from services.monday_service import get_mirly_reminder_by_title
+
+        mock_graphql.return_value = self._reminder_search_response(
+            [
+                self._reminder_item(
+                    item_id="900",
+                    title="Different Meeting",
+                    reminder_date="2026-06-25",
+                    info_text="Follow up",
+                )
+            ]
+        )
+
+        result = await get_mirly_reminder_by_title("Q1 Planning")
+
+        self.assertIsNone(result)
+
+    @patch("services.monday_service._post_graphql", new_callable=AsyncMock)
+    async def test_returns_only_non_empty_fields(self, mock_graphql):
+        from services.monday_service import get_mirly_reminder_by_title
+
+        mock_graphql.return_value = self._reminder_search_response(
+            [
+                self._reminder_item(
+                    item_id="901",
+                    title="Q1 Planning",
+                    info_text="Only info, no date",
+                )
+            ]
+        )
+
+        result = await get_mirly_reminder_by_title("Q1 Planning")
+
+        self.assertEqual(result, {"info": "Only info, no date"})
+
+
+class CreateMeetingItemReminderTests(unittest.IsolatedAsyncioTestCase):
+    @patch("crm_integration.meeting.get_mirly_reminder_by_title", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.resolve_monday_user_ids_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
+    async def test_injects_mirly_reminder_columns(
+        self,
+        mock_graphql,
+        mock_users,
+        mock_reminder,
+    ):
+        mock_users.return_value = []
+        mock_reminder.return_value = {
+            "date": "2026-06-25",
+            "info": "Follow up on budget",
+        }
+        mock_graphql.return_value = {"data": {"create_item": {"id": "555"}}}
+
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        match = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="client@example.com",
+        )
+
+        item_id = await create_meeting_item(payload, match, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(item_id, "555")
+        column_values = json.loads(mock_graphql.await_args.args[1]["columnValues"])
+        self.assertEqual(column_values["date_mm4nd4dm"], {"date": "2026-06-25"})
+        self.assertEqual(
+            column_values["long_text_mm4ncaga"],
+            {"text": "Follow up on budget"},
+        )
+
+    @patch("crm_integration.meeting.get_mirly_reminder_by_title", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.resolve_monday_user_ids_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
+    async def test_omits_reminder_columns_when_not_found(
+        self,
+        mock_graphql,
+        mock_users,
+        mock_reminder,
+    ):
+        mock_users.return_value = []
+        mock_reminder.return_value = None
+        mock_graphql.return_value = {"data": {"create_item": {"id": "555"}}}
+
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        match = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="client@example.com",
+        )
+
+        await create_meeting_item(payload, match, settings=TEST_CRM_SETTINGS)
+
+        column_values = json.loads(mock_graphql.await_args.args[1]["columnValues"])
+        self.assertNotIn("date_mm4nd4dm", column_values)
+        self.assertNotIn("long_text_mm4ncaga", column_values)
 
 
 class MorningBriefHelperTests(unittest.TestCase):

@@ -31,6 +31,24 @@ query ($boardId: ID!, $limit: Int!, $columns: [ItemsPageByColumnValuesQuery!]!, 
 }
 """
 
+ITEMS_PAGE_WITH_COLUMNS_QUERY = """
+query ($boardId: ID!, $limit: Int!, $columnIds: [String!]!, $queryParams: ItemsQuery!) {
+  boards(ids: [$boardId]) {
+    items_page(limit: $limit, query_params: $queryParams) {
+      items {
+        id
+        name
+        column_values(ids: $columnIds) {
+          id
+          text
+          value
+        }
+      }
+    }
+  }
+}
+"""
+
 ITEMS_BY_IDS_QUERY = """
 query ($ids: [ID!]!, $columnIds: [String!]!) {
   items(ids: $ids) {

@@ -16,6 +16,7 @@ from crm_integration.monday_client import (
     execute_graphql,
 )
 from crm_integration.schemas import NodeTakerWebhookPayload
+from services.monday_service import get_mirly_reminder_by_title
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +478,17 @@ async def create_meeting_item(
         settings,
         internal_user_ids=internal_user_ids,
     )
+
+    reminder = await get_mirly_reminder_by_title(payload.meeting_title)
+    if reminder:
+        if reminder.get("date"):
+            column_values[settings.meeting_notes_reminder_date_column_id] = _date_column_value(
+                date.fromisoformat(reminder["date"])
+            )
+        if reminder.get("info"):
+            column_values[settings.meeting_notes_reminder_info_column_id] = _long_text_column_value(
+                reminder["info"]
+            )
 
     if not match:
         logger.warning(

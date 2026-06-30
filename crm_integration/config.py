@@ -30,6 +30,12 @@ class CrmSettings(BaseSettings):
     future_meetings_status_column_id: str = "status"
     future_meetings_participants_column_id: str = "text_mm4e3rd9"
     future_meetings_brief_column_id: str = "text_mm4eda8z"
+    mirly_reminders_board_id: str = "5099196766"
+    mirly_reminders_date_column_id: str = "date4"
+    mirly_reminders_info_column_id: str = "long_text_mm4nf3z8"
+    mirly_reminders_creation_log_column_id: str = "pulse_log_mm4nf1xc"
+    meeting_notes_reminder_date_column_id: str = "date_mm4nd4dm"
+    meeting_notes_reminder_info_column_id: str = "long_text_mm4ncaga"
     batch_secret: str = ""
     monday_notetaker_api_keys: str = ""
 

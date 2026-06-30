@@ -485,26 +485,112 @@ def _strip_json_fences(text: str) -> str:
     return cleaned.strip()
 
 
-def _parse_client_meeting_profile_response(text: str) -> tuple[str, str]:
-    """Parse Claude JSON response into (profile, latest_date)."""
-    raw = _strip_json_fences(text)
+_JSON_STRING_VALUE_END_RE = re.compile(r'((?:[^"\\]|\\.)*")\s+("[\w_]+"\s*:)')
+_JSON_OBJECT_KEY_RE = re.compile(r'"([\w_]+)"\s*:\s*"((?:[^"\\]|\\.)*)"', re.DOTALL)
+_ISO_DATE_IN_TEXT_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _fix_common_json_typos(text: str) -> str:
+    """Apply regex fixes for common LLM JSON formatting mistakes."""
+    fixed = text.strip()
+    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
+    fixed = _JSON_STRING_VALUE_END_RE.sub(r"\1, \2", fixed)
+    fixed = re.sub(r"([}\]0-9eE.+-])\s+(?=\"[\w_]+\"\s*:)", r"\1, ", fixed)
+    fixed = re.sub(r"(true|false|null)\s+(?=\"[\w_]+\"\s*:)", r"\1, ", fixed, flags=re.IGNORECASE)
+    return fixed
+
+
+def _unescape_json_string(value: str) -> str:
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Client profile response is not valid JSON: {exc}") from exc
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return (
+            value.replace("\\n", "\n")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
 
-    if not isinstance(data, dict):
-        raise ValueError("Client profile response must be a JSON object")
 
-    profile = str(data.get("profile") or "").strip()
-    latest_date = str(data.get("latest_date") or "").strip()
+def _extract_client_profile_fields(text: str) -> dict[str, str]:
+    """Best-effort regex extraction when JSON parsing fails."""
+    fields: dict[str, str] = {}
+    for match in _JSON_OBJECT_KEY_RE.finditer(text):
+        key, raw_value = match.group(1), match.group(2)
+        if key in ("profile", "latest_date"):
+            fields[key] = _unescape_json_string(raw_value).strip()
+    if not fields.get("latest_date") or not _LATEST_DATE_RE.fullmatch(fields["latest_date"]):
+        date_match = _ISO_DATE_IN_TEXT_RE.search(text)
+        if date_match:
+            fields["latest_date"] = date_match.group(0)
+    return fields
+
+
+def _load_client_meeting_profile_data(raw: str) -> dict[str, str]:
+    """Parse client profile JSON with typo repair and regex fallback."""
+    for attempt_index, candidate in enumerate((raw, _fix_common_json_typos(raw))):
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return {
+                "profile": str(data.get("profile") or "").strip(),
+                "latest_date": str(data.get("latest_date") or "").strip(),
+            }
+        logger.warning(
+            "Client profile response parsed as non-object JSON (attempt %d)",
+            attempt_index + 1,
+        )
+
+    extracted = _extract_client_profile_fields(raw)
+    if extracted:
+        logger.warning(
+            "Client profile JSON parse failed; recovered fields via regex extraction. "
+            "Raw response: %s",
+            raw,
+        )
+        return {
+            "profile": extracted.get("profile", ""),
+            "latest_date": extracted.get("latest_date", ""),
+        }
+
+    logger.error(
+        "Client profile JSON parse failed; returning empty defaults. Raw response: %s",
+        raw,
+    )
+    return {"profile": "", "latest_date": ""}
+
+
+def _parse_client_meeting_profile_response(text: str) -> tuple[str, str]:
+    """Parse Claude JSON response into (profile, latest_date).
+
+    Always returns a tuple. Malformed JSON is repaired or partially extracted;
+    completely unparseable responses yield empty defaults instead of raising.
+    """
+    raw = _strip_json_fences(text)
+    data = _load_client_meeting_profile_data(raw)
+
+    profile = data["profile"]
+    latest_date = data["latest_date"]
 
     if not profile:
-        raise ValueError("Client profile response missing non-empty 'profile'")
+        logger.warning("Client profile response missing non-empty 'profile'")
     if not _LATEST_DATE_RE.fullmatch(latest_date):
-        raise ValueError(
-            f"Client profile response 'latest_date' must be YYYY-MM-DD, got: {latest_date!r}"
-        )
+        date_match = _ISO_DATE_IN_TEXT_RE.search(raw)
+        if date_match:
+            latest_date = date_match.group(0)
+            logger.warning(
+                "Client profile response had invalid 'latest_date' %r; "
+                "recovered ISO date from raw text: %s",
+                data["latest_date"],
+                latest_date,
+            )
+        elif data["latest_date"]:
+            logger.warning(
+                "Client profile response 'latest_date' must be YYYY-MM-DD, got: %r",
+                data["latest_date"],
+            )
+            latest_date = ""
 
     return profile, latest_date
 

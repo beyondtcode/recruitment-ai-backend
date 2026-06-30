@@ -852,17 +852,49 @@ class ClientMeetingProfileParserTests(unittest.TestCase):
         self.assertIn("החברה היא", profile)
         self.assertEqual(latest_date, "2022-08-04")
 
-    def test_rejects_missing_profile(self):
-        with self.assertRaises(ValueError):
-            _parse_client_meeting_profile_response(
-                '{"profile": "", "latest_date": "2022-08-04"}'
-            )
+    def test_returns_empty_profile_when_missing(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '{"profile": "", "latest_date": "2022-08-04"}'
+        )
+        self.assertEqual(profile, "")
+        self.assertEqual(latest_date, "2022-08-04")
 
-    def test_rejects_invalid_date(self):
-        with self.assertRaises(ValueError):
-            _parse_client_meeting_profile_response(
-                '{"profile": "החברה היא חברה.", "latest_date": "4.8"}'
-            )
+    def test_returns_empty_date_when_invalid(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '{"profile": "החברה היא חברה.", "latest_date": "4.8"}'
+        )
+        self.assertEqual(profile, "החברה היא חברה.")
+        self.assertEqual(latest_date, "")
+
+    def test_repairs_missing_comma_between_fields(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '{"profile": "החברה היא סטארטאפ."\n'
+            ' "latest_date": "2022-09-05"}'
+        )
+        self.assertIn("החברה היא", profile)
+        self.assertEqual(latest_date, "2022-09-05")
+
+    def test_repairs_trailing_comma(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            '{"profile": "החברה היא חברת תוכנה.", "latest_date": "2022-08-04",}'
+        )
+        self.assertIn("החברה היא", profile)
+        self.assertEqual(latest_date, "2022-08-04")
+
+    def test_extracts_fields_when_json_is_unrecoverable(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            'not json at all {"profile": "החברה היא חברה.", '
+            '"latest_date": "2022-07-01" broken'
+        )
+        self.assertEqual(profile, "החברה היא חברה.")
+        self.assertEqual(latest_date, "2022-07-01")
+
+    def test_returns_defaults_for_completely_unparseable_response(self):
+        profile, latest_date = _parse_client_meeting_profile_response(
+            "This is not JSON and has no extractable fields."
+        )
+        self.assertEqual(profile, "")
+        self.assertEqual(latest_date, "")
 
 
 class BuildMeetingLogsForProfileTests(unittest.TestCase):

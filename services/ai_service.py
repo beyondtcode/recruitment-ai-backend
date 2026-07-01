@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from datetime import date
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -205,6 +206,24 @@ CRITICAL STYLE GUIDELINES FOR THE PROFILE:
 
 For the 'latest_date' key: Identify the single most recent meeting date from the logs and convert it strictly into 'YYYY-MM-DD' format. The data is from the year 2022, so if you see shorthand dates like '4.8' (August 4th) or '5.9' (September 5th), assume the year is 2022 (e.g., '2022-09-05')."""
 
+MEETING_PROGRESS_SUMMARY_MAX_TOKENS = 512
+
+MEETING_PROGRESS_SUMMARY_SYSTEM_PROMPT = """You are an expert CRM analyst for a recruitment agency.
+Summarize a single client meeting in exactly 5 Hebrew sentences.
+
+Focus on relationship and commercial progress:
+- Key decisions made during the meeting
+- Agreed next steps and commitments (from either side)
+- Changes in engagement status or scope
+- Open items or blockers discussed
+- Overall momentum with the client/lead
+
+Rules:
+- Write exactly 5 complete sentences in clear, professional Hebrew.
+- Do NOT describe the client's company profile or industry background.
+- Do NOT include meeting date, headings, bullet points, or markdown.
+- Return only the 5 sentences as plain text."""
+
 _LATEST_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _client: AsyncAnthropic | None = None
@@ -216,6 +235,14 @@ def _get_client() -> AsyncAnthropic:
         api_key = os.environ.get("ANTHROPIC_API_KEY") or settings.anthropic_api_key
         _client = AsyncAnthropic(api_key=api_key)
     return _client
+
+
+async def close_async_client() -> None:
+    """Close and discard the module-level Anthropic client (httpx cleanup)."""
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
 
 
 def _tool_input_schema() -> dict[str, Any]:
@@ -613,6 +640,36 @@ async def extract_client_meeting_profile(meeting_logs: str) -> tuple[str, str]:
         messages=[{"role": "user", "content": user_content}],
     )
     return _parse_client_meeting_profile_response(_extract_text_response(response))
+
+
+async def extract_meeting_progress_summary(
+    title: str,
+    meeting_date: date,
+    summary: str,
+    action_items: str = "",
+) -> str:
+    """Generate a 5-sentence Hebrew progress summary for a single meeting."""
+    summary_text = summary.strip()
+    if not summary_text:
+        raise ValueError("Meeting summary is empty.")
+
+    meeting_title = title.strip() or "פגישה ללא שם"
+    parts = [
+        f"Meeting title: {meeting_title}",
+        f"Meeting date: {meeting_date.isoformat()}",
+        f"Summary:\n{summary_text}",
+    ]
+    action_items_text = action_items.strip()
+    if action_items_text:
+        parts.append(f"Action items:\n{action_items_text}")
+
+    response = await _get_client().messages.create(
+        model=settings.anthropic_model,
+        max_tokens=MEETING_PROGRESS_SUMMARY_MAX_TOKENS,
+        system=MEETING_PROGRESS_SUMMARY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": "\n\n".join(parts)}],
+    )
+    return _extract_text_response(response).strip()
 
 
 async def analyze_cv_with_claude(

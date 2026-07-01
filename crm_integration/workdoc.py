@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from crm_integration.config import CrmSettings, get_crm_settings
-from crm_integration.meeting import extract_meeting_summary_intro
+from crm_integration.meeting import BoardKind, extract_meeting_summary_intro, _meeting_target_board
 from crm_integration.monday_client import (
     CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
     CREATE_DOC_BLOCK_MUTATION,
@@ -161,6 +161,8 @@ async def _append_action_items_to_summary_column(
     item_id: str,
     payload: NodeTakerWebhookPayload,
     settings: CrmSettings,
+    *,
+    board_kind: BoardKind = "customer",
 ) -> None:
     action_items = payload.action_items.strip()
     if not action_items:
@@ -174,10 +176,11 @@ async def _append_action_items_to_summary_column(
         combined = "## Action Items\n\n"
     combined += action_items
 
+    board_id, _ = _meeting_target_board(settings, board_kind)
     await execute_graphql(
         CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
         {
-            "boardId": settings.monday_crm_meeting_notes_board_id,
+            "boardId": board_id,
             "itemId": item_id,
             "columnValues": json.dumps(
                 {settings.monday_crm_meeting_summary_column_id: {"text": combined}}
@@ -195,6 +198,8 @@ async def create_meeting_workdoc(
     item_id: str,
     payload: NodeTakerWebhookPayload,
     settings: CrmSettings | None = None,
+    *,
+    board_kind: BoardKind = "customer",
 ) -> tuple[str | None, bool, list[str]]:
     """
     Create a Workdoc on the meeting item and populate it block-by-block.
@@ -231,7 +236,12 @@ async def create_meeting_workdoc(
         )
         warnings.append(f"Workdoc creation failed: {exc}")
         try:
-            await _append_action_items_to_summary_column(item_id, payload, settings)
+            await _append_action_items_to_summary_column(
+                item_id,
+                payload,
+                settings,
+                board_kind=board_kind,
+            )
         except Exception as append_exc:
             logger.error(
                 "Failed to append action items to summary column for item %s: %s",
@@ -258,7 +268,12 @@ async def create_meeting_workdoc(
         )
         warnings.append(f"Workdoc block insertion failed: {exc}")
         try:
-            await _append_action_items_to_summary_column(item_id, payload, settings)
+            await _append_action_items_to_summary_column(
+                item_id,
+                payload,
+                settings,
+                board_kind=board_kind,
+            )
         except Exception as append_exc:
             logger.error(
                 "Failed to append action items to summary column for item %s: %s",

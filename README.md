@@ -166,8 +166,12 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 | `MONDAY_CRM_ACTIVE_CLIENTS_EMAIL_COLUMN_ID`          | Yes (CRM) | Email column on clients board              |
 | `MONDAY_CRM_LEADS_BOARD_ID`                          | Yes (CRM) | Board ID for leads                         |
 | `MONDAY_CRM_LEADS_EMAIL_COLUMN_ID`                   | Yes (CRM) | Email column on leads board                |
-| `MONDAY_CRM_MEETING_NOTES_BOARD_ID`                  | Yes (CRM) | Board where meeting items are created      |
+| `MONDAY_CRM_MEETING_NOTES_BOARD_ID`                  | Yes (CRM) | Board where customer meeting items are created |
 | `MONDAY_CRM_MEETING_NOTES_GROUP_ID`                  | No        | Group for new meetings (default: `topics`) |
+| `MONDAY_CRM_COMPANY_MEETINGS_BOARD_ID`               | No        | Board for internal-only meetings (default: `5099503871`) |
+| `MONDAY_CRM_COMPANY_MEETINGS_GROUP_ID`               | No        | Group for company meetings (default: `topics`) |
+| `BEYONDCODE_COMPANY_CLIENT_ITEM_ID`                   | No        | BeyondCode client item for company meeting relations (default: `3018755375`) |
+| `BEYONDCODE_COMPANY_CLIENT_NAME`                     | No        | Fallback client name lookup (default: `ביונד קוד בע"מ`) |
 | `MONDAY_CRM_MEETING_DATE_COLUMN_ID`                  | Yes (CRM) | Date column on meeting board               |
 | `MONDAY_CRM_MEETING_CLIENT_RELATION_COLUMN_ID`       | Yes (CRM) | Board relation → client                    |
 | `MONDAY_CRM_MEETING_LEAD_RELATION_COLUMN_ID`         | Yes (CRM) | Board relation → lead                      |

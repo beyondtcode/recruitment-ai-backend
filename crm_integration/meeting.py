@@ -12,6 +12,7 @@ from crm_integration.monday_client import (
     FIND_ITEMS_LIMIT,
     ITEMS_BY_IDS_QUERY,
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+    ITEMS_PAGE_WITH_COLUMNS_QUERY,
     USERS_BY_EMAILS_QUERY,
     execute_graphql,
 )
@@ -28,6 +29,8 @@ MeetingTypeLabel = Literal[
     "פגישת היכרות",
     "פגישת לקוח",
 ]
+
+BoardKind = Literal["customer", "company"]
 
 INTERNAL_EMAIL_DOMAIN = "@beyondtcode.com"
 
@@ -120,6 +123,29 @@ def external_participant_emails(participant_emails: list[str]) -> list[str]:
         for email in participant_emails
         if email and not email.strip().lower().endswith(INTERNAL_EMAIL_DOMAIN)
     ]
+
+
+def is_internal_only_meeting(participant_emails: list[str]) -> bool:
+    """Return True when every participant is an internal @beyondtcode.com address."""
+    emails = [email.strip() for email in participant_emails if email and email.strip()]
+    return bool(emails) and not external_participant_emails(emails)
+
+
+def meeting_board_kind(payload: NodeTakerWebhookPayload) -> BoardKind:
+    """Select the destination board for a meeting payload."""
+    return "company" if is_internal_only_meeting(payload.participant_emails) else "customer"
+
+
+def _meeting_target_board(settings: CrmSettings, board_kind: BoardKind) -> tuple[str, str]:
+    if board_kind == "company":
+        return (
+            settings.monday_crm_company_meetings_board_id,
+            settings.monday_crm_company_meetings_group_id,
+        )
+    return (
+        settings.monday_crm_meeting_notes_board_id,
+        settings.monday_crm_meeting_notes_group_id,
+    )
 
 
 def parse_comma_separated_emails(raw: str) -> list[str]:
@@ -306,6 +332,71 @@ def internal_participant_emails(participant_emails: list[str]) -> list[str]:
     ]
 
 
+async def _find_client_item_by_name(
+    board_id: str,
+    name: str,
+) -> str | None:
+    search_name = name.strip()
+    if not search_name:
+        return None
+
+    body = await execute_graphql(
+        ITEMS_PAGE_WITH_COLUMNS_QUERY,
+        {
+            "boardId": board_id,
+            "limit": FIND_ITEMS_LIMIT,
+            "columnIds": [],
+            "queryParams": {
+                "rules": [
+                    {
+                        "column_id": "name",
+                        "compare_value": [search_name],
+                        "operator": "contains_text",
+                    }
+                ],
+            },
+        },
+    )
+    boards = body.get("data", {}).get("boards") or []
+    items: list[dict[str, Any]] = []
+    if boards:
+        items = (boards[0].get("items_page") or {}).get("items") or []
+
+    name_key = search_name.casefold()
+    for item in items:
+        if str(item.get("name") or "").strip().casefold() == name_key:
+            return str(item["id"])
+    if items and items[0].get("id") is not None:
+        return str(items[0]["id"])
+    return None
+
+
+async def resolve_beyondcode_client_match(
+    settings: CrmSettings | None = None,
+) -> ContactMatch:
+    """Return the BeyondCode client item used for company meeting board relations."""
+    settings = settings or get_crm_settings()
+    item_id = settings.beyondcode_company_client_item_id.strip()
+    if not item_id:
+        item_id = (
+            await _find_client_item_by_name(
+                settings.monday_crm_active_clients_board_id,
+                settings.beyondcode_company_client_name,
+            )
+            or ""
+        )
+    if not item_id:
+        logger.warning(
+            "BeyondCode client item not found for company meeting relation (name=%r)",
+            settings.beyondcode_company_client_name,
+        )
+    return ContactMatch(
+        item_id=item_id,
+        match_type="client",
+        matched_email="",
+    )
+
+
 def classify_meeting_type(title: str, summary: str) -> MeetingTypeLabel:
     """Classify a meeting based on title and summary text."""
     text = f"{title} {summary}".casefold()
@@ -382,13 +473,15 @@ def _build_column_values(
     settings: CrmSettings,
     *,
     internal_user_ids: list[str] | None = None,
+    board_kind: BoardKind = "customer",
 ) -> dict[str, Any]:
     column_values: dict[str, Any] = {
         settings.monday_crm_meeting_date_column_id: _date_column_value(payload.meeting_date),
-        settings.monday_crm_meeting_type_column_id: _dropdown_column_value(
-            classify_meeting_type(payload.meeting_title, payload.meeting_summary)
-        ),
     }
+    if board_kind == "customer":
+        column_values[settings.monday_crm_meeting_type_column_id] = _dropdown_column_value(
+            classify_meeting_type(payload.meeting_title, payload.meeting_summary)
+        )
 
     overview = extract_meeting_summary_intro(payload.meeting_summary)
     if overview:
@@ -408,7 +501,7 @@ def _build_column_values(
             action_items
         )
 
-    if match:
+    if match and match.item_id:
         relation_column_id = (
             settings.monday_crm_meeting_client_relation_column_id
             if match.match_type == "client"
@@ -431,11 +524,13 @@ async def meeting_already_exists(
     """Return True if a meeting notes item with the same title and date already exists."""
     settings = settings or get_crm_settings()
     title = payload.meeting_title.strip()
+    board_kind = meeting_board_kind(payload)
+    board_id, _ = _meeting_target_board(settings, board_kind)
 
     body = await execute_graphql(
         ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
         {
-            "boardId": settings.monday_crm_meeting_notes_board_id,
+            "boardId": board_id,
             "limit": FIND_ITEMS_LIMIT,
             "columns": [
                 {
@@ -450,7 +545,8 @@ async def meeting_already_exists(
     for item in items:
         if str(item.get("name") or "").strip() == title:
             logger.info(
-                "Meeting already exists on board: title=%r date=%s item_id=%s",
+                "Meeting already exists on board %s: title=%r date=%s item_id=%s",
+                board_id,
                 title,
                 payload.meeting_date.isoformat(),
                 item.get("id"),
@@ -463,9 +559,12 @@ async def create_meeting_item(
     payload: NodeTakerWebhookPayload,
     match: ContactMatch | None,
     settings: CrmSettings | None = None,
+    *,
+    board_kind: BoardKind = "customer",
 ) -> str:
-    """Create a Meeting Notes board item and return the new item ID."""
+    """Create a meeting board item and return the new item ID."""
     settings = settings or get_crm_settings()
+    board_id, group_id = _meeting_target_board(settings, board_kind)
     internal_emails = internal_participant_emails(
         [str(email) for email in payload.participant_emails]
     )
@@ -477,6 +576,7 @@ async def create_meeting_item(
         match,
         settings,
         internal_user_ids=internal_user_ids,
+        board_kind=board_kind,
     )
 
     reminder = await get_mirly_reminder_by_title(payload.meeting_title)
@@ -490,7 +590,7 @@ async def create_meeting_item(
                 reminder["info"]
             )
 
-    if not match:
+    if not match or not match.item_id:
         logger.warning(
             "No contact match; meeting item will be created without board relation"
         )
@@ -498,8 +598,8 @@ async def create_meeting_item(
     body = await execute_graphql(
         CREATE_ITEM_MUTATION,
         {
-            "boardId": settings.monday_crm_meeting_notes_board_id,
-            "groupId": settings.monday_crm_meeting_notes_group_id,
+            "boardId": board_id,
+            "groupId": group_id,
             "itemName": payload.meeting_title.strip(),
             "columnValues": json.dumps(column_values),
         },
@@ -510,5 +610,5 @@ async def create_meeting_item(
         raise RuntimeError("Monday create_item did not return an item id")
 
     item_id = str(item_id)
-    logger.info("Meeting item created with ID %s", item_id)
+    logger.info("Meeting item created with ID %s on board %s", item_id, board_id)
     return item_id

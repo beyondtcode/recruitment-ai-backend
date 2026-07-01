@@ -16,6 +16,10 @@ class CrmSettings(BaseSettings):
     monday_crm_leads_email_column_id: str
     monday_crm_meeting_notes_board_id: str
     monday_crm_meeting_notes_group_id: str = "topics"
+    monday_crm_company_meetings_board_id: str = "5099503871"
+    monday_crm_company_meetings_group_id: str = "topics"
+    beyondcode_company_client_item_id: str = "3018755375"
+    beyondcode_company_client_name: str = 'ביונד קוד בע"מ'
     monday_crm_meeting_date_column_id: str
     monday_crm_meeting_client_relation_column_id: str
     monday_crm_meeting_lead_relation_column_id: str

@@ -69,7 +69,65 @@ async def process_nodetaker_webhook(
     external_emails = external_participant_emails(payload.participant_emails)
     internal_emails = internal_participant_emails(payload.participant_emails)
 
-    if not external_emails and internal_emails:
+    match = None
+    if external_emails:
+        match = await find_contact_by_emails(external_emails, settings=settings)
+
+    if match:
+        meeting_item_id = await create_meeting_item(payload, match, settings=settings)
+
+        doc_id, doc_created, workdoc_warnings = await _create_meeting_workdoc_step(
+            meeting_item_id,
+            payload,
+            settings,
+            board_kind="customer",
+        )
+        warnings.extend(workdoc_warnings)
+
+        if payload.meeting_summary.strip():
+            try:
+                past_context = await gather_past_meeting_context(
+                    payload.participant_emails,
+                    before_date=payload.meeting_date,
+                    settings=settings,
+                )
+                logs = build_meeting_logs_for_profile(payload, past_context)
+                profile, latest_date = await extract_client_meeting_profile(logs)
+                await update_contact_ai_profile(match, profile, latest_date, settings)
+            except Exception as exc:
+                logger.exception("Client profile update failed for match %s", match.item_id)
+                warnings.append(f"Client profile update failed: {exc}")
+
+            try:
+                progress_summary = await extract_meeting_progress_summary(
+                    payload.meeting_title,
+                    payload.meeting_date,
+                    extract_meeting_summary_intro(payload.meeting_summary),
+                    payload.action_items,
+                )
+                await append_contact_meeting_progress(
+                    match,
+                    payload.meeting_date,
+                    progress_summary,
+                    settings,
+                )
+            except Exception as exc:
+                logger.exception("Meeting progress update failed for match %s", match.item_id)
+                warnings.append(f"Meeting progress update failed: {exc}")
+        else:
+            warnings.append("Empty meeting summary; profile update skipped")
+
+        return NodeTakerWebhookResult(
+            status="success",
+            meeting_item_id=meeting_item_id,
+            match_type=match.match_type,
+            matched_email=match.matched_email,
+            doc_id=doc_id,
+            doc_created=doc_created,
+            warnings=warnings,
+        )
+
+    if internal_emails:
         match = await resolve_beyondcode_client_match(settings)
         meeting_item_id = await create_meeting_item(
             payload,
@@ -93,21 +151,7 @@ async def process_nodetaker_webhook(
             doc_created=doc_created,
             warnings=warnings,
         )
-
-    if not external_emails:
-        logger.warning(
-            "Skipping meeting summary: no participant emails for title=%r date=%s",
-            payload.meeting_title,
-            payload.meeting_date.isoformat(),
-        )
-        return NodeTakerWebhookResult(
-            status="skipped",
-            match_type="none",
-            warnings=["No participant emails; meeting summary skipped"],
-        )
-
-    match = await find_contact_by_emails(external_emails, settings=settings)
-    if not match:
+    elif external_emails:
         logger.warning(
             "Skipping meeting summary: no CRM client/lead match for title=%r date=%s emails=%s",
             payload.meeting_title,
@@ -119,56 +163,14 @@ async def process_nodetaker_webhook(
             match_type="none",
             warnings=["No CRM client/lead match; meeting summary skipped"],
         )
-
-    meeting_item_id = await create_meeting_item(payload, match, settings=settings)
-
-    doc_id, doc_created, workdoc_warnings = await _create_meeting_workdoc_step(
-        meeting_item_id,
-        payload,
-        settings,
-        board_kind="customer",
-    )
-    warnings.extend(workdoc_warnings)
-
-    if payload.meeting_summary.strip():
-        try:
-            past_context = await gather_past_meeting_context(
-                payload.participant_emails,
-                before_date=payload.meeting_date,
-                settings=settings,
-            )
-            logs = build_meeting_logs_for_profile(payload, past_context)
-            profile, latest_date = await extract_client_meeting_profile(logs)
-            await update_contact_ai_profile(match, profile, latest_date, settings)
-        except Exception as exc:
-            logger.exception("Client profile update failed for match %s", match.item_id)
-            warnings.append(f"Client profile update failed: {exc}")
-
-        try:
-            progress_summary = await extract_meeting_progress_summary(
-                payload.meeting_title,
-                payload.meeting_date,
-                extract_meeting_summary_intro(payload.meeting_summary),
-                payload.action_items,
-            )
-            await append_contact_meeting_progress(
-                match,
-                payload.meeting_date,
-                progress_summary,
-                settings,
-            )
-        except Exception as exc:
-            logger.exception("Meeting progress update failed for match %s", match.item_id)
-            warnings.append(f"Meeting progress update failed: {exc}")
     else:
-        warnings.append("Empty meeting summary; profile update skipped")
-
-    return NodeTakerWebhookResult(
-        status="success",
-        meeting_item_id=meeting_item_id,
-        match_type=match.match_type,
-        matched_email=match.matched_email,
-        doc_id=doc_id,
-        doc_created=doc_created,
-        warnings=warnings,
-    )
+        logger.warning(
+            "Skipping meeting summary: no participant emails for title=%r date=%s",
+            payload.meeting_title,
+            payload.meeting_date.isoformat(),
+        )
+        return NodeTakerWebhookResult(
+            status="skipped",
+            match_type="none",
+            warnings=["No participant emails; meeting summary skipped"],
+        )

@@ -1250,7 +1250,7 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
-    async def test_skips_entire_pipeline_when_no_crm_match(
+    async def test_skips_when_no_crm_match_and_no_internal_participants(
         self,
         mock_find,
         mock_create_item,
@@ -1281,6 +1281,69 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         mock_extract_progress.assert_not_awaited()
         mock_append_progress.assert_not_awaited()
         self.assertIn("No CRM client/lead match; meeting summary skipped", result.warnings)
+
+    @patch("crm_integration.pipeline.append_contact_meeting_progress", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_meeting_progress_summary", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.update_contact_ai_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.resolve_beyondcode_client_match", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
+    async def test_falls_back_to_company_board_when_crm_lookup_fails_with_internal_present(
+        self,
+        mock_find,
+        mock_resolve_beyondcode,
+        mock_create_item,
+        mock_create_doc,
+        mock_gather,
+        mock_extract,
+        mock_update_profile,
+        mock_extract_progress,
+        mock_append_progress,
+    ):
+        from crm_integration.pipeline import process_nodetaker_webhook
+
+        mock_find.return_value = None
+        mock_resolve_beyondcode.return_value = ContactMatch(
+            item_id="3018755375",
+            match_type="client",
+            matched_email="",
+        )
+        mock_create_item.return_value = "888"
+        mock_create_doc.return_value = ("999", True, [])
+
+        payload = NodeTakerWebhookPayload.model_validate(
+            {
+                "meeting_title": "Prospect Call",
+                "meeting_date": "2026-06-17",
+                "participant_emails": ["dev@beyondtcode.com", "unknown@example.com"],
+                "meeting_summary": "Discussed partnership.",
+                "action_items": "",
+            }
+        )
+        result = await process_nodetaker_webhook(payload, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.meeting_item_id, "888")
+        mock_find.assert_awaited_once_with(
+            ["unknown@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+        mock_resolve_beyondcode.assert_awaited_once()
+        mock_create_item.assert_awaited_once_with(
+            payload,
+            mock_resolve_beyondcode.return_value,
+            settings=TEST_CRM_SETTINGS,
+            board_kind="company",
+        )
+        mock_create_doc.assert_awaited_once()
+        mock_gather.assert_not_awaited()
+        mock_extract.assert_not_awaited()
+        mock_update_profile.assert_not_awaited()
+        mock_extract_progress.assert_not_awaited()
+        mock_append_progress.assert_not_awaited()
 
     @patch("crm_integration.pipeline.append_contact_meeting_progress", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.extract_meeting_progress_summary", new_callable=AsyncMock)

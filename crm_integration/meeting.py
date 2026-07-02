@@ -5,16 +5,19 @@ import logging
 import re
 from datetime import date
 from typing import Any, Literal
-from crm_integration.config import CrmSettings, get_crm_settings
-from crm_integration.lookup import ContactMatch
+from crm_integration.config import CrmSettings, MEETING_ANALYSIS_DOC_COLUMN_ID, get_crm_settings
+from crm_integration.lookup import ContactMatch, find_contact_by_emails
 from crm_integration.monday_client import (
     CREATE_ITEM_MUTATION,
+    DOC_BLOCKS_PAGE_LIMIT,
     FIND_ITEMS_LIMIT,
-    ITEMS_BY_IDS_QUERY,
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
     ITEMS_PAGE_WITH_COLUMNS_QUERY,
+    ITEMS_WITH_DOC_COLUMN_QUERY,
     USERS_BY_EMAILS_QUERY,
     execute_graphql,
+    fetch_all_doc_blocks,
+    fetch_doc_blocks,
 )
 from crm_integration.schemas import NodeTakerWebhookPayload
 from services.monday_service import get_mirly_reminder_by_title
@@ -209,6 +212,131 @@ def _column_by_id(item: dict[str, Any], column_id: str) -> dict[str, Any] | None
     return None
 
 
+def _normalize_block_type(block_type: str) -> str:
+    return block_type.strip().lower().replace(" ", "_")
+
+
+def _parse_block_content(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str) and content.strip():
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    content = _parse_block_content(block.get("content"))
+    delta = content.get("deltaFormat") or content.get("delta_format") or []
+    if not isinstance(delta, list):
+        return ""
+
+    parts: list[str] = []
+    for item in delta:
+        if not isinstance(item, dict):
+            continue
+        insert = item.get("insert")
+        if isinstance(insert, str):
+            parts.append(insert)
+        elif isinstance(insert, dict):
+            parts.append(str(insert.get("text") or ""))
+    return "".join(parts).strip()
+
+
+def parse_meetings_from_doc_blocks(
+    blocks: list[dict[str, Any]],
+) -> list[tuple[date, str, str]]:
+    """Parse meeting sessions from rolling Workdoc blocks (title, date, summary intro)."""
+    meetings: list[tuple[date, str, str]] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        block_type = _normalize_block_type(str(block.get("type") or ""))
+        if block_type != "large_title":
+            index += 1
+            continue
+
+        title = _block_text(block) or "פגישה ללא שם"
+        index += 1
+        meeting_date: date | None = None
+
+        if index < len(blocks):
+            next_block = blocks[index]
+            next_type = _normalize_block_type(str(next_block.get("type") or ""))
+            if next_type == "normal_text":
+                date_text = _block_text(next_block)
+                if date_text.startswith("Date: "):
+                    try:
+                        meeting_date = date.fromisoformat(date_text[6:].strip()[:10])
+                    except ValueError:
+                        meeting_date = None
+                    index += 1
+
+        if meeting_date is None:
+            continue
+
+        summary_parts: list[str] = []
+        in_summary = False
+        while index < len(blocks):
+            current = blocks[index]
+            current_type = _normalize_block_type(str(current.get("type") or ""))
+            if current_type == "large_title":
+                break
+            if current_type == "medium_title":
+                heading = _block_text(current)
+                if heading == "Summary":
+                    in_summary = True
+                    index += 1
+                    continue
+                if in_summary:
+                    break
+                in_summary = False
+                index += 1
+                continue
+            if in_summary and current_type in {
+                "normal_text",
+                "bulleted_list",
+                "numbered_list",
+                "small_title",
+            }:
+                text = _block_text(current)
+                if text:
+                    summary_parts.append(text)
+            index += 1
+
+        summary = extract_meeting_summary_intro("\n\n".join(summary_parts))
+        if summary:
+            meetings.append((meeting_date, title, summary))
+
+    return meetings
+
+
+async def get_lead_analysis_doc_id(
+    lead_item_id: str,
+    settings: CrmSettings | None = None,
+) -> str | None:
+    """Return the Workdoc ID from the lead's rolling meeting analysis column."""
+    settings = settings or get_crm_settings()
+    column_id = MEETING_ANALYSIS_DOC_COLUMN_ID
+    body = await execute_graphql(
+        ITEMS_WITH_DOC_COLUMN_QUERY,
+        {"ids": [lead_item_id], "columnIds": [column_id]},
+        column_ids=[column_id],
+    )
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        return None
+
+    column = _column_by_id(items[0], column_id) or {}
+    file_info = column.get("file") or {}
+    doc = file_info.get("doc") or {}
+    doc_id = doc.get("id")
+    return str(doc_id) if doc_id else None
+
+
 async def _query_meeting_note_items_by_column(
     board_id: str,
     column_id: str,
@@ -236,62 +364,26 @@ async def _query_meeting_note_items_by_column(
 
 
 async def gather_past_meeting_context(
-    participant_emails: list[str],
+    lead_item_id: str,
     *,
     before_date: date,
     settings: CrmSettings | None = None,
 ) -> str:
-    """Collect formatted summaries from past Meeting Notes items matching participant emails."""
+    """Collect formatted summaries from past meetings in the lead's rolling Workdoc."""
     settings = settings or get_crm_settings()
-    emails = external_participant_emails(participant_emails)
-    if not emails:
+    doc_id = await get_lead_analysis_doc_id(lead_item_id, settings=settings)
+    if not doc_id:
         return ""
 
-    item_ids: set[str] = set()
-
-    for email in emails:
-        email_ids = await _query_meeting_note_items_by_column(
-            settings.monday_crm_meeting_notes_board_id,
-            settings.monday_crm_meeting_external_participants_column_id,
-            email,
-            settings,
-        )
-        item_ids.update(email_ids)
-
-    if not item_ids:
+    blocks = await fetch_all_doc_blocks(doc_id)
+    if not blocks:
         return ""
 
-    body = await execute_graphql(
-        ITEMS_BY_IDS_QUERY,
-        {
-            "ids": list(item_ids),
-            "columnIds": [
-                settings.monday_crm_meeting_date_column_id,
-                settings.monday_crm_meeting_summary_column_id,
-            ],
-        },
-        column_ids=[
-            settings.monday_crm_meeting_date_column_id,
-            settings.monday_crm_meeting_summary_column_id,
-        ],
-    )
-    items = body.get("data", {}).get("items") or []
-
-    past_meetings: list[tuple[date, str, str]] = []
-    for item in items:
-        date_column = _column_by_id(item, settings.monday_crm_meeting_date_column_id)
-        summary_column = _column_by_id(item, settings.monday_crm_meeting_summary_column_id)
-        meeting_date = date_column_value(date_column or {})
-        if meeting_date is None or meeting_date >= before_date:
-            continue
-
-        summary = extract_meeting_summary_intro(column_text(summary_column or {}))
-        if not summary:
-            continue
-
-        title = str(item.get("name") or "").strip() or "פגישה ללא שם"
-        past_meetings.append((meeting_date, title, summary))
-
+    past_meetings = [
+        (meeting_date, title, summary)
+        for meeting_date, title, summary in parse_meetings_from_doc_blocks(blocks)
+        if meeting_date < before_date
+    ]
     if not past_meetings:
         return ""
 
@@ -332,7 +424,7 @@ def internal_participant_emails(participant_emails: list[str]) -> list[str]:
     ]
 
 
-async def _find_client_item_by_name(
+async def _find_lead_item_by_name(
     board_id: str,
     name: str,
 ) -> str | None:
@@ -374,25 +466,25 @@ async def _find_client_item_by_name(
 async def resolve_beyondcode_client_match(
     settings: CrmSettings | None = None,
 ) -> ContactMatch:
-    """Return the BeyondCode client item used for company meeting board relations."""
+    """Return the BeyondCode lead item used for company meeting board relations."""
     settings = settings or get_crm_settings()
     item_id = settings.beyondcode_company_client_item_id.strip()
     if not item_id:
         item_id = (
-            await _find_client_item_by_name(
-                settings.monday_crm_active_clients_board_id,
+            await _find_lead_item_by_name(
+                settings.monday_crm_leads_board_id,
                 settings.beyondcode_company_client_name,
             )
             or ""
         )
     if not item_id:
         logger.warning(
-            "BeyondCode client item not found for company meeting relation (name=%r)",
+            "BeyondCode lead item not found for company meeting relation (name=%r)",
             settings.beyondcode_company_client_name,
         )
     return ContactMatch(
         item_id=item_id,
-        match_type="client",
+        match_type="lead",
         matched_email="",
     )
 
@@ -502,12 +594,9 @@ def _build_column_values(
         )
 
     if match and match.item_id:
-        relation_column_id = (
-            settings.monday_crm_meeting_client_relation_column_id
-            if match.match_type == "client"
-            else settings.monday_crm_meeting_lead_relation_column_id
+        column_values[settings.monday_crm_meeting_lead_relation_column_id] = (
+            _board_relation_column_value(match.item_id)
         )
-        column_values[relation_column_id] = _board_relation_column_value(match.item_id)
 
     if internal_user_ids:
         column_values[settings.monday_crm_meeting_people_column_id] = _people_column_value(
@@ -521,35 +610,65 @@ async def meeting_already_exists(
     payload: NodeTakerWebhookPayload,
     settings: CrmSettings | None = None,
 ) -> bool:
-    """Return True if a meeting notes item with the same title and date already exists."""
+    """Return True if this meeting was already recorded.
+
+    Company/internal meetings: query the company board by title + date (unchanged).
+    Customer meetings: check the first page of the lead's rolling Workdoc.
+    """
     settings = settings or get_crm_settings()
     title = payload.meeting_title.strip()
     board_kind = meeting_board_kind(payload)
-    board_id, _ = _meeting_target_board(settings, board_kind)
 
-    body = await execute_graphql(
-        ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
-        {
-            "boardId": board_id,
-            "limit": FIND_ITEMS_LIMIT,
-            "columns": [
-                {
-                    "column_id": settings.monday_crm_meeting_date_column_id,
-                    "column_values": [payload.meeting_date.isoformat()],
-                }
-            ],
-        },
-        column_ids=[settings.monday_crm_meeting_date_column_id],
-    )
-    items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
-    for item in items:
-        if str(item.get("name") or "").strip() == title:
+    if board_kind == "company":
+        board_id, _ = _meeting_target_board(settings, board_kind)
+        body = await execute_graphql(
+            ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+            {
+                "boardId": board_id,
+                "limit": FIND_ITEMS_LIMIT,
+                "columns": [
+                    {
+                        "column_id": settings.monday_crm_meeting_date_column_id,
+                        "column_values": [payload.meeting_date.isoformat()],
+                    }
+                ],
+            },
+            column_ids=[settings.monday_crm_meeting_date_column_id],
+        )
+        items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
+        for item in items:
+            if str(item.get("name") or "").strip() == title:
+                logger.info(
+                    "Meeting already exists on board %s: title=%r date=%s item_id=%s",
+                    board_id,
+                    title,
+                    payload.meeting_date.isoformat(),
+                    item.get("id"),
+                )
+                return True
+        return False
+
+    emails = external_participant_emails([str(email) for email in payload.participant_emails])
+    if not emails:
+        return False
+
+    match = await find_contact_by_emails(emails, settings=settings)
+    if not match:
+        return False
+
+    doc_id = await get_lead_analysis_doc_id(match.item_id, settings=settings)
+    if not doc_id:
+        return False
+
+    blocks = await fetch_doc_blocks(doc_id, limit=DOC_BLOCKS_PAGE_LIMIT, page=1)
+    for meeting_date, meeting_title, _summary in parse_meetings_from_doc_blocks(blocks):
+        if meeting_title == title and meeting_date == payload.meeting_date:
             logger.info(
-                "Meeting already exists on board %s: title=%r date=%s item_id=%s",
-                board_id,
+                "Meeting already exists in lead Workdoc: title=%r date=%s lead_item_id=%s doc_id=%s",
                 title,
                 payload.meeting_date.isoformat(),
-                item.get("id"),
+                match.item_id,
+                doc_id,
             )
             return True
     return False

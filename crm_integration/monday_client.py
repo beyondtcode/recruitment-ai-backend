@@ -122,6 +122,74 @@ query ($emails: [String!]!) {
 """
 
 FIND_ITEMS_LIMIT = 25
+DOC_BLOCKS_PAGE_LIMIT = 30
+
+ITEMS_WITH_DOC_COLUMN_QUERY = """
+query ($ids: [ID!]!, $columnIds: [String!]!) {
+  items(ids: $ids) {
+    column_values(ids: $columnIds) {
+      id
+      value
+      ... on DocValue {
+        file {
+          doc {
+            id
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+DOCS_BLOCKS_QUERY = """
+query ($docId: ID!, $limit: Int!, $page: Int!) {
+  docs(ids: [$docId]) {
+    blocks(limit: $limit, page: $page) {
+      id
+      type
+      content
+      position
+    }
+  }
+}
+"""
+
+
+async def fetch_doc_blocks(
+    doc_id: str,
+    *,
+    limit: int = DOC_BLOCKS_PAGE_LIMIT,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetch a single page of blocks from a Monday Workdoc."""
+    body = await execute_graphql(
+        DOCS_BLOCKS_QUERY,
+        {"docId": int(doc_id), "limit": limit, "page": page},
+    )
+    docs = body.get("data", {}).get("docs") or []
+    if not docs:
+        return []
+    return list(docs[0].get("blocks") or [])
+
+
+async def fetch_all_doc_blocks(
+    doc_id: str,
+    *,
+    page_limit: int = DOC_BLOCKS_PAGE_LIMIT,
+) -> list[dict[str, Any]]:
+    """Fetch all blocks from a Monday Workdoc, paging until exhausted."""
+    all_blocks: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        blocks = await fetch_doc_blocks(doc_id, limit=page_limit, page=page)
+        if not blocks:
+            break
+        all_blocks.extend(blocks)
+        if len(blocks) < page_limit:
+            break
+        page += 1
+    return all_blocks
 
 
 async def execute_graphql(

@@ -6,8 +6,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from crm_integration.config import CrmSettings, get_crm_settings
-from crm_integration.meeting import BoardKind, extract_meeting_summary_intro, _meeting_target_board
+from crm_integration.config import CrmSettings, MEETING_ANALYSIS_DOC_COLUMN_ID, get_crm_settings
+from crm_integration.meeting import (
+    BoardKind,
+    extract_meeting_summary_intro,
+    get_lead_analysis_doc_id,
+    _meeting_target_board,
+)
 from crm_integration.monday_client import (
     CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
     CREATE_DOC_BLOCK_MUTATION,
@@ -202,7 +207,10 @@ async def create_meeting_workdoc(
     board_kind: BoardKind = "customer",
 ) -> tuple[str | None, bool, list[str]]:
     """
-    Create a Workdoc on the meeting item and populate it block-by-block.
+    Create or prepend to a meeting Workdoc.
+
+    Customer path writes to the lead's rolling analysis column.
+    Company path creates a Workdoc on the meeting item.
 
     Returns (doc_id, doc_created, warnings).
     """
@@ -214,6 +222,84 @@ async def create_meeting_workdoc(
         warnings.append("No meeting details to write to Workdoc")
         return None, False, warnings
 
+    if board_kind == "company":
+        return await _create_meeting_item_workdoc(
+            item_id,
+            payload,
+            settings,
+            blocks,
+            warnings,
+            board_kind=board_kind,
+        )
+
+    return await _upsert_lead_meeting_workdoc(item_id, blocks, settings, warnings)
+
+
+async def _upsert_lead_meeting_workdoc(
+    lead_item_id: str,
+    blocks: list[DocBlockSpec],
+    settings: CrmSettings,
+    warnings: list[str],
+) -> tuple[str | None, bool, list[str]]:
+    doc_id = await get_lead_analysis_doc_id(lead_item_id, settings=settings)
+    doc_created = False
+
+    if not doc_id:
+        try:
+            doc_body = await execute_graphql(
+                CREATE_DOC_MUTATION,
+                {
+                    "itemId": int(lead_item_id),
+                    "columnId": MEETING_ANALYSIS_DOC_COLUMN_ID,
+                },
+            )
+            doc_id = doc_body.get("data", {}).get("create_doc", {}).get("id")
+            if not doc_id:
+                raise RuntimeError("Monday create_doc did not return a doc id")
+            doc_id = str(doc_id)
+            doc_created = True
+            logger.info(
+                "Rolling Workdoc created with ID %s for lead item %s",
+                doc_id,
+                lead_item_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Rolling Workdoc creation failed for lead item %s: %s",
+                lead_item_id,
+                exc,
+            )
+            warnings.append(f"Workdoc creation failed: {exc}")
+            return None, False, warnings
+
+    try:
+        block_ids = await _insert_doc_blocks(doc_id, blocks)
+        logger.info(
+            "Meeting details prepended to rolling Workdoc %s (%d blocks)",
+            doc_id,
+            len(block_ids),
+        )
+        return doc_id, doc_created, warnings
+    except Exception as exc:
+        logger.warning(
+            "Rolling Workdoc %s block insertion failed for lead item %s: %s",
+            doc_id,
+            lead_item_id,
+            exc,
+        )
+        warnings.append(f"Workdoc block insertion failed: {exc}")
+        return doc_id, doc_created, warnings
+
+
+async def _create_meeting_item_workdoc(
+    item_id: str,
+    payload: NodeTakerWebhookPayload,
+    settings: CrmSettings,
+    blocks: list[DocBlockSpec],
+    warnings: list[str],
+    *,
+    board_kind: BoardKind,
+) -> tuple[str | None, bool, list[str]]:
     doc_id: str | None = None
     try:
         doc_body = await execute_graphql(

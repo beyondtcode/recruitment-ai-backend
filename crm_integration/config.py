@@ -2,6 +2,9 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Hardcoded Monday column ID for the rolling meeting analysis Workdoc on lead rows.
+MEETING_ANALYSIS_DOC_COLUMN_ID = "doc_mm4wb1bc"
+
 
 class CrmSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -10,8 +13,6 @@ class CrmSettings(BaseSettings):
         extra="ignore",
     )
 
-    monday_crm_active_clients_board_id: str
-    monday_crm_active_clients_email_column_id: str
     monday_crm_leads_board_id: str
     monday_crm_leads_email_column_id: str
     monday_crm_meeting_notes_board_id: str
@@ -21,7 +22,6 @@ class CrmSettings(BaseSettings):
     beyondcode_company_client_item_id: str = "3018755375"
     beyondcode_company_client_name: str = 'ביונד קוד בע"מ'
     monday_crm_meeting_date_column_id: str
-    monday_crm_meeting_client_relation_column_id: str
     monday_crm_meeting_lead_relation_column_id: str
     monday_crm_meeting_doc_column_id: str
     monday_crm_meeting_summary_column_id: str

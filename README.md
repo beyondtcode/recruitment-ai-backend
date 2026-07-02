@@ -3,7 +3,7 @@
 A Python backend that connects **Monday.com**, **Claude (Anthropic)**, and optional **email** / **meeting-note** sources for a recruitment agency workflow. It does two related but separate jobs:
 
 1. **CV pipeline** — When a candidate uploads a CV (via email or a Monday form), the server extracts structured profile data with AI and writes it back to Monday boards.
-2. **CRM meeting pipeline** — When a meeting is recorded (via NodeTaker / Monday Notetaker), the server creates meeting notes on a CRM board, links them to clients or leads, and attaches a Workdoc with the full summary.
+2. **CRM meeting pipeline** — When a meeting is recorded (via NodeTaker / Monday Notetaker), the server creates meeting notes on a CRM board, links them to leads, and attaches a Workdoc with the full summary.
 
 Both systems share Monday API helpers and run from the same FastAPI app in production.
 
@@ -48,7 +48,7 @@ flowchart TB
         NodeTaker[NodeTaker / Monday Notetaker]
         WebhookNT["POST /nodetaker-webhook"]
         Batch[Daily batch job — midnight ISR]
-        Lookup[lookup.py — find client/lead]
+        Lookup[lookup.py — find lead]
         Meeting[meeting.py — create item]
         Workdoc[workdoc.py — attach doc]
         NodeTaker --> WebhookNT
@@ -162,20 +162,17 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 
 | Variable                                             | Required  | Purpose                                    |
 | ---------------------------------------------------- | --------- | ------------------------------------------ |
-| `MONDAY_CRM_ACTIVE_CLIENTS_BOARD_ID`                 | Yes (CRM) | Board ID for active clients                |
-| `MONDAY_CRM_ACTIVE_CLIENTS_EMAIL_COLUMN_ID`          | Yes (CRM) | Email column on clients board              |
-| `MONDAY_CRM_LEADS_BOARD_ID`                          | Yes (CRM) | Board ID for leads                         |
+| `MONDAY_CRM_LEADS_BOARD_ID`                          | Yes (CRM) | Board ID for leads (all CRM contacts)      |
 | `MONDAY_CRM_LEADS_EMAIL_COLUMN_ID`                   | Yes (CRM) | Email column on leads board                |
 | `MONDAY_CRM_MEETING_NOTES_BOARD_ID`                  | Yes (CRM) | Board where customer meeting items are created |
 | `MONDAY_CRM_MEETING_NOTES_GROUP_ID`                  | No        | Group for new meetings (default: `topics`) |
 | `MONDAY_CRM_COMPANY_MEETINGS_BOARD_ID`               | No        | Board for internal-only meetings (default: `5099503871`) |
 | `MONDAY_CRM_COMPANY_MEETINGS_GROUP_ID`               | No        | Group for company meetings (default: `topics`) |
-| `BEYONDCODE_COMPANY_CLIENT_ITEM_ID`                   | No        | BeyondCode client item for company meeting relations (default: `3018755375`) |
-| `BEYONDCODE_COMPANY_CLIENT_NAME`                     | No        | Fallback client name lookup (default: `ביונד קוד בע"מ`) |
+| `BEYONDCODE_COMPANY_CLIENT_ITEM_ID`                   | No        | BeyondCode lead item for company meeting relations (default: `3018755375`) |
+| `BEYONDCODE_COMPANY_CLIENT_NAME`                     | No        | Fallback lead name lookup on Leads board (default: `ביונד קוד בע"מ`) |
 | `MONDAY_CRM_MEETING_DATE_COLUMN_ID`                  | Yes (CRM) | Date column on meeting board               |
-| `MONDAY_CRM_MEETING_CLIENT_RELATION_COLUMN_ID`       | Yes (CRM) | Board relation → client                    |
 | `MONDAY_CRM_MEETING_LEAD_RELATION_COLUMN_ID`         | Yes (CRM) | Board relation → lead                      |
-| `MONDAY_CRM_MEETING_DOC_COLUMN_ID`                   | Yes (CRM) | Column that holds the Workdoc              |
+| `MONDAY_CRM_MEETING_DOC_COLUMN_ID`                   | Yes (CRM) | Column that holds the Workdoc (company meetings) |
 | `MONDAY_CRM_MEETING_SUMMARY_COLUMN_ID`               | Yes (CRM) | Short summary text column                  |
 | `MONDAY_CRM_MEETING_EXTERNAL_PARTICIPANTS_COLUMN_ID` | No        | External participant emails                |
 | `MONDAY_CRM_MEETING_ACTION_ITEMS_COLUMN_ID`          | No        | Action items text column                   |
@@ -226,7 +223,7 @@ Expects JSON matching `NodeTakerWebhookPayload`:
 }
 ```
 
-Flow: match participant emails to a client or lead → create meeting item → create and fill a Workdoc → Claude extracts a Hebrew company profile + latest meeting date → update the matched Client/Lead item on Monday (column IDs hardcoded in `crm_integration/contact_profile.py`).
+Flow: match participant emails to a lead → prepend meeting into rolling Workdoc on lead row → Claude extracts a Hebrew company profile + latest meeting date → update the matched lead item on Monday (column IDs in `crm_integration/contact_profile.py`). Internal-only (Beyond Code) meetings still create rows on the company meetings board unchanged.
 
 ## System 1: CV pipeline
 
@@ -268,7 +265,7 @@ Monday board updated (name, skills, city, summary, file, ecosystem columns, etc.
 ```
 Meeting data arrives (webhook or Notetaker API batch)
         ↓
-crm_integration/lookup.py — search Active Clients, then Leads, by participant email
+crm_integration/lookup.py — search Leads board by participant email
         ↓
 crm_integration/meeting.py — create item on Meeting Notes board
         ↓
@@ -276,7 +273,7 @@ crm_integration/workdoc.py — create Monday Workdoc with title, participants, s
         ↓
 services/ai_service.py — extract_client_meeting_profile (JSON: profile + latest_date)
         ↓
-crm_integration/contact_profile.py — update matched Client/Lead item on Monday
+crm_integration/contact_profile.py — update matched lead item on Monday
 ```
 
 ### Two ways meetings enter the system
@@ -287,7 +284,7 @@ crm_integration/contact_profile.py — update matched Client/Lead item on Monday
 ### Contact matching
 
 - Participant emails are normalized and deduplicated.
-- **Clients board is checked first**, then **Leads**.
+- All contacts are matched on the **Leads** board by participant email.
 - Internal `@beyondtcode.com` addresses are filtered out when storing external participants.
 - If no match is found, the meeting item is still created — just without a board relation.
 
@@ -329,7 +326,7 @@ recruitment-ai-backend/
 │   ├── schemas.py          # NodeTakerWebhookPayload, NodeTakerWebhookResult
 │   ├── routes.py           # FastAPI router — POST /nodetaker-webhook
 │   ├── pipeline.py         # Orchestrates lookup → meeting item → workdoc
-│   ├── lookup.py           # Find client/lead by participant email
+│   ├── lookup.py           # Find lead by participant email
 │   ├── meeting.py          # Create meeting board item, classify meeting type
 │   ├── workdoc.py          # Create and populate Monday Workdoc blocks
 │   ├── monday_client.py    # GraphQL queries/mutations for CRM (thin wrapper)
@@ -395,7 +392,7 @@ recruitment-ai-backend/
 | `**schemas.py**`        | Request/response models for the NodeTaker webhook.                                                                                                                            |
 | `**routes.py**`         | FastAPI `APIRouter` mounted in `app.py`; exposes `POST /nodetaker-webhook`.                                                                                                   |
 | `**pipeline.py**`       | `process_nodetaker_webhook()` — the CRM equivalent of `cv_pipeline.py`: lookup contact → create meeting → create workdoc → return result with warnings.                       |
-| `**lookup.py**`         | `find_contact_by_emails()` — queries Monday for items matching participant emails on Clients then Leads boards.                                                               |
+| `**lookup.py**`         | `find_contact_by_emails()` — queries Monday Leads board for items matching participant emails.                                                               |
 | `**meeting.py**`        | Builds column values, classifies meeting type, checks for duplicate meetings, creates the meeting item via `create_item` mutation.                                            |
 | `**workdoc.py**`        | Creates a Monday Workdoc on the meeting item and inserts formatted blocks (titles, bullets, paragraphs). Falls back to updating the summary column if Workdoc creation fails. |
 | `**monday_client.py**`  | CRM-specific GraphQL query/mutation strings and `execute_graphql()` — delegates to `services.monday_service.post_graphql`.                                                    |

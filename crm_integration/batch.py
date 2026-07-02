@@ -157,7 +157,7 @@ async def process_morning_briefs(
             match = await find_contact_by_emails(emails, settings=settings)
             if not match:
                 logger.warning(
-                    "Skipping morning brief for item %s (%r): no CRM client/lead match for %s",
+                    "Skipping morning brief for item %s (%r): no CRM lead match for %s",
                     item_id,
                     title,
                     emails,
@@ -166,7 +166,7 @@ async def process_morning_briefs(
                 continue
 
             past_context = await gather_past_meeting_context(
-                emails,
+                match.item_id,
                 before_date=today,
                 settings=settings,
             )

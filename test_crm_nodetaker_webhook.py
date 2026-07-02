@@ -823,6 +823,35 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(mock_graphql.call_count, 3)
 
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
+    @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
+    async def test_ignores_internal_emails_when_external_present(
+        self, mock_graphql, mock_board_columns
+    ):
+        mock_board_columns.side_effect = self._mock_board_columns
+        mock_graphql.side_effect = [
+            {
+                "data": {
+                    "items_page_by_column_values": {
+                        "items": [{"id": "111", "name": "Acme Client"}],
+                    }
+                }
+            },
+        ]
+
+        match = await find_contact_by_emails(
+            ["dev@beyondtcode.com", "client@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertEqual(
+            match,
+            ContactMatch(item_id="111", match_type="client", matched_email="client@example.com"),
+        )
+        self.assertEqual(mock_graphql.call_count, 1)
+        queried_email = mock_graphql.call_args_list[0][0][1]["columns"][0]["column_values"][0]
+        self.assertEqual(queried_email, "client@example.com")
+
 
 class NodeTakerWebhookEndpointTests(unittest.TestCase):
     def test_invalid_json_returns_400(self):
@@ -1311,6 +1340,55 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         mock_update_profile.assert_not_awaited()
         mock_extract_progress.assert_not_awaited()
         mock_append_progress.assert_not_awaited()
+
+    @patch("crm_integration.pipeline.append_contact_meeting_progress", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_meeting_progress_summary", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.update_contact_ai_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.resolve_beyondcode_client_match", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
+    async def test_mixed_meeting_lookup_uses_external_emails_only(
+        self,
+        mock_find,
+        mock_resolve_beyondcode,
+        mock_create_item,
+        mock_create_doc,
+        mock_gather,
+        mock_extract,
+        mock_update_profile,
+        mock_extract_progress,
+        mock_append_progress,
+    ):
+        from crm_integration.pipeline import process_nodetaker_webhook
+
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="client",
+            matched_email="client@example.com",
+        )
+        mock_create_item.return_value = "555"
+        mock_create_doc.return_value = ("777", True, [])
+        mock_gather.return_value = ""
+        mock_extract.return_value = ("פרופיל.", "2026-06-17")
+        mock_extract_progress.return_value = "התקדמות."
+
+        payload = NodeTakerWebhookPayload.model_validate(
+            {
+                "meeting_title": "Client Call",
+                "meeting_date": "2026-06-17",
+                "participant_emails": ["dev@beyondtcode.com", "client@example.com"],
+                "meeting_summary": "Discussed roadmap.",
+                "action_items": "",
+            }
+        )
+        result = await process_nodetaker_webhook(payload, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(result.status, "success")
+        mock_find.assert_awaited_once_with(["client@example.com"], settings=TEST_CRM_SETTINGS)
+        mock_resolve_beyondcode.assert_not_awaited()
 
 
 class GetMirlyReminderByTitleTests(unittest.IsolatedAsyncioTestCase):

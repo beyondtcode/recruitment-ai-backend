@@ -14,6 +14,17 @@ from services.monday_service import _fetch_board_columns, normalize_email
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_EMAIL_DOMAIN = "@beyondtcode.com"
+
+
+def _external_participant_emails(participant_emails: list[str]) -> list[str]:
+    """Return participant emails that are not internal @beyondtcode.com addresses."""
+    return [
+        email
+        for email in participant_emails
+        if email and not email.strip().lower().endswith(INTERNAL_EMAIL_DOMAIN)
+    ]
+
 
 @dataclass(frozen=True)
 class ContactMatch:
@@ -150,9 +161,12 @@ async def find_contact_by_emails(
     participant_emails: list[str],
     settings: CrmSettings | None = None,
 ) -> ContactMatch | None:
-    """Find a Client or Lead by participant email. Clients are checked before Leads."""
+    """Find a Client or Lead by participant email. Clients are checked before Leads.
+
+    Internal @beyondtcode.com addresses are excluded from lookup.
+    """
     settings = settings or get_crm_settings()
-    emails = _dedupe_emails(participant_emails)
+    emails = _dedupe_emails(_external_participant_emails(participant_emails))
     if not emails:
         logger.warning("No valid participant emails provided for contact lookup")
         return None

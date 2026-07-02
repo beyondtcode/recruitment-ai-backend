@@ -12,9 +12,10 @@ from crm_integration.meeting import (
     BoardKind,
     build_meeting_logs_for_profile,
     create_meeting_item,
+    external_participant_emails,
     extract_meeting_summary_intro,
     gather_past_meeting_context,
-    is_internal_only_meeting,
+    internal_participant_emails,
     resolve_beyondcode_client_match,
 )
 from crm_integration.schemas import NodeTakerWebhookPayload, NodeTakerWebhookResult
@@ -65,7 +66,10 @@ async def process_nodetaker_webhook(
         len(payload.participant_emails),
     )
 
-    if is_internal_only_meeting(payload.participant_emails):
+    external_emails = external_participant_emails(payload.participant_emails)
+    internal_emails = internal_participant_emails(payload.participant_emails)
+
+    if not external_emails and internal_emails:
         match = await resolve_beyondcode_client_match(settings)
         meeting_item_id = await create_meeting_item(
             payload,
@@ -90,13 +94,25 @@ async def process_nodetaker_webhook(
             warnings=warnings,
         )
 
-    match = await find_contact_by_emails(payload.participant_emails, settings=settings)
+    if not external_emails:
+        logger.warning(
+            "Skipping meeting summary: no participant emails for title=%r date=%s",
+            payload.meeting_title,
+            payload.meeting_date.isoformat(),
+        )
+        return NodeTakerWebhookResult(
+            status="skipped",
+            match_type="none",
+            warnings=["No participant emails; meeting summary skipped"],
+        )
+
+    match = await find_contact_by_emails(external_emails, settings=settings)
     if not match:
         logger.warning(
             "Skipping meeting summary: no CRM client/lead match for title=%r date=%s emails=%s",
             payload.meeting_title,
             payload.meeting_date.isoformat(),
-            payload.participant_emails,
+            external_emails,
         )
         return NodeTakerWebhookResult(
             status="skipped",

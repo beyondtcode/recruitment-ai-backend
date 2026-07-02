@@ -11,11 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 
 from app import app
-from crm_integration.batch import (
-    notetaker_batch_delay_seconds,
-    notetaker_batch_run_at,
-    process_morning_briefs,
-)
+from crm_integration.batch import process_morning_briefs
 from crm_integration.config import CrmSettings, get_notetaker_api_keys
 from crm_integration.lookup import ContactMatch, find_contact_by_emails
 from crm_integration.meeting import (
@@ -82,7 +78,6 @@ TEST_CRM_SETTINGS = CrmSettings(
     future_meetings_status_column_id="status",
     future_meetings_participants_column_id="text_mm4e3rd9",
     future_meetings_brief_column_id="text_mm4eda8z",
-    batch_secret="test-batch-secret",
 )
 
 VALID_PAYLOAD = {
@@ -1079,60 +1074,6 @@ class NodeTakerWebhookEndpointTests(unittest.TestCase):
         self.assertEqual(body["doc_id"], "888")
         self.assertTrue(body["doc_created"])
         mock_pipeline.assert_awaited_once()
-
-
-class NotetakerBatchScheduleTests(unittest.TestCase):
-    def test_delay_at_midnight_targets_0005(self):
-        midnight = datetime(2026, 6, 18, 0, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
-        self.assertEqual(notetaker_batch_delay_seconds(midnight), 300)
-        self.assertEqual(
-            notetaker_batch_run_at(midnight),
-            datetime(2026, 6, 18, 0, 5, tzinfo=ZoneInfo("Asia/Jerusalem")),
-        )
-
-    def test_delay_after_0005_defaults_to_five_minutes(self):
-        after_run = datetime(2026, 6, 18, 0, 6, tzinfo=ZoneInfo("Asia/Jerusalem"))
-        self.assertEqual(notetaker_batch_delay_seconds(after_run), 300)
-
-
-class RunNotetakerBatchWebhookTests(unittest.TestCase):
-    @patch("crm_integration.routes.get_crm_settings")
-    def test_missing_secret_returns_401(self, mock_settings):
-        mock_settings.return_value = TEST_CRM_SETTINGS
-
-        response = client.post("/run-notetaker-batch")
-        self.assertEqual(response.status_code, 401)
-
-    @patch("crm_integration.routes.schedule_notetaker_batch")
-    @patch("crm_integration.routes.get_crm_settings")
-    def test_valid_secret_schedules_batch(self, mock_settings, mock_schedule):
-        mock_settings.return_value = TEST_CRM_SETTINGS
-        run_at = datetime(2026, 6, 18, 0, 5, tzinfo=ZoneInfo("Asia/Jerusalem"))
-        mock_schedule.return_value = (run_at, "scheduled", 300.0)
-
-        response = client.post(
-            "/run-notetaker-batch",
-            headers={"X-Batch-Secret": "test-batch-secret"},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["status"], "scheduled")
-        self.assertEqual(body["delay_seconds"], 300)
-        self.assertEqual(body["runs_at"], run_at.isoformat())
-        mock_schedule.assert_called_once()
-
-    @patch("crm_integration.routes.get_crm_settings")
-    def test_unconfigured_secret_returns_503(self, mock_settings):
-        mock_settings.return_value = CrmSettings(
-            **{**TEST_CRM_SETTINGS.model_dump(), "batch_secret": ""}
-        )
-
-        response = client.post(
-            "/run-notetaker-batch",
-            headers={"X-Batch-Secret": "anything"},
-        )
-        self.assertEqual(response.status_code, 503)
 
 
 class ClientMeetingProfileParserTests(unittest.TestCase):

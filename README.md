@@ -100,7 +100,7 @@ This starts FastAPI with:
 - CRM webhook at `POST /nodetaker-webhook`
 - A **morning briefing cron** at 07:00 Asia/Jerusalem (in-process; requires the server to be awake)
 - A **daily email CV batch** at 08:00 Asia/Jerusalem (in-process; scans IMAP and upserts to Main Hub)
-- A **Notetaker batch webhook** at `POST /run-notetaker-batch` — call at 00:00 from an external cron to wake the server; batch runs at 00:05
+- A **Notetaker batch** at 00:05 Asia/Jerusalem (in-process; fetches recent meetings from Monday Notetaker API)
 
 ### Run email CV ingestion (CLI)
 
@@ -189,7 +189,6 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 | `GET`  | `/health`            | Liveness check — returns `{"status": "ok"}`                       |
 | `POST` | `/monday-webhook`    | Monday.com webhook for CV processing                              |
 | `POST` | `/nodetaker-webhook` | NodeTaker webhook for meeting → CRM                               |
-| `POST` | `/run-notetaker-batch` | Wake server at 00:00; schedules Notetaker sync for 00:05 ISR (`X-Batch-Secret` header) |
 | `GET`  | `/test-fetch-sarah`  | **Dev only** — manually fetch a test meeting and run CRM pipeline |
 
 
@@ -279,7 +278,7 @@ crm_integration/contact_profile.py — update matched lead item on Monday
 ### Two ways meetings enter the system
 
 1. **Real-time webhook** — `POST /nodetaker-webhook` (routed via `crm_integration/routes.py`).
-2. **Daily batch** — An external scheduler calls `POST /run-notetaker-batch` at 00:00 to wake the server; the batch runs at **00:05 Asia/Jerusalem**. Requires `BATCH_SECRET` in the environment and the `X-Batch-Secret` request header.
+2. **Daily batch** — APScheduler runs at **00:05 Asia/Jerusalem** (`app.py` → `crm_integration/batch.py` → `run_daily_notetaker_batch()`).
 
 ### Contact matching
 
@@ -341,7 +340,7 @@ recruitment-ai-backend/
 
 | File                   | Role                                                                                                                                                                   |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for morning briefings (07:00) and email CV batch (08:00), exposes `/health` and a dev test endpoint. |
+| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for notetaker batch (00:05), morning briefings (07:00), and email CV batch (08:00), exposes `/health` and a dev test endpoint. |
 | `**main.py**`          | Standalone script: `process_email_cv_batch(lookback_days=0)` for same-day manual email CV ingestion.                                                                                                 |
 | `**requirements.txt**` | Dependencies: FastAPI, Anthropic SDK, httpx, pypdf, python-docx, imap-tools, APScheduler, Pydantic, etc.                                                               |
 | `**render.yaml**`      | Deploys as a Render web service running `uvicorn app:app`.                                                                                                             |

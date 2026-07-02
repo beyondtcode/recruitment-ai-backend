@@ -40,7 +40,6 @@ class CrmSettings(BaseSettings):
     mirly_reminders_creation_log_column_id: str = "pulse_log_mm4nf1xc"
     meeting_notes_reminder_date_column_id: str = "date_mm4nd4dm"
     meeting_notes_reminder_info_column_id: str = "long_text_mm4ncaga"
-    batch_secret: str = ""
     monday_notetaker_api_keys: str = ""
 
 

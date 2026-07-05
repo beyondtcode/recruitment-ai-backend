@@ -2,9 +2,6 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Hardcoded Monday column ID for the rolling meeting analysis Workdoc on lead rows.
-MEETING_ANALYSIS_DOC_COLUMN_ID = "doc_mm4wb1bc"
-
 
 class CrmSettings(BaseSettings):
     model_config = SettingsConfigDict(

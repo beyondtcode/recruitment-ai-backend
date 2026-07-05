@@ -162,7 +162,7 @@ async def process_morning_briefs(
                 continue
 
             past_context = await gather_past_meeting_context(
-                match.item_id,
+                emails,
                 before_date=today,
                 settings=settings,
             )

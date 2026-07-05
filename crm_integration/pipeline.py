@@ -74,8 +74,10 @@ async def process_nodetaker_webhook(
         match = await find_contact_by_emails(external_emails, settings=settings)
 
     if match:
+        meeting_item_id = await create_meeting_item(payload, match, settings=settings)
+
         doc_id, doc_created, workdoc_warnings = await _create_meeting_workdoc_step(
-            match.item_id,
+            meeting_item_id,
             payload,
             settings,
             board_kind="customer",
@@ -85,7 +87,7 @@ async def process_nodetaker_webhook(
         if payload.meeting_summary.strip():
             try:
                 past_context = await gather_past_meeting_context(
-                    match.item_id,
+                    payload.participant_emails,
                     before_date=payload.meeting_date,
                     settings=settings,
                 )
@@ -117,7 +119,7 @@ async def process_nodetaker_webhook(
 
         return NodeTakerWebhookResult(
             status="success",
-            meeting_item_id=match.item_id,
+            meeting_item_id=meeting_item_id,
             match_type=match.match_type,
             matched_email=match.matched_email,
             doc_id=doc_id,

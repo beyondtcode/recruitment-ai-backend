@@ -222,7 +222,7 @@ Expects JSON matching `NodeTakerWebhookPayload`:
 }
 ```
 
-Flow: match participant emails to a lead → prepend meeting into rolling Workdoc on lead row → Claude extracts a Hebrew company profile + latest meeting date → update the matched lead item on Monday (column IDs in `crm_integration/contact_profile.py`). Internal-only (Beyond Code) meetings still create rows on the company meetings board unchanged.
+Flow: match participant emails to a lead → create a row on the Meeting Notes board with summary, date, type, and lead relation → create a Workdoc on that meeting item → Claude extracts a Hebrew company profile + latest meeting date → update the matched lead item on Monday (column IDs in `crm_integration/contact_profile.py`). Internal-only (Beyond Code) meetings still create rows on the company meetings board unchanged.
 
 ## System 1: CV pipeline
 

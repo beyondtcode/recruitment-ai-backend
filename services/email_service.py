@@ -35,6 +35,9 @@ class CvEmailAttachment:
     filename: str
     sha256: str
     size_bytes: int
+    subject: str = ""
+    from_address: str = ""
+    body_snippet: str = ""
 
 
 def _message_id_for(msg) -> str:
@@ -63,6 +66,13 @@ def _attachment_reject_reason(filename: str, payload: bytes) -> str | None:
         return "bad_magic"
 
     return None
+
+
+def _body_snippet_for(msg, *, max_chars: int = 500) -> str:
+    text = (getattr(msg, "text", None) or "").strip()
+    if not text:
+        return ""
+    return text[:max_chars]
 
 
 def _imap_criteria(lookback_days: int):
@@ -95,6 +105,9 @@ def fetch_cv_attachments(*, lookback_days: int = 1) -> list[CvEmailAttachment]:
         for msg in mailbox.fetch(criteria):
             message_id = _message_id_for(msg)
             id_prefix = hashlib.sha256(message_id.encode()).hexdigest()[:12]
+            subject = (msg.subject or "").strip()
+            from_address = (msg.from_ or "").strip()
+            body_snippet = _body_snippet_for(msg)
 
             for attachment in msg.attachments:
                 filename = attachment.filename
@@ -124,6 +137,9 @@ def fetch_cv_attachments(*, lookback_days: int = 1) -> list[CvEmailAttachment]:
                         filename=Path(filename).name,
                         sha256=digest,
                         size_bytes=len(payload),
+                        subject=subject,
+                        from_address=from_address,
+                        body_snippet=body_snippet,
                     )
                 )
                 logger.info(

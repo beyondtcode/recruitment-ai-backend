@@ -21,13 +21,16 @@ from crm_integration.meeting import (
     classify_meeting_type,
     column_text,
     create_meeting_item,
+    create_meeting_subitem,
     extract_meeting_summary_intro,
     external_participant_emails,
     gather_past_meeting_context,
     internal_participant_emails,
     is_internal_only_meeting,
+    map_meeting_type_to_subitem_index,
     meeting_already_exists,
     meeting_board_kind,
+    meeting_subitem_already_exists,
     parse_comma_separated_emails,
     resolve_beyondcode_client_match,
     resolve_monday_user_ids_by_emails,
@@ -331,6 +334,41 @@ class MeetingColumnMappingTests(unittest.TestCase):
             {"text": "- Update roadmap"},
         )
 
+    def test_build_column_values_subitem_uses_subitem_columns(self):
+        payload = NodeTakerWebhookPayload.model_validate(
+            {
+                "meeting_title": "Client Kickoff",
+                "meeting_date": "2026-06-17",
+                "participant_emails": ["client@example.com"],
+                "meeting_summary": "Discussed client roadmap.",
+                "action_items": "- Send proposal",
+            }
+        )
+        match = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+        column_values = _build_column_values(
+            payload,
+            match,
+            TEST_CRM_SETTINGS,
+            target="subitem",
+        )
+
+        self.assertEqual(column_values["date_mm4ze64m"], {"date": "2026-06-17"})
+        self.assertEqual(
+            column_values["text_mm50eccx"],
+            "client@example.com",
+        )
+        self.assertNotIn("dropdown_mm4zpdj9", column_values)
+        self.assertNotIn("board_relation_mm4dbkv3", column_values)
+
+    def test_map_meeting_type_to_subitem_index(self):
+        self.assertEqual(map_meeting_type_to_subitem_index("פגישת היכרות"), 1)
+        self.assertEqual(map_meeting_type_to_subitem_index("סגירה"), 4)
+        self.assertEqual(map_meeting_type_to_subitem_index("מעקב"), 3)
+
 
 class ResolveMondayUserIdsTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
@@ -375,12 +413,14 @@ class ResolveMondayUserIdsTests(unittest.IsolatedAsyncioTestCase):
 
 class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.batch.process_nodetaker_webhook", new_callable=AsyncMock)
-    @patch("crm_integration.batch.meeting_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.meeting_subitem_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.fetch_notetaker_meetings_since", new_callable=AsyncMock)
     async def test_skips_existing_and_processes_new_meetings(
         self,
         mock_fetch,
-        mock_exists,
+        mock_find,
+        mock_subitem_exists,
         mock_process,
     ):
         from crm_integration.batch import process_recent_notetaker_meetings
@@ -394,7 +434,12 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         mock_fetch.return_value = [payload_existing, payload_new]
-        mock_exists.side_effect = [True, False]
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+        mock_subitem_exists.side_effect = [True, False]
         mock_process.return_value = NodeTakerWebhookResult(
             status="success",
             meeting_item_id="999",
@@ -409,12 +454,14 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
         mock_process.assert_awaited_once()
 
     @patch("crm_integration.batch.process_nodetaker_webhook", new_callable=AsyncMock)
-    @patch("crm_integration.batch.meeting_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.meeting_subitem_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.fetch_notetaker_meetings_since", new_callable=AsyncMock)
     async def test_skips_when_no_crm_contact_match(
         self,
         mock_fetch,
-        mock_exists,
+        mock_find,
+        mock_subitem_exists,
         mock_process,
     ):
         from crm_integration.batch import process_recent_notetaker_meetings
@@ -422,7 +469,7 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
 
         payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
         mock_fetch.return_value = [payload]
-        mock_exists.return_value = False
+        mock_find.return_value = None
         mock_process.return_value = NodeTakerWebhookResult(
             status="skipped",
             match_type="none",
@@ -436,15 +483,18 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["skipped_count"], 1)
         self.assertEqual(summary["error_count"], 0)
         self.assertEqual(summary["skipped"][0]["reason"], "no_crm_contact_match")
+        mock_subitem_exists.assert_not_awaited()
         mock_process.assert_awaited_once()
 
     @patch("crm_integration.batch.process_nodetaker_webhook", new_callable=AsyncMock)
-    @patch("crm_integration.batch.meeting_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.meeting_subitem_already_exists", new_callable=AsyncMock)
+    @patch("crm_integration.batch.find_contact_by_emails", new_callable=AsyncMock)
     @patch("crm_integration.batch.fetch_notetaker_meetings_since", new_callable=AsyncMock)
     async def test_continues_loop_when_one_meeting_has_no_crm_match(
         self,
         mock_fetch,
-        mock_exists,
+        mock_find,
+        mock_subitem_exists,
         mock_process,
     ):
         from crm_integration.batch import process_recent_notetaker_meetings
@@ -455,7 +505,12 @@ class ProcessRecentNotetakerMeetingsTests(unittest.IsolatedAsyncioTestCase):
         )
         payload_processed = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
         mock_fetch.return_value = [payload_skipped, payload_processed]
-        mock_exists.return_value = False
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+        mock_subitem_exists.return_value = False
         mock_process.side_effect = [
             NodeTakerWebhookResult(
                 status="skipped",
@@ -675,53 +730,49 @@ class BuildMeetingDocBlocksTests(unittest.TestCase):
 
 class GatherPastMeetingContextTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
-    @patch(
-        "crm_integration.meeting._query_meeting_note_items_by_column",
-        new_callable=AsyncMock,
-    )
-    async def test_returns_formatted_past_meetings_before_date(
-        self,
-        mock_query_items,
-        mock_graphql,
-    ):
-        mock_query_items.return_value = ["item-1"]
+    async def test_returns_formatted_past_meetings_before_date(self, mock_graphql):
         mock_graphql.return_value = {
             "data": {
                 "items": [
                     {
-                        "id": "item-1",
-                        "name": "Past Meeting",
-                        "column_values": [
+                        "id": "lead-111",
+                        "subitems": [
                             {
-                                "id": TEST_CRM_SETTINGS.monday_crm_meeting_date_column_id,
-                                "text": "2026-06-10",
+                                "id": "sub-1",
+                                "name": "Past Meeting",
+                                "column_values": [
+                                    {
+                                        "id": TEST_CRM_SETTINGS.monday_crm_lead_subitem_date_column_id,
+                                        "text": "2026-06-10",
+                                    },
+                                    {
+                                        "id": TEST_CRM_SETTINGS.monday_crm_lead_subitem_summary_column_id,
+                                        "text": "Past notes.",
+                                    },
+                                ],
                             },
                             {
-                                "id": TEST_CRM_SETTINGS.monday_crm_meeting_summary_column_id,
-                                "text": "Past notes.",
+                                "id": "sub-2",
+                                "name": "Current Meeting",
+                                "column_values": [
+                                    {
+                                        "id": TEST_CRM_SETTINGS.monday_crm_lead_subitem_date_column_id,
+                                        "text": "2026-06-17",
+                                    },
+                                    {
+                                        "id": TEST_CRM_SETTINGS.monday_crm_lead_subitem_summary_column_id,
+                                        "text": "Current notes.",
+                                    },
+                                ],
                             },
                         ],
-                    },
-                    {
-                        "id": "item-2",
-                        "name": "Current Meeting",
-                        "column_values": [
-                            {
-                                "id": TEST_CRM_SETTINGS.monday_crm_meeting_date_column_id,
-                                "text": "2026-06-17",
-                            },
-                            {
-                                "id": TEST_CRM_SETTINGS.monday_crm_meeting_summary_column_id,
-                                "text": "Current notes.",
-                            },
-                        ],
-                    },
+                    }
                 ]
             }
         }
 
         context = await gather_past_meeting_context(
-            ["client@example.com"],
+            "lead-111",
             before_date=date(2026, 6, 17),
             settings=TEST_CRM_SETTINGS,
         )
@@ -730,15 +781,12 @@ class GatherPastMeetingContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Past notes.", context)
         self.assertNotIn("Current Meeting", context)
 
-    @patch(
-        "crm_integration.meeting._query_meeting_note_items_by_column",
-        new_callable=AsyncMock,
-    )
-    async def test_returns_empty_when_no_matching_items(self, mock_query_items):
-        mock_query_items.return_value = []
+    @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
+    async def test_returns_empty_when_no_matching_subitems(self, mock_graphql):
+        mock_graphql.return_value = {"data": {"items": [{"id": "lead-111", "subitems": []}]}}
 
         context = await gather_past_meeting_context(
-            ["client@example.com"],
+            "lead-111",
             before_date=date(2026, 6, 17),
             settings=TEST_CRM_SETTINGS,
         )
@@ -772,6 +820,29 @@ class CreateMeetingWorkdocTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(variables["itemId"], 555)
         self.assertEqual(variables["columnId"], "doc_mm4dvm4h")
         mock_insert_blocks.assert_awaited_once()
+
+    @patch("crm_integration.workdoc._insert_doc_blocks", new_callable=AsyncMock)
+    @patch("crm_integration.workdoc.execute_graphql", new_callable=AsyncMock)
+    async def test_creates_doc_on_subitem(
+        self,
+        mock_graphql,
+        mock_insert_blocks,
+    ):
+        mock_graphql.return_value = {"data": {"create_doc": {"id": "888"}}}
+        mock_insert_blocks.return_value = ["b1"]
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+
+        doc_id, doc_created, warnings = await create_meeting_workdoc(
+            "555",
+            payload,
+            settings=TEST_CRM_SETTINGS,
+            board_kind="subitem",
+        )
+
+        self.assertEqual(doc_id, "888")
+        self.assertTrue(doc_created)
+        variables = mock_graphql.await_args.args[1]
+        self.assertEqual(variables["columnId"], "doc_mm4zfavw")
 
     @patch("crm_integration.workdoc._insert_doc_blocks", new_callable=AsyncMock)
     @patch("crm_integration.workdoc.execute_graphql", new_callable=AsyncMock)
@@ -1234,12 +1305,12 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
-    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_subitem", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
     async def test_orchestrates_lookup_create_item_workdoc_and_profile(
         self,
         mock_find,
-        mock_create_item,
+        mock_create_subitem,
         mock_create_doc,
         mock_gather,
         mock_extract,
@@ -1254,7 +1325,7 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
             match_type="lead",
             matched_email="client@example.com",
         )
-        mock_create_item.return_value = "555"
+        mock_create_subitem.return_value = "555"
         mock_create_doc.return_value = ("777", True, [])
         mock_gather.return_value = "### Past meeting (2022-01-01)\nOlder notes."
         mock_extract.return_value = ("החברה היא חברה.", "2022-09-05")
@@ -1270,15 +1341,15 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.doc_created)
         self.assertEqual(result.warnings, [])
         mock_find.assert_awaited_once()
-        mock_create_item.assert_awaited_once()
+        mock_create_subitem.assert_awaited_once()
         mock_create_doc.assert_awaited_once_with(
             "555",
             payload,
             settings=TEST_CRM_SETTINGS,
-            board_kind="customer",
+            board_kind="subitem",
         )
         mock_gather.assert_awaited_once_with(
-            payload.participant_emails,
+            "111",
             before_date=payload.meeting_date,
             settings=TEST_CRM_SETTINGS,
         )
@@ -1303,12 +1374,12 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
-    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_subitem", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
     async def test_skips_when_no_crm_match_and_no_internal_participants(
         self,
         mock_find,
-        mock_create_item,
+        mock_create_subitem,
         mock_create_doc,
         mock_gather,
         mock_extract,
@@ -1328,7 +1399,7 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.doc_created)
         self.assertEqual(result.match_type, "none")
         mock_find.assert_awaited_once()
-        mock_create_item.assert_not_awaited()
+        mock_create_subitem.assert_not_awaited()
         mock_create_doc.assert_not_awaited()
         mock_gather.assert_not_awaited()
         mock_extract.assert_not_awaited()
@@ -1465,14 +1536,14 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
     @patch("crm_integration.pipeline.extract_client_meeting_profile", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.gather_past_meeting_context", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.create_meeting_workdoc", new_callable=AsyncMock)
-    @patch("crm_integration.pipeline.create_meeting_item", new_callable=AsyncMock)
+    @patch("crm_integration.pipeline.create_meeting_subitem", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.resolve_beyondcode_client_match", new_callable=AsyncMock)
     @patch("crm_integration.pipeline.find_contact_by_emails", new_callable=AsyncMock)
     async def test_mixed_meeting_lookup_uses_external_emails_only(
         self,
         mock_find,
         mock_resolve_beyondcode,
-        mock_create_item,
+        mock_create_subitem,
         mock_create_doc,
         mock_gather,
         mock_extract,
@@ -1487,7 +1558,7 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
             match_type="lead",
             matched_email="client@example.com",
         )
-        mock_create_item.return_value = "555"
+        mock_create_subitem.return_value = "555"
         mock_create_doc.return_value = ("777", True, [])
         mock_gather.return_value = ""
         mock_extract.return_value = ("פרופיל.", "2026-06-17")
@@ -1508,12 +1579,12 @@ class ProcessNodetakerWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.meeting_item_id, "555")
         mock_find.assert_awaited_once_with(["client@example.com"], settings=TEST_CRM_SETTINGS)
         mock_resolve_beyondcode.assert_not_awaited()
-        mock_create_item.assert_awaited_once()
+        mock_create_subitem.assert_awaited_once()
         mock_create_doc.assert_awaited_once_with(
             "555",
             payload,
             settings=TEST_CRM_SETTINGS,
-            board_kind="customer",
+            board_kind="subitem",
         )
 
 
@@ -1686,6 +1757,78 @@ class CreateMeetingItemReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("long_text_mm4ncaga", column_values)
 
 
+class CreateMeetingSubitemTests(unittest.IsolatedAsyncioTestCase):
+    @patch("crm_integration.meeting.get_mirly_reminder_by_title", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.resolve_monday_user_ids_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
+    async def test_creates_subitem_with_mirly_reminder(
+        self,
+        mock_graphql,
+        mock_users,
+        mock_reminder,
+    ):
+        mock_users.return_value = []
+        mock_reminder.return_value = {
+            "date": "2026-06-25",
+            "info": "Follow up on budget",
+        }
+        mock_graphql.return_value = {"data": {"create_subitem": {"id": "555"}}}
+
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+        match = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+
+        subitem_id = await create_meeting_subitem(payload, match, settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(subitem_id, "555")
+        variables = mock_graphql.await_args.args[1]
+        self.assertEqual(variables["parentItemId"], "111")
+        column_values = json.loads(variables["columnValues"])
+        self.assertEqual(column_values["date_mm4zevqa"], {"date": "2026-06-25"})
+        self.assertEqual(
+            column_values["long_text_mm4z3gp2"],
+            {"text": "Follow up on budget"},
+        )
+        self.assertNotIn("color_mm4zr39c", column_values)
+        self.assertNotIn("board_relation_mm4dbkv3", column_values)
+
+    @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
+    async def test_meeting_subitem_already_exists_matches_title_and_date(self, mock_graphql):
+        mock_graphql.return_value = {
+            "data": {
+                "items": [
+                    {
+                        "id": "111",
+                        "subitems": [
+                            {
+                                "id": "sub-1",
+                                "name": "Q1 Planning",
+                                "column_values": [
+                                    {
+                                        "id": TEST_CRM_SETTINGS.monday_crm_lead_subitem_date_column_id,
+                                        "text": "2026-06-17",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
+
+        exists = await meeting_subitem_already_exists(
+            payload,
+            "111",
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertTrue(exists)
+
+
 class ResolveBeyondcodeClientMatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_returns_configured_lead_item_id(self):
         match = await resolve_beyondcode_client_match(settings=TEST_CRM_SETTINGS)
@@ -1735,21 +1878,13 @@ class MeetingAlreadyExistsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(variables["boardId"], "5099503871")
 
     @patch("crm_integration.meeting.execute_graphql", new_callable=AsyncMock)
-    async def test_checks_customer_board_for_external_meeting(self, mock_graphql):
-        mock_graphql.return_value = {
-            "data": {
-                "items_page_by_column_values": {
-                    "items": []
-                }
-            }
-        }
+    async def test_returns_false_for_external_meeting_without_query(self, mock_graphql):
         payload = NodeTakerWebhookPayload.model_validate(VALID_PAYLOAD)
 
         exists = await meeting_already_exists(payload, settings=TEST_CRM_SETTINGS)
 
         self.assertFalse(exists)
-        variables = mock_graphql.await_args.args[1]
-        self.assertEqual(variables["boardId"], "5098750811")
+        mock_graphql.assert_not_awaited()
 
 
 class CreateMeetingItemCompanyBoardTests(unittest.IsolatedAsyncioTestCase):
@@ -1899,7 +2034,7 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["processed_count"], 1)
         self.assertEqual(summary["error_count"], 0)
         mock_gather.assert_awaited_once_with(
-            ["client@example.com"],
+            "111",
             before_date=date(2026, 6, 18),
             settings=TEST_CRM_SETTINGS,
         )

@@ -12,14 +12,23 @@ class CrmSettings(BaseSettings):
 
     monday_crm_leads_board_id: str
     monday_crm_leads_email_column_id: str
-    monday_crm_meeting_notes_board_id: str
+    monday_crm_lead_subitems_board_id: str = "5099504229"
+    monday_crm_lead_subitem_date_column_id: str = "date_mm4ze64m"
+    monday_crm_lead_subitem_summary_column_id: str = "long_text_mm4z4xk7"
+    monday_crm_lead_subitem_action_items_column_id: str = "long_text_mm4zmww8"
+    monday_crm_lead_subitem_doc_column_id: str = "doc_mm4zfavw"
+    monday_crm_lead_subitem_external_participants_column_id: str = "text_mm50eccx"
+    monday_crm_lead_subitem_people_column_id: str = "multiple_person_mm4z8qfq"
+    monday_crm_lead_subitem_reminder_date_column_id: str = "date_mm4zevqa"
+    monday_crm_lead_subitem_reminder_info_column_id: str = "long_text_mm4z3gp2"
+    monday_crm_meeting_notes_board_id: str = ""
     monday_crm_meeting_notes_group_id: str = "topics"
     monday_crm_company_meetings_board_id: str = "5099503871"
     monday_crm_company_meetings_group_id: str = "topics"
     beyondcode_company_client_item_id: str = "3018755375"
     beyondcode_company_client_name: str = 'ביונד קוד בע"מ'
     monday_crm_meeting_date_column_id: str
-    monday_crm_meeting_lead_relation_column_id: str
+    monday_crm_meeting_lead_relation_column_id: str = ""
     monday_crm_meeting_doc_column_id: str
     monday_crm_meeting_summary_column_id: str
     monday_crm_meeting_external_participants_column_id: str = "text_mm4dmn71"

@@ -9,10 +9,11 @@ from crm_integration.config import CrmSettings, get_crm_settings
 from crm_integration.lookup import ContactMatch
 from crm_integration.monday_client import (
     CREATE_ITEM_MUTATION,
+    CREATE_SUBITEM_MUTATION,
     FIND_ITEMS_LIMIT,
-    ITEMS_BY_IDS_QUERY,
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
     ITEMS_PAGE_WITH_COLUMNS_QUERY,
+    ITEM_SUBITEMS_WITH_COLUMNS_QUERY,
     USERS_BY_EMAILS_QUERY,
     execute_graphql,
 )
@@ -30,7 +31,8 @@ MeetingTypeLabel = Literal[
     "פגישת לקוח",
 ]
 
-BoardKind = Literal["customer", "company"]
+BoardKind = Literal["customer", "company", "subitem"]
+ColumnTarget = Literal["board", "subitem"]
 
 INTERNAL_EMAIL_DOMAIN = "@beyondtcode.com"
 
@@ -95,6 +97,14 @@ MEETING_TYPE_RULES: tuple[tuple[MeetingTypeLabel, tuple[str, ...]], ...] = (
 
 DEFAULT_MEETING_TYPE: MeetingTypeLabel = "מעקב"
 
+SUBITEM_MEETING_TYPE_INDEX: dict[MeetingTypeLabel, int] = {
+    "פגישת היכרות": 1,
+    "סגירה": 4,
+    "מצגת": 2,
+    "משא מתן": 2,
+    "פגישת לקוח": 3,
+    "מעקב": 3,
+}
 MEETING_SUMMARY_DECISIONS_MARKERS = (
     "### החלטות ותוצאות",
     "### Decisions",
@@ -142,10 +152,43 @@ def _meeting_target_board(settings: CrmSettings, board_kind: BoardKind) -> tuple
             settings.monday_crm_company_meetings_board_id,
             settings.monday_crm_company_meetings_group_id,
         )
+    if board_kind == "subitem":
+        return settings.monday_crm_lead_subitems_board_id, ""
     return (
         settings.monday_crm_meeting_notes_board_id,
         settings.monday_crm_meeting_notes_group_id,
     )
+
+
+def map_meeting_type_to_subitem_index(meeting_type: MeetingTypeLabel) -> int:
+    """Map board classifier output to the Leads subitem meeting-type dropdown index."""
+    return SUBITEM_MEETING_TYPE_INDEX.get(meeting_type, SUBITEM_MEETING_TYPE_INDEX["מעקב"])
+
+
+def _column_id(settings: CrmSettings, field: str, target: ColumnTarget) -> str:
+    """Resolve a logical field name to the Monday column ID for board or subitem targets."""
+    if target == "subitem":
+        mapping = {
+            "date": settings.monday_crm_lead_subitem_date_column_id,
+            "summary": settings.monday_crm_lead_subitem_summary_column_id,
+            "action_items": settings.monday_crm_lead_subitem_action_items_column_id,
+            "external_participants": settings.monday_crm_lead_subitem_external_participants_column_id,
+            "people": settings.monday_crm_lead_subitem_people_column_id,
+            "reminder_date": settings.monday_crm_lead_subitem_reminder_date_column_id,
+            "reminder_info": settings.monday_crm_lead_subitem_reminder_info_column_id,
+        }
+    else:
+        mapping = {
+            "date": settings.monday_crm_meeting_date_column_id,
+            "summary": settings.monday_crm_meeting_summary_column_id,
+            "action_items": settings.monday_crm_meeting_action_items_column_id,
+            "meeting_type": settings.monday_crm_meeting_type_column_id,
+            "external_participants": settings.monday_crm_meeting_external_participants_column_id,
+            "people": settings.monday_crm_meeting_people_column_id,
+            "reminder_date": settings.meeting_notes_reminder_date_column_id,
+            "reminder_info": settings.meeting_notes_reminder_info_column_id,
+        }
+    return mapping[field]
 
 
 def parse_comma_separated_emails(raw: str) -> list[str]:
@@ -188,6 +231,8 @@ def column_text(column: dict[str, Any]) -> str:
             field_value = parsed.get(key)
             if field_value:
                 return str(field_value).strip()
+    if isinstance(parsed, str):
+        return parsed.strip()
     return ""
 
 
@@ -209,78 +254,37 @@ def _column_by_id(item: dict[str, Any], column_id: str) -> dict[str, Any] | None
     return None
 
 
-async def _query_meeting_note_items_by_column(
-    board_id: str,
-    column_id: str,
-    column_value: str,
-    settings: CrmSettings,
-) -> list[str]:
-    body = await execute_graphql(
-        ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
-        {
-            "boardId": board_id,
-            "limit": FIND_ITEMS_LIMIT,
-            "columns": [{"column_id": column_id, "column_values": [column_value]}],
-        },
-        column_ids=[column_id],
-    )
-    items = body.get("data", {}).get("items_page_by_column_values", {}).get("items") or []
-    if len(items) >= FIND_ITEMS_LIMIT:
-        logger.warning(
-            "Meeting notes query hit FIND_ITEMS_LIMIT=%d for column %s value %r",
-            FIND_ITEMS_LIMIT,
-            column_id,
-            column_value,
-        )
-    return [str(item["id"]) for item in items if item.get("id") is not None]
-
-
 async def gather_past_meeting_context(
-    participant_emails: list[str],
+    lead_item_id: str,
     *,
     before_date: date,
     settings: CrmSettings | None = None,
 ) -> str:
-    """Collect formatted summaries from past Meeting Notes items matching participant emails."""
+    """Collect formatted summaries from past meeting subitems under a lead."""
     settings = settings or get_crm_settings()
-    emails = external_participant_emails(participant_emails)
-    if not emails:
+    if not lead_item_id.strip():
         return ""
 
-    item_ids: set[str] = set()
-
-    for email in emails:
-        email_ids = await _query_meeting_note_items_by_column(
-            settings.monday_crm_meeting_notes_board_id,
-            settings.monday_crm_meeting_external_participants_column_id,
-            email,
-            settings,
-        )
-        item_ids.update(email_ids)
-
-    if not item_ids:
-        return ""
+    date_column_id = settings.monday_crm_lead_subitem_date_column_id
+    summary_column_id = settings.monday_crm_lead_subitem_summary_column_id
 
     body = await execute_graphql(
-        ITEMS_BY_IDS_QUERY,
+        ITEM_SUBITEMS_WITH_COLUMNS_QUERY,
         {
-            "ids": list(item_ids),
-            "columnIds": [
-                settings.monday_crm_meeting_date_column_id,
-                settings.monday_crm_meeting_summary_column_id,
-            ],
+            "itemId": lead_item_id,
+            "columnIds": [date_column_id, summary_column_id],
         },
-        column_ids=[
-            settings.monday_crm_meeting_date_column_id,
-            settings.monday_crm_meeting_summary_column_id,
-        ],
+        column_ids=[date_column_id, summary_column_id],
     )
     items = body.get("data", {}).get("items") or []
+    if not items:
+        return ""
 
+    subitems = items[0].get("subitems") or []
     past_meetings: list[tuple[date, str, str]] = []
-    for item in items:
-        date_column = _column_by_id(item, settings.monday_crm_meeting_date_column_id)
-        summary_column = _column_by_id(item, settings.monday_crm_meeting_summary_column_id)
+    for subitem in subitems:
+        date_column = _column_by_id(subitem, date_column_id)
+        summary_column = _column_by_id(subitem, summary_column_id)
         meeting_date = date_column_value(date_column or {})
         if meeting_date is None or meeting_date >= before_date:
             continue
@@ -289,7 +293,7 @@ async def gather_past_meeting_context(
         if not summary:
             continue
 
-        title = str(item.get("name") or "").strip() or "פגישה ללא שם"
+        title = str(subitem.get("name") or "").strip() or "פגישה ללא שם"
         past_meetings.append((meeting_date, title, summary))
 
     if not past_meetings:
@@ -420,6 +424,14 @@ def _dropdown_column_value(label: str) -> dict[str, list[str]]:
     return {"labels": [label]}
 
 
+def _dropdown_index_column_value(index: int) -> dict[str, int]:
+    return {"index": index}
+
+
+def _status_index_column_value(index: int) -> dict[str, int]:
+    return {"index": index}
+
+
 def _date_column_value(meeting_date: date) -> dict[str, str]:
     return {"date": meeting_date.isoformat()}
 
@@ -467,6 +479,56 @@ async def resolve_monday_user_ids_by_emails(emails: list[str]) -> list[str]:
     return resolved
 
 
+def parse_board_relation_lead_id(column: dict[str, Any] | None) -> str | None:
+    """Extract the first linked lead item ID from a board-relation column value."""
+    if not column:
+        return None
+
+    linked_item_ids = column.get("linked_item_ids")
+    if linked_item_ids:
+        first_id = linked_item_ids[0]
+        return str(first_id) if first_id is not None else None
+
+    value = column.get("value")
+    if not value:
+        return None
+
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    linked_ids = parsed.get("linkedPulseIds") or parsed.get("item_ids") or []
+    if not linked_ids:
+        return None
+
+    first_id = linked_ids[0]
+    return str(first_id) if first_id is not None else None
+
+
+def parse_meeting_type_label(text: str) -> MeetingTypeLabel | None:
+    """Return a known meeting type label when legacy dropdown text matches exactly."""
+    normalized = text.strip()
+    if normalized in SUBITEM_MEETING_TYPE_INDEX:
+        return normalized  # type: ignore[return-value]
+    return None
+
+
+def resolve_meeting_type_label(
+    legacy_type_text: str,
+    title: str,
+    summary: str,
+) -> MeetingTypeLabel:
+    """Prefer legacy dropdown text; fall back to title/summary classification."""
+    parsed = parse_meeting_type_label(legacy_type_text)
+    if parsed:
+        return parsed
+    return classify_meeting_type(title, summary)
+
+
 def _build_column_values(
     payload: NodeTakerWebhookPayload,
     match: ContactMatch | None,
@@ -474,55 +536,82 @@ def _build_column_values(
     *,
     internal_user_ids: list[str] | None = None,
     board_kind: BoardKind = "customer",
+    target: ColumnTarget = "board",
+    meeting_type_override: MeetingTypeLabel | None = None,
 ) -> dict[str, Any]:
+    date_col = _column_id(settings, "date", target)
     column_values: dict[str, Any] = {
-        settings.monday_crm_meeting_date_column_id: _date_column_value(payload.meeting_date),
+        date_col: _date_column_value(payload.meeting_date),
     }
-    if board_kind == "customer":
-        column_values[settings.monday_crm_meeting_type_column_id] = _dropdown_column_value(
-            classify_meeting_type(payload.meeting_title, payload.meeting_summary)
+
+    if target != "subitem":
+        meeting_type = meeting_type_override or classify_meeting_type(
+            payload.meeting_title, payload.meeting_summary
         )
+        if board_kind == "customer":
+            column_values[_column_id(settings, "meeting_type", target)] = _dropdown_column_value(
+                meeting_type
+            )
 
     overview = extract_meeting_summary_intro(payload.meeting_summary)
     if overview:
-        column_values[settings.monday_crm_meeting_summary_column_id] = _long_text_column_value(
-            overview
-        )
+        column_values[_column_id(settings, "summary", target)] = _long_text_column_value(overview)
 
     external_emails = external_participant_emails([str(email) for email in payload.participant_emails])
     if external_emails:
-        column_values[settings.monday_crm_meeting_external_participants_column_id] = (
+        column_values[_column_id(settings, "external_participants", target)] = (
             _plain_text_column_value(", ".join(external_emails))
         )
 
     action_items = payload.action_items.strip()
     if action_items:
-        column_values[settings.monday_crm_meeting_action_items_column_id] = _long_text_column_value(
+        column_values[_column_id(settings, "action_items", target)] = _long_text_column_value(
             action_items
         )
 
-    if match and match.item_id:
+    if target == "board" and match and match.item_id and settings.monday_crm_meeting_lead_relation_column_id:
         column_values[settings.monday_crm_meeting_lead_relation_column_id] = (
             _board_relation_column_value(match.item_id)
         )
 
     if internal_user_ids:
-        column_values[settings.monday_crm_meeting_people_column_id] = _people_column_value(
+        column_values[_column_id(settings, "people", target)] = _people_column_value(
             internal_user_ids
         )
 
     return column_values
 
 
+def _inject_mirly_reminder_columns(
+    column_values: dict[str, Any],
+    reminder: dict[str, str] | None,
+    settings: CrmSettings,
+    *,
+    target: ColumnTarget,
+) -> None:
+    if not reminder:
+        return
+    if reminder.get("date"):
+        column_values[_column_id(settings, "reminder_date", target)] = _date_column_value(
+            date.fromisoformat(reminder["date"])
+        )
+    if reminder.get("info"):
+        column_values[_column_id(settings, "reminder_info", target)] = _long_text_column_value(
+            reminder["info"]
+        )
+
+
 async def meeting_already_exists(
     payload: NodeTakerWebhookPayload,
     settings: CrmSettings | None = None,
 ) -> bool:
-    """Return True if a meeting notes item with the same title and date already exists."""
+    """Return True if a company-meeting board item with the same title and date already exists."""
     settings = settings or get_crm_settings()
+    if meeting_board_kind(payload) != "company":
+        return False
+
     title = payload.meeting_title.strip()
-    board_kind = meeting_board_kind(payload)
-    board_id, _ = _meeting_target_board(settings, board_kind)
+    board_id, _ = _meeting_target_board(settings, "company")
 
     body = await execute_graphql(
         ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
@@ -552,6 +641,100 @@ async def meeting_already_exists(
     return False
 
 
+async def meeting_subitem_already_exists(
+    payload: NodeTakerWebhookPayload,
+    lead_item_id: str,
+    settings: CrmSettings | None = None,
+) -> bool:
+    """Return True if a meeting subitem with the same title and date already exists under the lead."""
+    settings = settings or get_crm_settings()
+    title = payload.meeting_title.strip()
+    date_column_id = settings.monday_crm_lead_subitem_date_column_id
+
+    body = await execute_graphql(
+        ITEM_SUBITEMS_WITH_COLUMNS_QUERY,
+        {
+            "itemId": lead_item_id,
+            "columnIds": [date_column_id],
+        },
+        column_ids=[date_column_id],
+    )
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        return False
+
+    for subitem in items[0].get("subitems") or []:
+        if str(subitem.get("name") or "").strip() != title:
+            continue
+        date_column = _column_by_id(subitem, date_column_id)
+        meeting_date = date_column_value(date_column or {})
+        if meeting_date == payload.meeting_date:
+            logger.info(
+                "Meeting subitem already exists under lead %s: title=%r date=%s subitem_id=%s",
+                lead_item_id,
+                title,
+                payload.meeting_date.isoformat(),
+                subitem.get("id"),
+            )
+            return True
+    return False
+
+
+async def create_meeting_subitem(
+    payload: NodeTakerWebhookPayload,
+    match: ContactMatch,
+    settings: CrmSettings | None = None,
+    *,
+    meeting_type_override: MeetingTypeLabel | None = None,
+    reminder: dict[str, str] | None = None,
+    fetch_mirly_reminder: bool = True,
+) -> str:
+    """Create a meeting summary subitem under the matched lead and return the new subitem ID."""
+    settings = settings or get_crm_settings()
+    if not match.item_id:
+        raise ValueError("Lead item_id is required to create a meeting subitem")
+
+    internal_emails = internal_participant_emails(
+        [str(email) for email in payload.participant_emails]
+    )
+    internal_user_ids = (
+        await resolve_monday_user_ids_by_emails(internal_emails) if internal_emails else []
+    )
+    column_values = _build_column_values(
+        payload,
+        match,
+        settings,
+        internal_user_ids=internal_user_ids,
+        target="subitem",
+        meeting_type_override=meeting_type_override,
+    )
+
+    if fetch_mirly_reminder and reminder is None:
+        reminder = await get_mirly_reminder_by_title(payload.meeting_title)
+    _inject_mirly_reminder_columns(column_values, reminder, settings, target="subitem")
+
+    body = await execute_graphql(
+        CREATE_SUBITEM_MUTATION,
+        {
+            "parentItemId": match.item_id,
+            "itemName": payload.meeting_title.strip(),
+            "columnValues": json.dumps(column_values),
+        },
+        column_ids=list(column_values.keys()),
+    )
+    subitem_id = body.get("data", {}).get("create_subitem", {}).get("id")
+    if not subitem_id:
+        raise RuntimeError("Monday create_subitem did not return an item id")
+
+    subitem_id = str(subitem_id)
+    logger.info(
+        "Meeting subitem created with ID %s under lead %s",
+        subitem_id,
+        match.item_id,
+    )
+    return subitem_id
+
+
 async def create_meeting_item(
     payload: NodeTakerWebhookPayload,
     match: ContactMatch | None,
@@ -577,15 +760,7 @@ async def create_meeting_item(
     )
 
     reminder = await get_mirly_reminder_by_title(payload.meeting_title)
-    if reminder:
-        if reminder.get("date"):
-            column_values[settings.meeting_notes_reminder_date_column_id] = _date_column_value(
-                date.fromisoformat(reminder["date"])
-            )
-        if reminder.get("info"):
-            column_values[settings.meeting_notes_reminder_info_column_id] = _long_text_column_value(
-                reminder["info"]
-            )
+    _inject_mirly_reminder_columns(column_values, reminder, settings, target="board")
 
     if not match or not match.item_id:
         logger.warning(

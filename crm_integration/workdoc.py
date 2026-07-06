@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from crm_integration.config import CrmSettings, get_crm_settings
 from crm_integration.meeting import BoardKind, extract_meeting_summary_intro, _meeting_target_board
@@ -13,6 +13,8 @@ from crm_integration.monday_client import (
     CREATE_DOC_BLOCK_MUTATION,
     CREATE_DOC_MUTATION,
     execute_graphql,
+    fetch_all_doc_blocks,
+    fetch_item_doc_id,
 )
 from crm_integration.schemas import NodeTakerWebhookPayload
 
@@ -26,6 +28,25 @@ DocBlockType = Literal[
     "bulleted_list",
     "numbered_list",
 ]
+
+BLOCK_TYPE_ALIASES: dict[str, DocBlockType] = {
+    "large title": "large_title",
+    "medium title": "medium_title",
+    "small title": "small_title",
+    "normal text": "normal_text",
+    "bulleted list": "bulleted_list",
+    "numbered list": "numbered_list",
+}
+
+
+def _normalize_block_type(block_type: str) -> DocBlockType:
+    normalized = block_type.strip().replace("-", " ").replace("_", " ").lower()
+    if normalized in BLOCK_TYPE_ALIASES:
+        return BLOCK_TYPE_ALIASES[normalized]
+    underscored = normalized.replace(" ", "_")
+    if underscored in BLOCK_TYPE_ALIASES.values():
+        return underscored  # type: ignore[return-value]
+    raise RuntimeError(f"Unsupported Workdoc block type: {block_type!r}")
 
 
 @dataclass(frozen=True)
@@ -122,6 +143,121 @@ def _block_content_json(block: DocBlockSpec) -> str:
     return json.dumps(base)
 
 
+async def _insert_raw_doc_blocks(
+    doc_id: str,
+    blocks: list[dict[str, Any]],
+) -> list[str]:
+    """Insert pre-fetched Workdoc blocks sequentially. Returns created block IDs."""
+    created_ids: list[str] = []
+    after_block_id: str | None = None
+
+    sorted_blocks = sorted(blocks, key=lambda block: block.get("position") or 0)
+
+    for index, block in enumerate(sorted_blocks):
+        raw_type = block.get("type")
+        content = block.get("content")
+        if not raw_type or content is None:
+            raise RuntimeError(f"Block {index + 1} missing type or content")
+
+        block_type = _normalize_block_type(str(raw_type))
+
+        if isinstance(content, str):
+            try:
+                json.loads(content)
+                content_payload = content
+            except json.JSONDecodeError:
+                content_payload = json.dumps({"deltaFormat": [{"insert": content}]})
+        elif isinstance(content, dict):
+            content_payload = json.dumps(content)
+        else:
+            content_payload = json.dumps(content)
+
+        variables: dict[str, object] = {
+            "docId": int(doc_id),
+            "type": block_type,
+            "content": content_payload,
+        }
+        if after_block_id is not None:
+            variables["afterBlockId"] = after_block_id
+
+        body = await execute_graphql(CREATE_DOC_BLOCK_MUTATION, variables)
+        block_id = body.get("data", {}).get("create_doc_block", {}).get("id")
+        if not block_id:
+            raise RuntimeError(
+                f"create_doc_block returned no id for copied block {index + 1}/{len(sorted_blocks)} "
+                f"({block_type})"
+            )
+
+        after_block_id = str(block_id)
+        created_ids.append(after_block_id)
+
+    return created_ids
+
+
+async def copy_workdoc_blocks(
+    source_doc_id: str,
+    target_item_id: str,
+    settings: CrmSettings | None = None,
+    *,
+    board_kind: BoardKind = "subitem",
+) -> tuple[str | None, bool, list[str]]:
+    """
+    Copy all blocks from an existing Workdoc onto a new item's doc column.
+
+    Returns (doc_id, doc_created, warnings).
+    """
+    settings = settings or get_crm_settings()
+    warnings: list[str] = []
+
+    source_blocks = await fetch_all_doc_blocks(source_doc_id)
+    if not source_blocks:
+        warnings.append(f"Source Workdoc {source_doc_id} has no blocks to copy")
+        return None, False, warnings
+
+    existing_doc_id = await fetch_item_doc_id(
+        target_item_id,
+        _doc_column_id(settings, board_kind),
+    )
+    doc_id: str | None = existing_doc_id
+    if doc_id:
+        existing_blocks = await fetch_all_doc_blocks(doc_id)
+        if existing_blocks:
+            warnings.append(
+                f"Target item {target_item_id} already has Workdoc {doc_id} with content"
+            )
+            return doc_id, True, warnings
+    else:
+        try:
+            doc_body = await execute_graphql(
+                CREATE_DOC_MUTATION,
+                {
+                    "itemId": int(target_item_id),
+                    "columnId": _doc_column_id(settings, board_kind),
+                },
+            )
+            doc_id = doc_body.get("data", {}).get("create_doc", {}).get("id")
+            if not doc_id:
+                raise RuntimeError("Monday create_doc did not return a doc id")
+            doc_id = str(doc_id)
+        except Exception as exc:
+            warnings.append(f"Workdoc creation failed during copy: {exc}")
+            return None, False, warnings
+
+    try:
+        block_ids = await _insert_raw_doc_blocks(doc_id, source_blocks)
+        logger.info(
+            "Copied %d Workdoc blocks from doc %s to item %s (doc %s)",
+            len(block_ids),
+            source_doc_id,
+            target_item_id,
+            doc_id,
+        )
+        return doc_id, True, warnings
+    except Exception as exc:
+        warnings.append(f"Workdoc block copy failed: {exc}")
+        return None, False, warnings
+
+
 async def _insert_doc_blocks(doc_id: str, blocks: list[DocBlockSpec]) -> list[str]:
     """Insert blocks sequentially into a Workdoc. Returns created block IDs."""
     created_ids: list[str] = []
@@ -157,6 +293,18 @@ async def _insert_doc_blocks(doc_id: str, blocks: list[DocBlockSpec]) -> list[st
     return created_ids
 
 
+def _doc_column_id(settings: CrmSettings, board_kind: BoardKind) -> str:
+    if board_kind == "subitem":
+        return settings.monday_crm_lead_subitem_doc_column_id
+    return settings.monday_crm_meeting_doc_column_id
+
+
+def _summary_column_id(settings: CrmSettings, board_kind: BoardKind) -> str:
+    if board_kind == "subitem":
+        return settings.monday_crm_lead_subitem_summary_column_id
+    return settings.monday_crm_meeting_summary_column_id
+
+
 async def _append_action_items_to_summary_column(
     item_id: str,
     payload: NodeTakerWebhookPayload,
@@ -176,17 +324,16 @@ async def _append_action_items_to_summary_column(
         combined = "## Action Items\n\n"
     combined += action_items
 
+    summary_column_id = _summary_column_id(settings, board_kind)
     board_id, _ = _meeting_target_board(settings, board_kind)
     await execute_graphql(
         CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
         {
             "boardId": board_id,
             "itemId": item_id,
-            "columnValues": json.dumps(
-                {settings.monday_crm_meeting_summary_column_id: {"text": combined}}
-            ),
+            "columnValues": json.dumps({summary_column_id: {"text": combined}}),
         },
-        column_ids=[settings.monday_crm_meeting_summary_column_id],
+        column_ids=[summary_column_id],
     )
     logger.info(
         "Appended action items to summary column for meeting item %s after doc failure",
@@ -220,7 +367,7 @@ async def create_meeting_workdoc(
             CREATE_DOC_MUTATION,
             {
                 "itemId": int(item_id),
-                "columnId": settings.monday_crm_meeting_doc_column_id,
+                "columnId": _doc_column_id(settings, board_kind),
             },
         )
         doc_id = doc_body.get("data", {}).get("create_doc", {}).get("id")

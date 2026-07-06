@@ -12,6 +12,7 @@ from crm_integration.meeting import (
     BoardKind,
     build_meeting_logs_for_profile,
     create_meeting_item,
+    create_meeting_subitem,
     external_participant_emails,
     extract_meeting_summary_intro,
     gather_past_meeting_context,
@@ -74,20 +75,20 @@ async def process_nodetaker_webhook(
         match = await find_contact_by_emails(external_emails, settings=settings)
 
     if match:
-        meeting_item_id = await create_meeting_item(payload, match, settings=settings)
+        meeting_item_id = await create_meeting_subitem(payload, match, settings=settings)
 
         doc_id, doc_created, workdoc_warnings = await _create_meeting_workdoc_step(
             meeting_item_id,
             payload,
             settings,
-            board_kind="customer",
+            board_kind="subitem",
         )
         warnings.extend(workdoc_warnings)
 
         if payload.meeting_summary.strip():
             try:
                 past_context = await gather_past_meeting_context(
-                    payload.participant_emails,
+                    match.item_id,
                     before_date=payload.meeting_date,
                     settings=settings,
                 )

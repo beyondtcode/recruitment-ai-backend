@@ -10,7 +10,9 @@ from crm_integration.meeting import (
     column_text,
     external_participant_emails,
     gather_past_meeting_context,
+    is_internal_only_meeting,
     meeting_already_exists,
+    meeting_subitem_already_exists,
     parse_comma_separated_emails,
     status_column_index,
 )
@@ -162,7 +164,7 @@ async def process_morning_briefs(
                 continue
 
             past_context = await gather_past_meeting_context(
-                emails,
+                match.item_id,
                 before_date=today,
                 settings=settings,
             )
@@ -255,9 +257,21 @@ async def process_recent_notetaker_meetings(
             "date": payload.meeting_date.isoformat(),
         }
         try:
-            if await meeting_already_exists(payload, settings=settings):
-                skipped.append({**meeting_key, "reason": "already_exists"})
-                continue
+            external_emails = external_participant_emails(
+                [str(email) for email in payload.participant_emails]
+            )
+            if external_emails:
+                match = await find_contact_by_emails(external_emails, settings=settings)
+                if match and await meeting_subitem_already_exists(
+                    payload, match.item_id, settings=settings
+                ):
+                    skipped.append({**meeting_key, "reason": "already_exists"})
+                    continue
+            elif is_internal_only_meeting(payload.participant_emails):
+                if await meeting_already_exists(payload, settings=settings):
+                    skipped.append({**meeting_key, "reason": "already_exists"})
+                    continue
+
             result: NodeTakerWebhookResult = await process_nodetaker_webhook(
                 payload,
                 settings=settings,

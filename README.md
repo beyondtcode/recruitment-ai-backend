@@ -100,7 +100,7 @@ This starts FastAPI with:
 - CRM webhook at `POST /nodetaker-webhook`
 - A **morning briefing cron** at 07:00 Asia/Jerusalem (in-process; requires the server to be awake)
 - A **daily email CV batch** at 08:00 Asia/Jerusalem (in-process; scans IMAP and upserts to Main Hub)
-- A **Notetaker batch** at 00:05 Asia/Jerusalem (in-process; fetches recent meetings from Monday Notetaker API)
+- A **Notetaker batch** at 00:00 Asia/Jerusalem (in-process; fetches recent meetings from Monday Notetaker API)
 
 ### Run email CV ingestion (CLI)
 
@@ -164,14 +164,23 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 | ---------------------------------------------------- | --------- | ------------------------------------------ |
 | `MONDAY_CRM_LEADS_BOARD_ID`                          | Yes (CRM) | Board ID for leads (all CRM contacts)      |
 | `MONDAY_CRM_LEADS_EMAIL_COLUMN_ID`                   | Yes (CRM) | Email column on leads board                |
-| `MONDAY_CRM_MEETING_NOTES_BOARD_ID`                  | Yes (CRM) | Board where customer meeting items are created |
+| `MONDAY_CRM_LEAD_SUBITEMS_BOARD_ID`                  | No        | Subitems board for lead meeting summaries (default: `5099504229`) |
+| `MONDAY_CRM_LEAD_SUBITEM_DATE_COLUMN_ID`             | No        | Meeting date on lead subitems (default: `date_mm4ze64m`) |
+| `MONDAY_CRM_LEAD_SUBITEM_SUMMARY_COLUMN_ID`          | No        | Summary intro on lead subitems (default: `long_text_mm4z4xk7`) |
+| `MONDAY_CRM_LEAD_SUBITEM_ACTION_ITEMS_COLUMN_ID`     | No        | Action items on lead subitems (default: `long_text_mm4zmww8`) |
+| `MONDAY_CRM_LEAD_SUBITEM_DOC_COLUMN_ID`              | No        | Workdoc column on lead subitems (default: `doc_mm4zfavw`) |
+| `MONDAY_CRM_LEAD_SUBITEM_EXTERNAL_PARTICIPANTS_COLUMN_ID` | No   | External participant emails on subitems (default: `text_mm50eccx`) |
+| `MONDAY_CRM_LEAD_SUBITEM_PEOPLE_COLUMN_ID`           | No        | Internal participants on subitems (default: `multiple_person_mm4z8qfq`) |
+| `MONDAY_CRM_LEAD_SUBITEM_REMINDER_DATE_COLUMN_ID`    | No        | Mirly reminder date on subitems (default: `date_mm4zevqa`) |
+| `MONDAY_CRM_LEAD_SUBITEM_REMINDER_INFO_COLUMN_ID`    | No        | Mirly reminder info on subitems (default: `long_text_mm4z3gp2`) |
+| `MONDAY_CRM_MEETING_NOTES_BOARD_ID`                  | No        | Legacy meeting notes board (optional)      |
 | `MONDAY_CRM_MEETING_NOTES_GROUP_ID`                  | No        | Group for new meetings (default: `topics`) |
 | `MONDAY_CRM_COMPANY_MEETINGS_BOARD_ID`               | No        | Board for internal-only meetings (default: `5099503871`) |
 | `MONDAY_CRM_COMPANY_MEETINGS_GROUP_ID`               | No        | Group for company meetings (default: `topics`) |
 | `BEYONDCODE_COMPANY_CLIENT_ITEM_ID`                   | No        | BeyondCode lead item for company meeting relations (default: `3018755375`) |
 | `BEYONDCODE_COMPANY_CLIENT_NAME`                     | No        | Fallback lead name lookup on Leads board (default: `ביונד קוד בע"מ`) |
-| `MONDAY_CRM_MEETING_DATE_COLUMN_ID`                  | Yes (CRM) | Date column on meeting board               |
-| `MONDAY_CRM_MEETING_LEAD_RELATION_COLUMN_ID`         | Yes (CRM) | Board relation → lead                      |
+| `MONDAY_CRM_MEETING_DATE_COLUMN_ID`                  | Yes (CRM) | Date column on company meeting board       |
+| `MONDAY_CRM_MEETING_LEAD_RELATION_COLUMN_ID`         | No        | Board relation → lead (company meetings)   |
 | `MONDAY_CRM_MEETING_DOC_COLUMN_ID`                   | Yes (CRM) | Column that holds the Workdoc (company meetings) |
 | `MONDAY_CRM_MEETING_SUMMARY_COLUMN_ID`               | Yes (CRM) | Short summary text column                  |
 | `MONDAY_CRM_MEETING_EXTERNAL_PARTICIPANTS_COLUMN_ID` | No        | External participant emails                |
@@ -222,7 +231,7 @@ Expects JSON matching `NodeTakerWebhookPayload`:
 }
 ```
 
-Flow: match participant emails to a lead → create a row on the Meeting Notes board with summary, date, type, and lead relation → create a Workdoc on that meeting item → Claude extracts a Hebrew company profile + latest meeting date → update the matched lead item on Monday (column IDs in `crm_integration/contact_profile.py`). Internal-only (Beyond Code) meetings still create rows on the company meetings board unchanged.
+Flow: match participant emails to a lead → create a **subitem** under that lead with summary, date, participants, and action items → create a Workdoc on the subitem → Claude extracts a Hebrew company profile + latest meeting date → update the matched lead item on Monday (column IDs in `crm_integration/contact_profile.py`). Internal-only (Beyond Code) meetings still create rows on the company meetings board unchanged.
 
 ## System 1: CV pipeline
 
@@ -278,7 +287,7 @@ crm_integration/contact_profile.py — update matched lead item on Monday
 ### Two ways meetings enter the system
 
 1. **Real-time webhook** — `POST /nodetaker-webhook` (routed via `crm_integration/routes.py`).
-2. **Daily batch** — APScheduler runs at **00:05 Asia/Jerusalem** (`app.py` → `crm_integration/batch.py` → `run_daily_notetaker_batch()`).
+2. **Daily batch** — APScheduler runs at **00:00 Asia/Jerusalem** (`app.py` → `crm_integration/batch.py` → `run_daily_notetaker_batch()`).
 
 ### Contact matching
 
@@ -340,7 +349,7 @@ recruitment-ai-backend/
 
 | File                   | Role                                                                                                                                                                   |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for notetaker batch (00:05), morning briefings (07:00), and email CV batch (08:00), exposes `/health` and a dev test endpoint. |
+| `**app.py**`           | The production server. Registers CRM routes, handles `/monday-webhook`, starts APScheduler for notetaker batch (00:00), morning briefings (07:00), and email CV batch (08:00), exposes `/health` and a dev test endpoint. |
 | `**main.py**`          | Standalone script: `process_email_cv_batch(lookback_days=0)` for same-day manual email CV ingestion.                                                                                                 |
 | `**requirements.txt**` | Dependencies: FastAPI, Anthropic SDK, httpx, pypdf, python-docx, imap-tools, APScheduler, Pydantic, etc.                                                               |
 | `**render.yaml**`      | Deploys as a Render web service running `uvicorn app:app`.                                                                                                             |

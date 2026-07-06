@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
 from services.cv_pipeline import run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
+from services.status_email import send_weekly_status_email
 
 load_dotenv()
 
@@ -72,6 +74,15 @@ async def _run_notetaker_batch() -> None:
         logger.exception("Daily notetaker batch failed")
 
 
+async def _run_weekly_status_email() -> None:
+    logger.info("Weekly system health-check email started")
+    try:
+        send_weekly_status_email()
+        logger.info("Weekly system health-check email sent successfully")
+    except Exception:
+        logger.exception("Weekly system health-check email failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone=ISR_TZ)
@@ -79,7 +90,7 @@ async def lifespan(app: FastAPI):
         _run_notetaker_batch,
         trigger="cron",
         hour=0,
-        minute=5,
+        minute=0,
         id="daily_notetaker_batch",
         replace_existing=True,
     )
@@ -99,10 +110,16 @@ async def lifespan(app: FastAPI):
         id="daily_email_cv_batch",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_weekly_status_email,
+        trigger=CronTrigger(day_of_week="sun", hour=9, minute=0, timezone=ISR_TZ),
+        id="weekly_status_email",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(
-        "APScheduler started: notetaker batch at 00:05, morning briefings at 07:00, "
-        "email CV batch at 08:00 Asia/Jerusalem"
+        "APScheduler started: notetaker batch at 00:00, morning briefings at 07:00, "
+        "email CV batch at 08:00, weekly status email Sunday 09:00 Asia/Jerusalem"
     )
     yield
     scheduler.shutdown(wait=False)

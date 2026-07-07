@@ -1,0 +1,3 @@
+api.beyondtcode.com {
+	reverse_proxy recruitment-backend:8000
+}

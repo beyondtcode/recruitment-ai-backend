@@ -110,6 +110,36 @@ async def update_contact_ai_profile(
     )
 
 
+async def update_lead_last_contact_date(
+    match: ContactMatch,
+    meeting_date: date,
+    settings: CrmSettings,
+) -> None:
+    """Set the parent lead's 'last contact date' column to the meeting date."""
+    date_column_id = CONTACT_PROFILE_COLUMNS["latest_date_column_id"]
+    board_id = settings.monday_crm_leads_board_id
+
+    column_values: dict[str, Any] = {
+        date_column_id: _date_column_value(meeting_date.isoformat()),
+    }
+
+    await execute_graphql(
+        CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
+        {
+            "boardId": board_id,
+            "itemId": match.item_id,
+            "columnValues": json.dumps(column_values),
+        },
+        column_ids=list(column_values.keys()),
+    )
+    logger.info(
+        "Updated lead last contact date to %s on board %s item %s",
+        meeting_date.isoformat(),
+        board_id,
+        match.item_id,
+    )
+
+
 async def append_contact_meeting_progress(
     match: ContactMatch,
     meeting_date: date,

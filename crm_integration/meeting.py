@@ -641,12 +641,12 @@ async def meeting_already_exists(
     return False
 
 
-async def meeting_subitem_already_exists(
+async def find_existing_meeting_subitem_id(
     payload: NodeTakerWebhookPayload,
     lead_item_id: str,
     settings: CrmSettings | None = None,
-) -> bool:
-    """Return True if a meeting subitem with the same title and date already exists under the lead."""
+) -> str | None:
+    """Return the subitem ID when a meeting with the same title and date exists under the lead."""
     settings = settings or get_crm_settings()
     title = payload.meeting_title.strip()
     date_column_id = settings.monday_crm_lead_subitem_date_column_id
@@ -661,7 +661,7 @@ async def meeting_subitem_already_exists(
     )
     items = body.get("data", {}).get("items") or []
     if not items:
-        return False
+        return None
 
     for subitem in items[0].get("subitems") or []:
         if str(subitem.get("name") or "").strip() != title:
@@ -669,15 +669,76 @@ async def meeting_subitem_already_exists(
         date_column = _column_by_id(subitem, date_column_id)
         meeting_date = date_column_value(date_column or {})
         if meeting_date == payload.meeting_date:
-            logger.info(
-                "Meeting subitem already exists under lead %s: title=%r date=%s subitem_id=%s",
-                lead_item_id,
-                title,
-                payload.meeting_date.isoformat(),
-                subitem.get("id"),
-            )
-            return True
+            subitem_id = subitem.get("id")
+            return str(subitem_id) if subitem_id is not None else None
+    return None
+
+
+async def meeting_subitem_already_exists(
+    payload: NodeTakerWebhookPayload,
+    lead_item_id: str,
+    settings: CrmSettings | None = None,
+) -> bool:
+    """Return True if a meeting subitem with the same title and date already exists under the lead."""
+    existing_id = await find_existing_meeting_subitem_id(
+        payload,
+        lead_item_id,
+        settings=settings,
+    )
+    if existing_id:
+        logger.info(
+            "Meeting subitem already exists under lead %s: title=%r date=%s subitem_id=%s",
+            lead_item_id,
+            payload.meeting_title.strip(),
+            payload.meeting_date.isoformat(),
+            existing_id,
+        )
+        return True
     return False
+
+
+async def _verify_subitem_nested(parent_item_id: str, subitem_id: str) -> None:
+    """Confirm that Monday nested the subitem under the parent lead."""
+    body = await execute_graphql(
+        ITEM_SUBITEMS_WITH_COLUMNS_QUERY,
+        {
+            "itemId": parent_item_id,
+            "columnIds": [],
+        },
+        column_ids=[],
+    )
+    items = body.get("data", {}).get("items") or []
+    if not items:
+        logger.error(
+            "Subitem nesting verification failed: parent lead %s not found when verifying subitem %s",
+            parent_item_id,
+            subitem_id,
+        )
+        raise RuntimeError(
+            f"Subitem {subitem_id} was created but parent lead {parent_item_id} could not be verified"
+        )
+
+    nested_ids = [
+        str(subitem.get("id"))
+        for subitem in items[0].get("subitems") or []
+        if subitem.get("id") is not None
+    ]
+    if subitem_id not in nested_ids:
+        logger.error(
+            "Subitem nesting verification failed: subitem %s is not nested under lead %s; observed_subitems=%s",
+            subitem_id,
+            parent_item_id,
+            nested_ids,
+        )
+        raise RuntimeError(
+            f"Subitem {subitem_id} was created but is not nested under lead {parent_item_id}"
+        )
+
+    logger.info(
+        "Verified meeting subitem %s is nested under lead %s",
+        subitem_id,
+        parent_item_id,
+    )
 
 
 async def create_meeting_subitem(
@@ -713,20 +774,37 @@ async def create_meeting_subitem(
         reminder = await get_mirly_reminder_by_title(payload.meeting_title)
     _inject_mirly_reminder_columns(column_values, reminder, settings, target="subitem")
 
+    item_name = payload.meeting_title.strip()
+    mutation_variables = {
+        "parentItemId": match.item_id,
+        "itemName": item_name,
+        "columnValues": json.dumps(column_values),
+    }
+    logger.info(
+        "Creating meeting subitem via create_subitem: parent_item_id=%s item_name=%r column_keys=%s",
+        match.item_id,
+        item_name,
+        list(column_values.keys()),
+    )
+
     body = await execute_graphql(
         CREATE_SUBITEM_MUTATION,
-        {
-            "parentItemId": match.item_id,
-            "itemName": payload.meeting_title.strip(),
-            "columnValues": json.dumps(column_values),
-        },
+        mutation_variables,
         column_ids=list(column_values.keys()),
     )
+    logger.info(
+        "Monday create_subitem response: parent_item_id=%s data=%s errors=%s",
+        match.item_id,
+        body.get("data"),
+        body.get("errors"),
+    )
+
     subitem_id = body.get("data", {}).get("create_subitem", {}).get("id")
     if not subitem_id:
         raise RuntimeError("Monday create_subitem did not return an item id")
 
     subitem_id = str(subitem_id)
+    await _verify_subitem_nested(match.item_id, subitem_id)
     logger.info(
         "Meeting subitem created with ID %s under lead %s",
         subitem_id,

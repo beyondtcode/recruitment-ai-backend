@@ -6,6 +6,7 @@ from crm_integration.config import CrmSettings, get_crm_settings
 from crm_integration.contact_profile import (
     append_contact_meeting_progress,
     update_contact_ai_profile,
+    update_lead_last_contact_date,
 )
 from crm_integration.lookup import find_contact_by_emails
 from crm_integration.meeting import (
@@ -15,6 +16,7 @@ from crm_integration.meeting import (
     create_meeting_subitem,
     external_participant_emails,
     extract_meeting_summary_intro,
+    find_existing_meeting_subitem_id,
     gather_past_meeting_context,
     internal_participant_emails,
     resolve_beyondcode_client_match,
@@ -75,7 +77,23 @@ async def process_nodetaker_webhook(
         match = await find_contact_by_emails(external_emails, settings=settings)
 
     if match:
-        meeting_item_id = await create_meeting_subitem(payload, match, settings=settings)
+        existing_subitem_id = await find_existing_meeting_subitem_id(
+            payload,
+            match.item_id,
+            settings=settings,
+        )
+        if existing_subitem_id:
+            meeting_item_id = existing_subitem_id
+            warnings.append(
+                f"Meeting subitem already exists (id={existing_subitem_id}); skipped creation"
+            )
+            logger.info(
+                "Skipped create_meeting_subitem; using existing subitem %s under lead %s",
+                existing_subitem_id,
+                match.item_id,
+            )
+        else:
+            meeting_item_id = await create_meeting_subitem(payload, match, settings=settings)
 
         doc_id, doc_created, workdoc_warnings = await _create_meeting_workdoc_step(
             meeting_item_id,
@@ -117,6 +135,14 @@ async def process_nodetaker_webhook(
                 warnings.append(f"Meeting progress update failed: {exc}")
         else:
             warnings.append("Empty meeting summary; profile update skipped")
+
+        # Set the lead's last contact date to the meeting date. Runs after the
+        # profile update so the actual meeting date is authoritative for this column.
+        try:
+            await update_lead_last_contact_date(match, payload.meeting_date, settings)
+        except Exception as exc:
+            logger.exception("Last contact date update failed for match %s", match.item_id)
+            warnings.append(f"Last contact date update failed: {exc}")
 
         return NodeTakerWebhookResult(
             status="success",

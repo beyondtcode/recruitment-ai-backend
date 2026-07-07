@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _run_notetaker_batch,
         trigger="cron",
-        hour=10,
+        hour=14,
         minute=0,
         id="daily_notetaker_batch",
         replace_existing=True,

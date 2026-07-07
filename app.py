@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
         _run_notetaker_batch,
         trigger="cron",
         hour=14,
-        minute=0,
+        minute=50,
         id="daily_notetaker_batch",
         replace_existing=True,
     )

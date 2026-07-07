@@ -223,7 +223,7 @@ async def process_morning_briefs(
 async def run_daily_notetaker_batch() -> dict[str, object]:
     logger.info("Daily notetaker batch started")
     try:
-        summary = await process_recent_notetaker_meetings(hours=24)
+        summary = await process_recent_notetaker_meetings(hours=24 * 5)
         logger.info(
             "Daily notetaker batch finished: processed=%d skipped=%d errors=%d",
             summary["processed_count"],
@@ -237,7 +237,7 @@ async def run_daily_notetaker_batch() -> dict[str, object]:
 
 
 async def process_recent_notetaker_meetings(
-    hours: int = 24,
+    hours: int = 24 * 5,
     settings: CrmSettings | None = None,
 ) -> dict[str, object]:
     """

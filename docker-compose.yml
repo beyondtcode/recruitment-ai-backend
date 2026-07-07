@@ -8,6 +8,21 @@ services:
     expose:
       - "8000"
 
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    expose:
+      - "5678"
+    environment:
+      - WEBHOOK_URL=https://n8n.beyondtcode.com/
+      - N8N_HOST=n8n.beyondtcode.com
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_PROXY_HOPS=1
+    volumes:
+      - n8n_data:/home/node/.n8n
+
   caddy:
     image: caddy:2-alpine
     container_name: caddy
@@ -21,6 +36,7 @@ services:
       - caddy_config:/config
     depends_on:
       - recruitment-backend
+      - n8n
 
   dozzle:
     image: amir20/dozzle:latest
@@ -34,3 +50,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  n8n_data:

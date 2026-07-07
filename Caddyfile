@@ -1,3 +1,7 @@
 api.beyondtcode.com {
 	reverse_proxy recruitment-backend:8000
 }
+
+n8n.beyondtcode.com {
+	reverse_proxy n8n:5678
+}

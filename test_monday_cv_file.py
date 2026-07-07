@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 os.environ.setdefault("MONDAY_BOARD_ID", "5096673346")
 
 from services import monday_service
@@ -186,7 +188,7 @@ class ReplaceFileOnItemTests(unittest.IsolatedAsyncioTestCase):
                     "clear_file_column",
                     new_callable=AsyncMock,
                 ) as mock_clear,
-                patch.object(monday_service, "upload_file_to_item") as mock_upload,
+                patch.object(monday_service, "upload_file_to_item", new_callable=AsyncMock) as mock_upload,
             ):
                 mock_upload.return_value = {"data": {"add_file_to_column": {"id": "1"}}}
                 await replace_file_on_item(
@@ -201,17 +203,18 @@ class ReplaceFileOnItemTests(unittest.IsolatedAsyncioTestCase):
                 board_id="board-1",
                 column_id="file_mm43j6y2",
             )
-            mock_upload.assert_called_once_with(
+            mock_upload.assert_awaited_once_with(
                 "12345",
                 tmp_path,
                 column_id="file_mm43j6y2",
+                file_bytes=None,
             )
         finally:
             os.unlink(tmp_path)
 
 
-class UploadFileToItemTests(unittest.TestCase):
-    def test_uses_passed_column_id(self):
+class UploadFileToItemTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_passed_column_id(self):
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(b"%PDF-1.4 test")
             tmp_path = tmp.name
@@ -222,15 +225,62 @@ class UploadFileToItemTests(unittest.TestCase):
             mock_response.raise_for_status.return_value = None
             mock_response.json.return_value = {"data": {"add_file_to_column": {"id": "1"}}}
 
+            mock_client = MagicMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+
             with (
-                patch("services.monday_service.requests.post", return_value=mock_response) as mock_post,
+                patch("services.monday_service.httpx.AsyncClient", return_value=mock_client),
                 patch("builtins.print"),
             ):
-                upload_file_to_item("12345", tmp_path, column_id="file_mm43j6y2")
+                await upload_file_to_item("12345", tmp_path, column_id="file_mm43j6y2")
 
-            query = mock_post.call_args.kwargs["data"]["query"]
+            query = mock_client.post.await_args.kwargs["data"]["query"]
             self.assertIn('column_id: "file_mm43j6y2"', query)
             self.assertNotIn("file_mm3gnkmj", query)
+        finally:
+            os.unlink(tmp_path)
+            os.environ.pop("MONDAY_API_KEY", None)
+
+    async def test_retries_on_503(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(b"%PDF-1.4 test")
+            tmp_path = tmp.name
+
+        os.environ["MONDAY_API_KEY"] = "test-key"
+
+        def make_error_response() -> MagicMock:
+            response = MagicMock()
+            response.status_code = 503
+            response.text = "Service Unavailable"
+            response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "503",
+                request=MagicMock(),
+                response=response,
+            )
+            return response
+
+        success_response = MagicMock()
+        success_response.raise_for_status.return_value = None
+        success_response.json.return_value = {"data": {"add_file_to_column": {"id": "1"}}}
+
+        responses = [make_error_response(), make_error_response(), success_response]
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        try:
+            with (
+                patch("services.monday_service.httpx.AsyncClient", return_value=mock_client),
+                patch.object(monday_service, "_sleep_before_monday_retry", new_callable=AsyncMock),
+                patch("builtins.print"),
+            ):
+                result = await upload_file_to_item("12345", tmp_path, column_id="file_mm43j6y2")
+
+            self.assertEqual(result["data"]["add_file_to_column"]["id"], "1")
+            self.assertEqual(mock_client.post.await_count, 3)
         finally:
             os.unlink(tmp_path)
             os.environ.pop("MONDAY_API_KEY", None)

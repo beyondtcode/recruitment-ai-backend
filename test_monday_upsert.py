@@ -6,7 +6,7 @@ import json
 import os
 import unittest
 from datetime import date
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("MONDAY_BOARD_ID", "5096673346")
 
@@ -44,6 +44,8 @@ from services.monday_service import (
     normalize_programming_languages,
     parse_language_experience_entries,
     prepare_column_values_for_board,
+    clear_board_missing_columns_cache,
+    _column_ids_mentioned_in_error,
     resolve_programming_language_labels,
     upsert_candidate_item,
 )
@@ -60,6 +62,22 @@ def _candidate(**overrides) -> CandidateSchema:
     }
     defaults.update(overrides)
     return CandidateSchema(**defaults)
+
+
+def _hub_board_column_defs() -> list[dict[str, str]]:
+    """Column schema stub covering default candidate payload keys."""
+    column_ids = {
+        monday_service.EMAIL_COLUMN_ID,
+        monday_service.PHONE_COLUMN_ID,
+        PROGRAMMING_LANGUAGES_COLUMN_ID,
+        LANGUAGE_EXPERIENCE_COLUMN_ID,
+        EXTRACTION_CONFIDENCE_COLUMN_ID,
+        ENTER_DATE_COLUMN_ID,
+        RECRUITER_NOTES_COLUMN_ID,
+        JOB_CATEGORY_DROPDOWN_COLUMN_ID,
+        *ECOSYSTEM_NUMERIC_COLUMN_IDS,
+    }
+    return [{"id": column_id, "type": "text"} for column_id in column_ids]
 
 
 class NormalizeContactTests(unittest.TestCase):
@@ -373,6 +391,19 @@ class UpsertCandidateItemTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        clear_board_missing_columns_cache()
+        self._board_columns_patcher = patch.object(
+            monday_service,
+            "_fetch_board_columns",
+            new_callable=AsyncMock,
+            return_value=_hub_board_column_defs(),
+        )
+        self._board_columns_patcher.start()
+
+    def tearDown(self) -> None:
+        self._board_columns_patcher.stop()
+
     async def test_retries_without_dropdown_preserves_text_column(self):
         candidate = _candidate(
             programming_languages=[
@@ -380,7 +411,9 @@ class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        async def fake_post(query, variables, *, column_ids=None):
+        async def fake_post(query, variables, *, column_ids=None, log_errors=True, **kwargs):
+            if "columnValues" not in variables:
+                return {"data": {"boards": [{"columns": []}]}}
             payload = json.loads(variables["columnValues"])
             if PROGRAMMING_LANGUAGES_COLUMN_ID in payload:
                 raise Exception("Monday.com API error: invalid dropdown label")
@@ -390,6 +423,7 @@ class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(monday_service, "_fetch_existing_notes", new_callable=AsyncMock) as mock_notes,
+            patch.object(monday_service, "_board_has_column", new_callable=AsyncMock, return_value=True),
             patch.object(monday_service, "ensure_dropdown_labels_exist", new_callable=AsyncMock),
             patch.object(monday_service, "_post_graphql", side_effect=fake_post) as mock_post,
             patch.object(monday_service, "change_item_name", new_callable=AsyncMock),
@@ -405,6 +439,51 @@ class UpdateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         retry_payload = json.loads(mock_post.await_args_list[1].args[1]["columnValues"])
         self.assertNotIn(PROGRAMMING_LANGUAGES_COLUMN_ID, retry_payload)
         self.assertEqual(retry_payload[LANGUAGE_EXPERIENCE_COLUMN_ID], "COBOL (1y)")
+
+    async def test_caches_missing_programming_languages_column(self):
+        candidate = _candidate(
+            programming_languages=[
+                ProgrammingLanguageExperience(language="Java", years=3),
+            ]
+        )
+        board_id = get_main_hub_board_id()
+        call_count = 0
+
+        async def fake_post(query, variables, *, column_ids=None, log_errors=True, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if "columnValues" not in variables:
+                return {"data": {"boards": [{"columns": []}]}}
+            payload = json.loads(variables["columnValues"])
+            if PROGRAMMING_LANGUAGES_COLUMN_ID in payload:
+                raise Exception(
+                    "Monday.com API error: This column ID doesn't exist for the board"
+                )
+            return {"data": {"change_multiple_column_values": {"id": "111"}}}
+
+        with (
+            patch.object(monday_service, "_fetch_existing_notes", new_callable=AsyncMock) as mock_notes,
+            patch.object(monday_service, "_post_graphql", side_effect=fake_post) as mock_post,
+            patch.object(monday_service, "change_item_name", new_callable=AsyncMock),
+        ):
+            mock_notes.return_value = {RECRUITER_NOTES_COLUMN_ID: None}
+            await monday_service.update_candidate_item(
+                "111",
+                candidate,
+                existing_name="Jane Doe",
+            )
+            await monday_service.update_candidate_item(
+                "111",
+                candidate,
+                existing_name="Jane Doe",
+            )
+
+        self.assertEqual(mock_post.await_count, 3)
+        first_retry_payload = json.loads(mock_post.await_args_list[1].args[1]["columnValues"])
+        second_payload = json.loads(mock_post.await_args_list[2].args[1]["columnValues"])
+        self.assertNotIn(PROGRAMMING_LANGUAGES_COLUMN_ID, first_retry_payload)
+        self.assertNotIn(PROGRAMMING_LANGUAGES_COLUMN_ID, second_payload)
+        self.assertEqual(call_count, 3)
 
     async def test_renames_when_name_differs(self):
         candidate = _candidate(name="Jane D. Updated")
@@ -486,14 +565,94 @@ class PrepareColumnValuesForBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared["email_mm438sbe"]["email"], "jane@example.com")
         self.assertEqual(prepared["phone_mm43s4mh"]["phone"], "0556722091")
 
-    async def test_main_hub_board_keeps_all_columns(self):
-        candidate = _candidate()
+    async def test_main_hub_board_filters_absent_columns(self):
+        candidate = _candidate(
+            programming_languages=[
+                ProgrammingLanguageExperience(language="Java", years=2),
+            ]
+        )
         column_values = build_column_values(candidate)
-        prepared = await prepare_column_values_for_board(get_main_hub_board_id(), column_values)
-        self.assertEqual(prepared, column_values)
+        hub_columns = [
+            col
+            for col in _hub_board_column_defs()
+            if col["id"] != PROGRAMMING_LANGUAGES_COLUMN_ID
+        ]
+
+        with patch.object(
+            monday_service,
+            "_fetch_board_columns",
+            new_callable=AsyncMock,
+            return_value=hub_columns,
+        ):
+            prepared = await prepare_column_values_for_board(
+                get_main_hub_board_id(),
+                column_values,
+            )
+
+        self.assertNotIn(PROGRAMMING_LANGUAGES_COLUMN_ID, prepared)
+        self.assertIn(LANGUAGE_EXPERIENCE_COLUMN_ID, prepared)
+        self.assertIn(monday_service.EMAIL_COLUMN_ID, prepared)
+
+    async def test_board_without_dropdown_omits_programming_languages_on_first_attempt(self):
+        candidate = _candidate(
+            programming_languages=[
+                ProgrammingLanguageExperience(language="Python", years=4),
+            ]
+        )
+        column_values = build_column_values(candidate)
+        board_columns = [
+            col
+            for col in _hub_board_column_defs()
+            if col["id"] != PROGRAMMING_LANGUAGES_COLUMN_ID
+        ]
+
+        with patch.object(
+            monday_service,
+            "_fetch_board_columns",
+            new_callable=AsyncMock,
+            return_value=board_columns,
+        ):
+            prepared = await prepare_column_values_for_board("job-board-1", column_values)
+
+        self.assertNotIn(PROGRAMMING_LANGUAGES_COLUMN_ID, prepared)
+        self.assertEqual(prepared[LANGUAGE_EXPERIENCE_COLUMN_ID], "Python (4y)")
+
+
+class ColumnIdsMentionedInErrorTests(unittest.TestCase):
+    def test_extracts_column_id_from_extensions_json(self):
+        exc = Exception(
+            'Monday.com API error: This column ID doesn\'t exist; '
+            '{"extensions": {"column_id": "dropdown_mm3j8kby"}}'
+        )
+        mentioned = _column_ids_mentioned_in_error(
+            exc,
+            ["dropdown_mm3j8kby", "text_mm3rr7tw"],
+        )
+        self.assertEqual(mentioned, {"dropdown_mm3j8kby"})
+
+    def test_does_not_assume_programming_languages_without_column_in_message(self):
+        exc = Exception("Monday.com API error: This column ID doesn't exist for the board")
+        mentioned = _column_ids_mentioned_in_error(
+            exc,
+            ["dropdown_mm3j8kby", "numeric_mm467xsd"],
+        )
+        self.assertEqual(mentioned, set())
 
 
 class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        clear_board_missing_columns_cache()
+        self._board_columns_patcher = patch.object(
+            monday_service,
+            "_fetch_board_columns",
+            new_callable=AsyncMock,
+            return_value=_hub_board_column_defs(),
+        )
+        self._board_columns_patcher.start()
+
+    def tearDown(self) -> None:
+        self._board_columns_patcher.stop()
+
     async def test_retries_without_dropdown_preserves_text_column(self):
         candidate = _candidate(
             programming_languages=[
@@ -502,7 +661,9 @@ class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         )
         os.environ["MONDAY_API_KEY"] = "test-key"
 
-        async def fake_post(query, variables, *, column_ids=None):
+        async def fake_post(query, variables, *, column_ids=None, log_errors=True, **kwargs):
+            if "columnValues" not in variables:
+                return {"data": {"boards": [{"columns": []}]}}
             payload = json.loads(variables["columnValues"])
             if PROGRAMMING_LANGUAGES_COLUMN_ID in payload:
                 raise Exception("Monday.com API error: invalid dropdown label")
@@ -536,6 +697,47 @@ class CreateCandidateItemTests(unittest.IsolatedAsyncioTestCase):
         column_values = json.loads(variables["columnValues"])
         self.assertEqual(column_values[monday_service.EMAIL_COLUMN_ID]["email"], "jane@example.com")
         self.assertEqual(column_values[monday_service.PHONE_COLUMN_ID]["phone"], "0556722091")
+
+
+class PostGraphqlRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_on_503(self):
+        import httpx
+
+        os.environ["MONDAY_API_KEY"] = "test-key"
+
+        def make_error_response() -> MagicMock:
+            response = MagicMock()
+            response.status_code = 503
+            response.text = "Service Unavailable"
+            response.json.return_value = {"errors": []}
+            response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "503",
+                request=MagicMock(),
+                response=response,
+            )
+            return response
+
+        success_response = MagicMock()
+        success_response.raise_for_status.return_value = None
+        success_response.json.return_value = {"data": {"boards": []}}
+
+        responses = [make_error_response(), make_error_response(), success_response]
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        try:
+            with (
+                patch("services.monday_service.httpx.AsyncClient", return_value=mock_client),
+                patch.object(monday_service, "_sleep_before_monday_retry", new_callable=AsyncMock),
+            ):
+                body = await monday_service._post_graphql("query { boards { id } }", {})
+
+            self.assertEqual(body["data"]["boards"], [])
+            self.assertEqual(mock_client.post.await_count, 3)
+        finally:
+            os.environ.pop("MONDAY_API_KEY", None)
 
 
 class JobBoardRequirementsTests(unittest.IsolatedAsyncioTestCase):

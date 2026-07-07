@@ -16,17 +16,10 @@ from crm_integration.monday_client import (
 
 logger = logging.getLogger(__name__)
 
-CONTACT_PROFILE_COLUMNS: dict[str, dict[str, str]] = {
-    "client": {
-        "profile_column_id": "text_mm4mqp9k",
-        "latest_date_column_id": "date_mm4d7cs2",
-        "progress_column_id": "long_text_mm4vgz0h",
-    },
-    "lead": {
-        "profile_column_id": "text_mm4jajn2",
-        "latest_date_column_id": "date_mm4ddb0d",
-        "progress_column_id": "long_text_mm4vb3t3",
-    },
+CONTACT_PROFILE_COLUMNS: dict[str, str] = {
+    "profile_column_id": "text_mm4jajn2",
+    "latest_date_column_id": "date_mm4ddb0d",
+    "progress_column_id": "long_text_mm4vb3t3",
 }
 
 
@@ -38,14 +31,6 @@ def _column_value_for_text(column_id: str, text: str) -> str | dict[str, str]:
 
 def _date_column_value(iso_date: str) -> dict[str, str]:
     return {"date": iso_date}
-
-
-def _board_id_for_match(match: ContactMatch, settings: CrmSettings) -> str:
-    if match.match_type == "client":
-        return settings.monday_crm_active_clients_board_id
-    if match.match_type == "lead":
-        return settings.monday_crm_leads_board_id
-    raise ValueError(f"Unsupported match type: {match.match_type!r}")
 
 
 def format_progress_date(meeting_date: date) -> str:
@@ -74,11 +59,7 @@ async def fetch_contact_progress_text(
     settings: CrmSettings,
 ) -> str:
     """Read the current progress column value for a matched CRM item."""
-    columns = CONTACT_PROFILE_COLUMNS.get(match.match_type)
-    if not columns:
-        raise ValueError(f"No profile column mapping for match type: {match.match_type!r}")
-
-    progress_column_id = columns["progress_column_id"]
+    progress_column_id = CONTACT_PROFILE_COLUMNS["progress_column_id"]
     body = await execute_graphql(
         ITEMS_BY_IDS_QUERY,
         {
@@ -103,14 +84,10 @@ async def update_contact_ai_profile(
     latest_date: str,
     settings: CrmSettings,
 ) -> None:
-    """Write AI-generated profile and latest meeting date to the matched CRM item."""
-    columns = CONTACT_PROFILE_COLUMNS.get(match.match_type)
-    if not columns:
-        raise ValueError(f"No profile column mapping for match type: {match.match_type!r}")
-
-    profile_column_id = columns["profile_column_id"]
-    date_column_id = columns["latest_date_column_id"]
-    board_id = _board_id_for_match(match, settings)
+    """Write AI-generated profile and latest meeting date to the matched lead item."""
+    profile_column_id = CONTACT_PROFILE_COLUMNS["profile_column_id"]
+    date_column_id = CONTACT_PROFILE_COLUMNS["latest_date_column_id"]
+    board_id = settings.monday_crm_leads_board_id
 
     column_values: dict[str, Any] = {
         profile_column_id: _column_value_for_text(profile_column_id, profile),
@@ -127,8 +104,7 @@ async def update_contact_ai_profile(
         column_ids=list(column_values.keys()),
     )
     logger.info(
-        "Updated %s profile columns on board %s item %s",
-        match.match_type,
+        "Updated lead profile columns on board %s item %s",
         board_id,
         match.item_id,
     )
@@ -141,12 +117,8 @@ async def append_contact_meeting_progress(
     settings: CrmSettings,
 ) -> None:
     """Prepend a meeting progress entry to the contact's progress column."""
-    columns = CONTACT_PROFILE_COLUMNS.get(match.match_type)
-    if not columns:
-        raise ValueError(f"No profile column mapping for match type: {match.match_type!r}")
-
-    progress_column_id = columns["progress_column_id"]
-    board_id = _board_id_for_match(match, settings)
+    progress_column_id = CONTACT_PROFILE_COLUMNS["progress_column_id"]
+    board_id = settings.monday_crm_leads_board_id
 
     existing = await fetch_contact_progress_text(match, settings)
     new_entry = format_progress_entry(meeting_date, progress_summary)
@@ -166,8 +138,7 @@ async def append_contact_meeting_progress(
         column_ids=list(column_values.keys()),
     )
     logger.info(
-        "Appended %s meeting progress on board %s item %s",
-        match.match_type,
+        "Appended lead meeting progress on board %s item %s",
         board_id,
         match.item_id,
     )

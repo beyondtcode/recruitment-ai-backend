@@ -6,11 +6,12 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import ValidationError
 
 from models.candidate import CandidateSchema
-from services.ai_service import analyze_cv_with_claude
+from services.ai_service import analyze_cv_with_claude, close_async_client
 from services.monday_service import (
     fetch_board_job_requirements,
     get_item_cv_file_url,
@@ -52,12 +53,18 @@ def _is_low_confidence_no_identity(candidate: CandidateSchema) -> bool:
     return not has_name and not has_email and not has_phone
 
 
+def _upload_temp_path(filename: str, source_item_id: str | None = None) -> Path:
+    """Unique temp path per pipeline run to avoid concurrent webhook collisions."""
+    safe_name = Path(filename).name
+    prefix = source_item_id or "cv"
+    return TEMP_CV_DIR / f"{uuid4().hex}_{prefix}_{safe_name}"
+
+
 async def process_cv_bytes(
     file_bytes: bytes,
     filename: str,
     *,
     board_id: str,
-    cv_file_path: str | Path | None = None,
     sync_to_hub: bool = True,
     source_item_id: str | None = None,
     job_requirements: str | None = None,
@@ -70,7 +77,6 @@ async def process_cv_bytes(
         file_bytes: Raw CV content.
         filename: Original filename for type detection.
         board_id: Monday board that triggered processing.
-        cv_file_path: Local path for file upload on create; defaults to a temp file.
         sync_to_hub: When True and board_id is not Main Hub, also upsert to Main Hub.
         source_item_id: Monday item that triggered processing (webhook); used to avoid
             duplicate rows when email search has not indexed the form submission yet.
@@ -89,15 +95,12 @@ async def process_cv_bytes(
         candidate.model_dump_json(ensure_ascii=False),
     )
 
-    upload_path = cv_file_path
-    temp_path: Path | None = None
-    if upload_path is None:
-        TEMP_CV_DIR.mkdir(parents=True, exist_ok=True)
-        temp_path = TEMP_CV_DIR / filename
-        temp_path.write_bytes(file_bytes)
-        upload_path = temp_path
-
+    upload_path: Path | None = None
     try:
+        TEMP_CV_DIR.mkdir(parents=True, exist_ok=True)
+        upload_path = _upload_temp_path(filename, source_item_id)
+        upload_path.write_bytes(file_bytes)
+
         item_id, created = await upsert_candidate_item(
             candidate,
             cv_file_path=str(upload_path),
@@ -133,8 +136,8 @@ async def process_cv_bytes(
                 )
         return UpsertResult(item_id=item_id, created=created)
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        if upload_path is not None:
+            upload_path.unlink(missing_ok=True)
 
 
 async def process_cv_file(
@@ -150,7 +153,6 @@ async def process_cv_file(
             file_bytes,
             file_path.name,
             board_id=board_id or get_main_hub_board_id(),
-            cv_file_path=file_path.resolve(),
             sync_to_hub=False,
             reject_low_confidence_no_identity=reject_low_confidence_no_identity,
         )
@@ -179,28 +181,43 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
     url, filename = await get_item_cv_file_url(item_id, board_id)
     file_bytes = await download_cv_from_url(url)
 
-    TEMP_CV_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = TEMP_CV_DIR / f"{item_id}_{filename}"
-    temp_path.write_bytes(file_bytes)
+    await process_cv_bytes(
+        file_bytes,
+        filename,
+        board_id=board_id,
+        sync_to_hub=True,
+        source_item_id=item_id,
+        job_requirements=job_requirements,
+    )
 
+
+def _run_async_from_sync(coro) -> None:
+    """Run *coro* from sync code whether or not an event loop is already running."""
     try:
-        await process_cv_bytes(
-            file_bytes,
-            filename,
-            board_id=board_id,
-            cv_file_path=temp_path,
-            sync_to_hub=True,
-            source_item_id=item_id,
-            job_requirements=job_requirements,
-        )
-    finally:
-        temp_path.unlink(missing_ok=True)
+        loop = asyncio.get_running_loop()
+        on_existing_loop = loop.is_running()
+    except RuntimeError:
+        loop = None
+        on_existing_loop = False
+
+    async def _run() -> None:
+        try:
+            await coro
+        finally:
+            if not on_existing_loop:
+                await close_async_client()
+
+    if on_existing_loop:
+        future = asyncio.run_coroutine_threadsafe(_run(), loop)
+        future.result()
+    else:
+        asyncio.run(_run())
 
 
 def run_webhook_pipeline_sync(item_id: str, board_id: str) -> None:
     """Sync entry point for FastAPI BackgroundTasks."""
     try:
-        asyncio.run(process_monday_webhook(item_id, board_id))
+        _run_async_from_sync(process_monday_webhook(item_id, board_id))
     except ValidationError as exc:
         logger.error(
             "Validation failed for Monday item %s on board %s: %s",

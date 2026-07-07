@@ -5,14 +5,15 @@ import json
 import logging
 import mimetypes
 import os
+import random
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import httpx
-import requests
 
 from models.candidate import CandidateSchema, ProgrammingLanguageExperience
 
@@ -41,7 +42,10 @@ PHONE_COLUMN_ID = "phone_mm3g4gvh"
 ENTER_DATE_COLUMN_ID = "date_mm3grrc"
 INTERVIEW_SUMMARIES_COLUMN_ID = "text_mm3nx5vz"
 LANGUAGE_EXPERIENCE_COLUMN_ID = "text_mm3rr7tw"
-PROGRAMMING_LANGUAGES_COLUMN_ID = "dropdown_mm3j8kby"
+PROGRAMMING_LANGUAGES_COLUMN_ID = os.getenv(
+    "MONDAY_PROGRAMMING_LANGUAGES_COLUMN_ID",
+    "dropdown_mm3j8kby",
+)
 JOB_CATEGORY_DROPDOWN_COLUMN_ID = "dropdown_mm3fyv0t"
 AI_SUMMARY_COLUMN_ID = "text_mm3gs8ec"
 TEAM_LEAD_DROPDOWN_LABEL = "ראש צוות"
@@ -195,8 +199,12 @@ MIRLY_REMINDERS_DATE_COLUMN_ID = "date4"
 MIRLY_REMINDERS_INFO_COLUMN_ID = "long_text_mm4nf3z8"
 CV_FILE_FETCH_MAX_ATTEMPTS = 4
 CV_FILE_FETCH_RETRY_DELAY_SECONDS = 3
+MONDAY_API_MAX_RETRIES = int(os.getenv("MONDAY_API_MAX_RETRIES", "4"))
+MONDAY_API_RETRY_BASE_DELAY_SECONDS = float(
+    os.getenv("MONDAY_API_RETRY_BASE_DELAY_SECONDS", "2")
+)
 
-# Exact Monday board labels for dropdown_mm3j8kby (case-sensitive on the API).
+# Exact Monday board labels for the programming-languages dropdown (case-sensitive on the API).
 MONDAY_PROGRAMMING_LANGUAGE_LABELS: tuple[str, ...] = (
     "C#",
     ".NET",
@@ -505,12 +513,106 @@ JOB_FIT_REASONING_COLUMN_TITLE = os.getenv(
 
 _BOARD_COLUMNS_CACHE: dict[str, list[dict[str, Any]]] = {}
 _BOARD_TYPED_COLUMN_CACHE: dict[tuple[str, str], str] = {}
+# Column IDs confirmed absent on a board (skip writes to avoid repeated API errors).
+_BOARD_MISSING_COLUMNS_CACHE: dict[str, set[str]] = {}
 
 # Main Hub column IDs that may differ on satellite boards (email/phone).
 _REMAPPABLE_DEFAULT_COLUMNS: dict[str, str] = {
     EMAIL_COLUMN_ID: "email",
     PHONE_COLUMN_ID: "phone",
 }
+
+
+def clear_board_missing_columns_cache() -> None:
+    """Clear per-board missing-column cache (for tests)."""
+    _BOARD_MISSING_COLUMNS_CACHE.clear()
+
+
+def _invalidate_board_columns_cache(board_id: str) -> None:
+    """Drop cached board column metadata after schema mismatch."""
+    board_key = str(board_id)
+    _BOARD_COLUMNS_CACHE.pop(board_key, None)
+    typed_keys = [key for key in _BOARD_TYPED_COLUMN_CACHE if key[0] == board_key]
+    for key in typed_keys:
+        _BOARD_TYPED_COLUMN_CACHE.pop(key, None)
+
+
+def _filter_known_missing_columns(
+    board_id: str,
+    column_values: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop column IDs previously confirmed absent on this board."""
+    missing = _BOARD_MISSING_COLUMNS_CACHE.get(str(board_id))
+    if not missing:
+        return column_values
+    filtered = {
+        column_id: value
+        for column_id, value in column_values.items()
+        if column_id not in missing
+    }
+    if len(filtered) < len(column_values):
+        skipped = [column_id for column_id in column_values if column_id in missing]
+        logger.debug(
+            "Monday board %s: skipped %d cached-missing column(s): %s",
+            board_id,
+            len(skipped),
+            skipped,
+        )
+    return filtered
+
+
+def _mark_columns_missing(board_id: str, column_ids: set[str]) -> None:
+    if not column_ids:
+        return
+    board_key = str(board_id)
+    cached = _BOARD_MISSING_COLUMNS_CACHE.setdefault(board_key, set())
+    newly_missing = column_ids - cached
+    if not newly_missing:
+        return
+    cached.update(newly_missing)
+    _invalidate_board_columns_cache(board_key)
+    logger.warning(
+        "Monday board %s: column(s) %s not found on board; skipping on future writes",
+        board_key,
+        sorted(newly_missing),
+    )
+
+
+def _is_invalid_column_id_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return "column id doesn't exist" in message or "invalidcolumnid" in message
+
+
+_COLUMN_ID_IN_ERROR_RE = re.compile(
+    r'"(?:column_id|columnId|invalid_value)"\s*:\s*"([^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _column_ids_mentioned_in_error(
+    exc: Exception,
+    column_ids: list[str],
+) -> set[str]:
+    message = str(exc)
+    message_lower = message.casefold()
+    mentioned = {
+        column_id for column_id in column_ids if column_id.casefold() in message_lower
+    }
+    for match in _COLUMN_ID_IN_ERROR_RE.finditer(message):
+        extension_column_id = match.group(1)
+        if extension_column_id in column_ids:
+            mentioned.add(extension_column_id)
+    return mentioned
+
+
+async def _board_has_column(board_id: str, column_id: str) -> bool:
+    """Return True when ``column_id`` exists on the board schema."""
+    board_key = str(board_id)
+    if column_id in _BOARD_MISSING_COLUMNS_CACHE.get(board_key, set()):
+        return False
+    columns = await _fetch_board_columns(board_key)
+    board_column_ids = {str(col.get("id") or "") for col in columns}
+    return column_id in board_column_ids
 
 
 async def prepare_column_values_for_board(
@@ -524,8 +626,7 @@ async def prepare_column_values_for_board(
     email/phone columns when those defaults are absent from the board schema.
     """
     board_key = str(board_id)
-    if board_key == get_main_hub_board_id():
-        return dict(column_values)
+    column_values = _filter_known_missing_columns(board_key, column_values)
 
     columns = await _fetch_board_columns(board_key)
     board_column_ids = {str(col.get("id") or "") for col in columns}
@@ -1376,24 +1477,28 @@ def _raise_for_monday_errors(
     body: dict[str, Any],
     *,
     column_ids: list[str] | None = None,
+    log_errors: bool = True,
 ) -> None:
     if errors := body.get("errors"):
-        _print_monday_errors(errors, column_ids=column_ids)
+        if log_errors:
+            _print_monday_errors(errors, column_ids=column_ids)
         messages = "; ".join(
             err.get("message", str(err)) if isinstance(err, dict) else str(err)
             for err in errors
         )
-        logger.error("Monday.com GraphQL errors: %s", messages)
+        if log_errors:
+            logger.error("Monday.com GraphQL errors: %s", messages)
         raise Exception(f"Monday.com API error: {messages}")
 
 
-async def _post_graphql(
+async def _post_graphql_once(
     query: str,
     variables: dict[str, Any],
     *,
     column_ids: list[str] | None = None,
     api_version: str | None = None,
     api_key: str | None = None,
+    log_errors: bool = True,
 ) -> dict[str, Any]:
     api_key = api_key or _get_api_key()
     payload = {"query": query, "variables": variables}
@@ -1413,19 +1518,71 @@ async def _post_graphql(
             http_errors = exc.response.json().get("errors", [])
         except (json.JSONDecodeError, AttributeError):
             http_errors = [{"message": response_text}]
-        _print_monday_errors(
-            http_errors,
-            http_status=exc.response.status_code,
-            response_text=response_text,
-            column_ids=column_ids,
-        )
+        if log_errors:
+            _print_monday_errors(
+                http_errors,
+                http_status=exc.response.status_code,
+                response_text=response_text,
+                column_ids=column_ids,
+            )
         raise Exception(
             f"Monday.com HTTP error {exc.response.status_code}: {response_text}"
         ) from exc
 
     body = response.json()
-    _raise_for_monday_errors(body, column_ids=column_ids)
+    _raise_for_monday_errors(body, column_ids=column_ids, log_errors=log_errors)
     return body
+
+
+def _is_retryable_monday_error(exc: Exception) -> bool:
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    message = str(exc).casefold()
+    return any(token in message for token in ("http error 429", "http error 502", "http error 503", "http error 504"))
+
+
+async def _sleep_before_monday_retry(attempt: int, *, operation: str) -> None:
+    delay = MONDAY_API_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+    jitter = random.uniform(0, delay * 0.25)
+    total_delay = delay + jitter
+    logger.warning(
+        "Monday %s failed (attempt %d/%d), retrying in %.1fs",
+        operation,
+        attempt,
+        MONDAY_API_MAX_RETRIES,
+        total_delay,
+    )
+    await asyncio.sleep(total_delay)
+
+
+async def _post_graphql(
+    query: str,
+    variables: dict[str, Any],
+    *,
+    column_ids: list[str] | None = None,
+    api_version: str | None = None,
+    api_key: str | None = None,
+    log_errors: bool = True,
+) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for attempt in range(1, MONDAY_API_MAX_RETRIES + 1):
+        try:
+            return await _post_graphql_once(
+                query,
+                variables,
+                column_ids=column_ids,
+                api_version=api_version,
+                api_key=api_key,
+                log_errors=log_errors,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_monday_error(exc) or attempt >= MONDAY_API_MAX_RETRIES:
+                raise
+            await _sleep_before_monday_retry(attempt, operation="GraphQL")
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Monday GraphQL retry loop exited without result")
 
 
 async def post_graphql(
@@ -1529,7 +1686,8 @@ async def _post_column_values_with_dropdown_fallback(
     column_values: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Post column values to Monday; on dropdown failure retry without dropdown but keep text column.
+    Post column values to Monday; on missing-column or dropdown failure retry without
+    the offending column(s) but keep the language-experience text column when possible.
     """
     board_id = str(variables.get("boardId") or get_main_hub_board_id())
     column_values = await prepare_column_values_for_board(board_id, column_values)
@@ -1538,9 +1696,46 @@ async def _post_column_values_with_dropdown_fallback(
     column_ids = list(column_values.keys())
 
     try:
-        return await _post_graphql(mutation, variables, column_ids=column_ids)
+        return await _post_graphql(
+            mutation,
+            variables,
+            column_ids=column_ids,
+            log_errors=False,
+        )
     except Exception as exc:
+        missing_column_ids = _column_ids_mentioned_in_error(exc, column_ids)
+        if missing_column_ids:
+            _mark_columns_missing(board_id, missing_column_ids)
+            retry_column_values = {
+                key: value
+                for key, value in column_values.items()
+                if key not in missing_column_ids
+            }
+            if not retry_column_values:
+                logger.error(
+                    "Monday write failed: all column values invalid for board %s: %s",
+                    board_id,
+                    exc,
+                )
+                raise
+            logger.warning(
+                "Monday write retrying without missing column(s) %s on board %s",
+                sorted(missing_column_ids),
+                board_id,
+            )
+            retry_variables = dict(variables)
+            retry_variables["columnValues"] = json.dumps(retry_column_values)
+            retry_column_ids = [
+                key for key in column_ids if key not in missing_column_ids
+            ]
+            return await _post_graphql(
+                mutation,
+                retry_variables,
+                column_ids=retry_column_ids,
+            )
+
         if PROGRAMMING_LANGUAGES_COLUMN_ID not in column_values:
+            logger.error("Monday write failed with no recovery path: %s", exc)
             raise
 
         dropdown_payload = column_values[PROGRAMMING_LANGUAGES_COLUMN_ID]
@@ -1553,12 +1748,12 @@ async def _post_column_values_with_dropdown_fallback(
 
         if _looks_like_dropdown_label_error(exc):
             try:
-                board_id = str(variables.get("boardId") or get_main_hub_board_id())
                 await ensure_dropdown_labels_exist(labels, board_id=board_id)
             except Exception as provision_exc:
                 logger.warning("Dropdown label provisioning failed: %s", provision_exc)
 
         if LANGUAGE_EXPERIENCE_COLUMN_ID not in column_values:
+            logger.error("Monday write failed with no recovery path: %s", exc)
             raise
 
         retry_column_values = {
@@ -1566,6 +1761,8 @@ async def _post_column_values_with_dropdown_fallback(
             for key, value in column_values.items()
             if key != PROGRAMMING_LANGUAGES_COLUMN_ID
         }
+        if _is_invalid_column_id_error(exc):
+            _mark_columns_missing(board_id, {PROGRAMMING_LANGUAGES_COLUMN_ID})
         retry_variables = dict(variables)
         retry_variables["columnValues"] = json.dumps(retry_column_values)
         retry_column_ids = [
@@ -2041,10 +2238,10 @@ async def update_candidate_item(
     existing_notes = await _fetch_existing_notes(item_id)
     column_values = build_update_column_values(candidate, existing_notes, raw_cv_text)
 
-    # Ensure programming language dropdown + text columns are always included on updates.
+    # Ensure programming language dropdown + text columns are included when on the board.
     if candidate.programming_languages:
         language_names = [e.language for e in candidate.programming_languages][:5]
-        if language_names:
+        if language_names and await _board_has_column(board_id, PROGRAMMING_LANGUAGES_COLUMN_ID):
             column_values[PROGRAMMING_LANGUAGES_COLUMN_ID] = {"labels": language_names}
         compact = format_language_experience_compact(candidate.programming_languages)
         if compact:
@@ -2122,7 +2319,7 @@ async def create_candidate_item(
     item_id = str(item_id)
     if cv_file_path:
         file_column_id = await resolve_file_column_id(board_id)
-        upload_file_to_item(item_id, str(cv_file_path), column_id=file_column_id)
+        await upload_file_to_item(item_id, str(cv_file_path), column_id=file_column_id)
     return item_id
 
 
@@ -2534,22 +2731,76 @@ async def replace_file_on_item(
     *,
     board_id: str,
     column_id: str,
+    file_bytes: bytes | None = None,
 ) -> dict:
     """Clear existing files in the column, then attach the new CV."""
     await clear_file_column(item_id, board_id=board_id, column_id=column_id)
-    return upload_file_to_item(item_id, file_path, column_id=column_id)
+    return await upload_file_to_item(
+        item_id,
+        file_path,
+        column_id=column_id,
+        file_bytes=file_bytes,
+    )
 
 
-def upload_file_to_item(item_id: str, file_path: str, *, column_id: str) -> dict:
+async def upload_file_to_item(
+    item_id: str,
+    file_path: str,
+    *,
+    column_id: str,
+    file_bytes: bytes | None = None,
+) -> dict:
     """
     Attach a CV file to a Monday item via POST https://api.monday.com/v2/file.
 
     Uses multipart/form-data with the ``add_file_to_column`` mutation.
+    When ``file_bytes`` is provided and ``file_path`` is missing, writes a
+    short-lived temp file immediately before upload.
     """
     path = Path(file_path)
+    temp_written: Path | None = None
     if not path.exists():
-        raise FileNotFoundError(f"CV file not found at {file_path}")
+        if file_bytes is None:
+            raise FileNotFoundError(f"CV file not found at {file_path}")
+        suffix = path.suffix or ".bin"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(file_bytes)
+            temp_written = Path(tmp.name)
+        path = temp_written
 
+    try:
+        return await _upload_file_to_item_with_retry(item_id, path, column_id=column_id)
+    finally:
+        if temp_written is not None:
+            temp_written.unlink(missing_ok=True)
+
+
+async def _upload_file_to_item_with_retry(
+    item_id: str,
+    path: Path,
+    *,
+    column_id: str,
+) -> dict:
+    last_exc: Exception | None = None
+    for attempt in range(1, MONDAY_API_MAX_RETRIES + 1):
+        try:
+            return await _upload_file_to_item_once(item_id, path, column_id=column_id)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_monday_error(exc) or attempt >= MONDAY_API_MAX_RETRIES:
+                raise
+            await _sleep_before_monday_retry(attempt, operation="file upload")
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Monday file upload retry loop exited without result")
+
+
+async def _upload_file_to_item_once(
+    item_id: str,
+    path: Path,
+    *,
+    column_id: str,
+) -> dict:
     api_key = _get_api_key()
     query = (
         "mutation ($file: File!) { "
@@ -2559,7 +2810,7 @@ def upload_file_to_item(item_id: str, file_path: str, *, column_id: str) -> dict
         "file: $file"
         ") { id } }"
     )
-    mime_type = _cv_mime_type(file_path)
+    mime_type = _cv_mime_type(str(path))
     headers = {
         "Authorization": api_key,
         "API-Version": MONDAY_FILE_API_VERSION,
@@ -2568,21 +2819,21 @@ def upload_file_to_item(item_id: str, file_path: str, *, column_id: str) -> dict
         "query": query,
         "map": json.dumps({"file": "variables.file"}),
     }
+    file_content = path.read_bytes()
 
-    with path.open("rb") as file_handle:
-        response = requests.post(
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
             MONDAY_FILE_API_URL,
             headers=headers,
             data=multipart_data,
-            files={"file": (path.name, file_handle, mime_type)},
-            timeout=120,
+            files={"file": (path.name, file_content, mime_type)},
         )
 
     try:
         response.raise_for_status()
-    except requests.HTTPError as exc:
+    except httpx.HTTPStatusError as exc:
         raise Exception(
-            f"Monday.com file upload HTTP error {response.status_code}: {response.text}"
+            f"Monday.com file upload HTTP error {exc.response.status_code}: {exc.response.text}"
         ) from exc
 
     try:

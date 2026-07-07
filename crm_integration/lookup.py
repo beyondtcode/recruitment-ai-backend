@@ -29,7 +29,7 @@ def _external_participant_emails(participant_emails: list[str]) -> list[str]:
 @dataclass(frozen=True)
 class ContactMatch:
     item_id: str
-    match_type: Literal["client", "lead"]
+    match_type: Literal["lead"]
     matched_email: str
 
 
@@ -117,7 +117,6 @@ async def _find_on_board(
     board_id: str,
     configured_email_column_id: str,
     board_label: str,
-    match_type: Literal["client", "lead"],
 ) -> ContactMatch | None:
     email_column_ids = await _resolve_email_column_ids_for_board(
         board_id,
@@ -144,7 +143,7 @@ async def _find_on_board(
             )
         match = ContactMatch(
             item_id=items[0]["item_id"],
-            match_type=match_type,
+            match_type="lead",
             matched_email=email,
         )
         logger.info(
@@ -161,7 +160,7 @@ async def find_contact_by_emails(
     participant_emails: list[str],
     settings: CrmSettings | None = None,
 ) -> ContactMatch | None:
-    """Find a Client or Lead by participant email. Clients are checked before Leads.
+    """Find a Lead by participant email on the Leads board.
 
     Internal @beyondtcode.com addresses are excluded from lookup.
     """
@@ -171,22 +170,11 @@ async def find_contact_by_emails(
         logger.warning("No valid participant emails provided for contact lookup")
         return None
 
-    client_match = await _find_on_board(
-        emails,
-        board_id=settings.monday_crm_active_clients_board_id,
-        configured_email_column_id=settings.monday_crm_active_clients_email_column_id,
-        board_label="Active Clients",
-        match_type="client",
-    )
-    if client_match:
-        return client_match
-
     lead_match = await _find_on_board(
         emails,
         board_id=settings.monday_crm_leads_board_id,
         configured_email_column_id=settings.monday_crm_leads_email_column_id,
         board_label="Leads",
-        match_type="lead",
     )
     if lead_match:
         return lead_match

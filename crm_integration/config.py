@@ -12,6 +12,7 @@ class CrmSettings(BaseSettings):
 
     monday_crm_leads_board_id: str
     monday_crm_leads_email_column_id: str
+    monday_crm_leads_additional_emails_column_id: str = "text_mm57t6sd"
     monday_crm_lead_subitems_board_id: str = "5099504229"
     monday_crm_lead_subitem_date_column_id: str = "date_mm4ze64m"
     monday_crm_lead_subitem_summary_column_id: str = "long_text_mm4z4xk7"

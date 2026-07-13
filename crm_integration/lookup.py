@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -8,6 +9,7 @@ from crm_integration.config import CrmSettings, get_crm_settings
 from crm_integration.monday_client import (
     FIND_ITEMS_LIMIT,
     ITEMS_PAGE_BY_COLUMN_VALUES_QUERY,
+    ITEMS_PAGE_WITH_COLUMNS_QUERY,
     execute_graphql,
 )
 from services.monday_service import _fetch_board_columns, normalize_email
@@ -47,6 +49,26 @@ def _dedupe_emails(emails: list[str]) -> list[str]:
 
 def _is_column_not_found_error(exc: BaseException) -> bool:
     return "column not found" in str(exc).casefold()
+
+
+def _column_text(column: dict) -> str:
+    text = str(column.get("text") or "").strip()
+    if text:
+        return text
+    value = column.get("value")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ""
+
+
+def _emails_from_additional_text(raw: str) -> set[str]:
+    """Normalize emails parsed from the additional-emails text column."""
+    result: set[str] = set()
+    for part in re.split(r"[,;]", raw):
+        normalized = normalize_email(part.strip()) if part.strip() else None
+        if normalized:
+            result.add(normalized)
+    return result
 
 
 async def _resolve_email_column_ids_for_board(
@@ -111,18 +133,89 @@ async def _query_items_by_email(
     return []
 
 
+async def _query_items_by_additional_emails(
+    board_id: str,
+    additional_emails_column_id: str,
+    email: str,
+) -> list[dict[str, str]]:
+    """Find leads whose additional-emails text column contains ``email``.
+
+    Uses ``contains_text`` for candidate retrieval, then verifies the email is an
+    exact member of the parsed comma/semicolon-separated set.
+    """
+    column_id = additional_emails_column_id.strip()
+    if not column_id:
+        return []
+
+    try:
+        body = await execute_graphql(
+            ITEMS_PAGE_WITH_COLUMNS_QUERY,
+            {
+                "boardId": board_id,
+                "limit": FIND_ITEMS_LIMIT,
+                "columnIds": [column_id],
+                "queryParams": {
+                    "rules": [
+                        {
+                            "column_id": column_id,
+                            "compare_value": [email],
+                            "operator": "contains_text",
+                        }
+                    ],
+                },
+            },
+            column_ids=[column_id],
+        )
+    except Exception as exc:
+        if _is_column_not_found_error(exc):
+            logger.info(
+                "Additional emails column %s not found on board %s; skipping",
+                column_id,
+                board_id,
+            )
+            return []
+        raise
+
+    boards = body.get("data", {}).get("boards") or []
+    if not boards:
+        return []
+
+    items = (boards[0].get("items_page") or {}).get("items") or []
+    matches: list[dict[str, str]] = []
+    for item in items:
+        item_id = item.get("id")
+        if item_id is None:
+            continue
+        column_values = item.get("column_values") or []
+        raw = ""
+        for column in column_values:
+            if str(column.get("id")) == column_id:
+                raw = _column_text(column)
+                break
+        if email not in _emails_from_additional_text(raw):
+            continue
+        matches.append(
+            {
+                "item_id": str(item_id),
+                "name": str(item.get("name") or ""),
+            }
+        )
+    return matches
+
+
 async def _find_on_board(
     emails: list[str],
     *,
     board_id: str,
     configured_email_column_id: str,
+    additional_emails_column_id: str,
     board_label: str,
 ) -> ContactMatch | None:
     email_column_ids = await _resolve_email_column_ids_for_board(
         board_id,
         configured_email_column_id,
     )
-    if not email_column_ids:
+    if not email_column_ids and not additional_emails_column_id.strip():
         logger.warning(
             "No email columns resolved for %s board %s; skipping",
             board_label,
@@ -131,7 +224,17 @@ async def _find_on_board(
         return None
 
     for email in emails:
-        items = await _query_items_by_email(board_id, email_column_ids, email)
+        items = []
+        match_source = "primary_email"
+        if email_column_ids:
+            items = await _query_items_by_email(board_id, email_column_ids, email)
+        if not items and additional_emails_column_id.strip():
+            items = await _query_items_by_additional_emails(
+                board_id,
+                additional_emails_column_id,
+                email,
+            )
+            match_source = "additional_emails"
         if not items:
             continue
         if len(items) > 1:
@@ -147,10 +250,11 @@ async def _find_on_board(
             matched_email=email,
         )
         logger.info(
-            "Match found in %s for email %s → item_id %s",
+            "Match found in %s for email %s → item_id %s (source=%s)",
             board_label,
             email,
             match.item_id,
+            match_source,
         )
         return match
     return None
@@ -162,7 +266,8 @@ async def find_contact_by_emails(
 ) -> ContactMatch | None:
     """Find a Lead by participant email on the Leads board.
 
-    Internal @beyondtcode.com addresses are excluded from lookup.
+    Matches the primary email column(s) or any email stored in the additional
+    emails text column. Internal @beyondtcode.com addresses are excluded.
     """
     settings = settings or get_crm_settings()
     emails = _dedupe_emails(_external_participant_emails(participant_emails))
@@ -174,6 +279,7 @@ async def find_contact_by_emails(
         emails,
         board_id=settings.monday_crm_leads_board_id,
         configured_email_column_id=settings.monday_crm_leads_email_column_id,
+        additional_emails_column_id=settings.monday_crm_leads_additional_emails_column_id,
         board_label="Leads",
     )
     if lead_match:

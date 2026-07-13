@@ -21,3 +21,15 @@ class NodeTakerWebhookResult(BaseModel):
     doc_id: str | None = None
     doc_created: bool = False
     warnings: list[str] = Field(default_factory=list)
+
+
+class RematchWebhookResult(BaseModel):
+    status: str
+    source_item_id: str | None = None
+    meeting_item_id: str | None = None
+    match_type: str | None = None
+    matched_email: str | None = None
+    doc_id: str | None = None
+    doc_created: bool = False
+    source_deleted: bool = False
+    warnings: list[str] = Field(default_factory=list)

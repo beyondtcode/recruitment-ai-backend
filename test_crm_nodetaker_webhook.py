@@ -65,6 +65,7 @@ client = TestClient(app)
 TEST_CRM_SETTINGS = CrmSettings(
     monday_crm_leads_board_id="5098750810",
     monday_crm_leads_email_column_id="email_mm4dy27s",
+    monday_crm_leads_additional_emails_column_id="text_mm57t6sd",
     monday_crm_meeting_notes_board_id="5098750811",
     monday_crm_meeting_notes_group_id="topics",
     monday_crm_meeting_date_column_id="date_mm4dk1jc",
@@ -950,6 +951,7 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
         mock_board_columns.side_effect = self._mock_board_columns
         mock_graphql.side_effect = [
             {"data": {"items_page_by_column_values": {"items": []}}},
+            {"data": {"boards": [{"items_page": {"items": []}}]}},
         ]
 
         match = await find_contact_by_emails(
@@ -958,6 +960,137 @@ class FindContactByEmailsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(match)
+        self.assertEqual(mock_graphql.call_count, 2)
+
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
+    @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
+    async def test_finds_lead_via_additional_emails_column(
+        self, mock_graphql, mock_board_columns
+    ):
+        mock_board_columns.side_effect = self._mock_board_columns
+        additional_col = TEST_CRM_SETTINGS.monday_crm_leads_additional_emails_column_id
+        mock_graphql.side_effect = [
+            {"data": {"items_page_by_column_values": {"items": []}}},
+            {
+                "data": {
+                    "boards": [
+                        {
+                            "items_page": {
+                                "items": [
+                                    {
+                                        "id": "444",
+                                        "name": "Lead With Extra Emails",
+                                        "column_values": [
+                                            {
+                                                "id": additional_col,
+                                                "text": (
+                                                    "other@example.com, contact@example.com"
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+        ]
+
+        match = await find_contact_by_emails(
+            ["contact@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertEqual(
+            match,
+            ContactMatch(
+                item_id="444",
+                match_type="lead",
+                matched_email="contact@example.com",
+            ),
+        )
+        self.assertEqual(mock_graphql.call_count, 2)
+        additional_vars = mock_graphql.call_args_list[1][0][1]
+        self.assertEqual(
+            additional_vars["queryParams"]["rules"][0]["column_id"],
+            additional_col,
+        )
+        self.assertEqual(
+            additional_vars["queryParams"]["rules"][0]["operator"],
+            "contains_text",
+        )
+
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
+    @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
+    async def test_additional_emails_rejects_substring_false_positive(
+        self, mock_graphql, mock_board_columns
+    ):
+        mock_board_columns.side_effect = self._mock_board_columns
+        additional_col = TEST_CRM_SETTINGS.monday_crm_leads_additional_emails_column_id
+        mock_graphql.side_effect = [
+            {"data": {"items_page_by_column_values": {"items": []}}},
+            {
+                "data": {
+                    "boards": [
+                        {
+                            "items_page": {
+                                "items": [
+                                    {
+                                        "id": "555",
+                                        "name": "Substring Trap",
+                                        "column_values": [
+                                            {
+                                                "id": additional_col,
+                                                "text": "notcontact@example.com",
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+        ]
+
+        match = await find_contact_by_emails(
+            ["contact@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertIsNone(match)
+
+    @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
+    @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
+    async def test_prefers_primary_email_over_additional_column(
+        self, mock_graphql, mock_board_columns
+    ):
+        mock_board_columns.side_effect = self._mock_board_columns
+        mock_graphql.side_effect = [
+            {
+                "data": {
+                    "items_page_by_column_values": {
+                        "items": [{"id": "111", "name": "Primary Hit"}],
+                    }
+                }
+            },
+        ]
+
+        match = await find_contact_by_emails(
+            ["client@example.com"],
+            settings=TEST_CRM_SETTINGS,
+        )
+
+        self.assertEqual(
+            match,
+            ContactMatch(
+                item_id="111",
+                match_type="lead",
+                matched_email="client@example.com",
+            ),
+        )
+        self.assertEqual(mock_graphql.call_count, 1)
 
     @patch("crm_integration.lookup._fetch_board_columns", new_callable=AsyncMock)
     @patch("crm_integration.lookup.execute_graphql", new_callable=AsyncMock)
@@ -2417,6 +2550,278 @@ class ProcessMorningBriefsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["processed_count"], 0)
         mock_gather.assert_not_awaited()
         mock_brief.assert_not_awaited()
+
+
+class GeneralMeetingRematchEndpointTests(unittest.TestCase):
+    def test_invalid_json_returns_400(self):
+        response = client.post(
+            "/general-meeting-rematch-webhook",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Invalid JSON")
+
+    def test_challenge_echo(self):
+        response = client.post(
+            "/general-meeting-rematch-webhook",
+            json={"challenge": "abc123"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"challenge": "abc123"})
+
+    def test_missing_item_id_returns_422(self):
+        response = client.post("/general-meeting-rematch-webhook", json={})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Missing item_id", response.json()["detail"])
+
+    @patch("crm_integration.routes.get_crm_settings")
+    @patch(
+        "crm_integration.routes.process_general_meeting_rematch",
+        new_callable=AsyncMock,
+    )
+    def test_simple_item_id_payload_returns_result(self, mock_rematch, mock_settings):
+        from crm_integration.schemas import RematchWebhookResult
+
+        mock_settings.return_value = TEST_CRM_SETTINGS
+        mock_rematch.return_value = RematchWebhookResult(
+            status="success",
+            source_item_id="9001",
+            meeting_item_id="555",
+            match_type="lead",
+            matched_email="client@example.com",
+            doc_id="777",
+            doc_created=True,
+            source_deleted=True,
+        )
+
+        response = client.post(
+            "/general-meeting-rematch-webhook",
+            json={"item_id": "9001"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "success")
+        self.assertEqual(body["meeting_item_id"], "555")
+        self.assertTrue(body["source_deleted"])
+        mock_rematch.assert_awaited_once_with("9001", settings=TEST_CRM_SETTINGS)
+
+    @patch("crm_integration.routes.get_crm_settings")
+    @patch(
+        "crm_integration.routes.process_general_meeting_rematch",
+        new_callable=AsyncMock,
+    )
+    def test_monday_event_payload_returns_result(self, mock_rematch, mock_settings):
+        from crm_integration.schemas import RematchWebhookResult
+
+        mock_settings.return_value = TEST_CRM_SETTINGS
+        mock_rematch.return_value = RematchWebhookResult(
+            status="success",
+            source_item_id="9002",
+            meeting_item_id="556",
+            match_type="lead",
+            matched_email="client@example.com",
+            source_deleted=True,
+        )
+
+        response = client.post(
+            "/general-meeting-rematch-webhook",
+            json={
+                "event": {
+                    "pulseId": 9002,
+                    "boardId": int(TEST_CRM_SETTINGS.monday_crm_company_meetings_board_id),
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["meeting_item_id"], "556")
+        mock_rematch.assert_awaited_once_with("9002", settings=TEST_CRM_SETTINGS)
+
+    @patch("crm_integration.routes.get_crm_settings")
+    @patch(
+        "crm_integration.routes.process_general_meeting_rematch",
+        new_callable=AsyncMock,
+    )
+    def test_wrong_board_is_ignored(self, mock_rematch, mock_settings):
+        mock_settings.return_value = TEST_CRM_SETTINGS
+        response = client.post(
+            "/general-meeting-rematch-webhook",
+            json={"item_id": "9003", "board_id": "1111111111"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ignored")
+        mock_rematch.assert_not_awaited()
+
+
+class ProcessGeneralMeetingRematchTests(unittest.IsolatedAsyncioTestCase):
+    def _general_item(
+        self,
+        *,
+        item_id: str = "9001",
+        title: str = "Q1 Planning",
+        participants: str = "client@example.com",
+    ) -> dict:
+        return {
+            "id": item_id,
+            "name": title,
+            "column_values": [
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_meeting_date_column_id,
+                    "text": "2026-06-17",
+                },
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_meeting_summary_column_id,
+                    "text": "Discussed roadmap priorities.",
+                },
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_meeting_action_items_column_id,
+                    "text": "- Send proposal",
+                },
+                {
+                    "id": TEST_CRM_SETTINGS.monday_crm_meeting_external_participants_column_id,
+                    "text": participants,
+                },
+            ],
+        }
+
+    @patch("crm_integration.rematch.delete_monday_item", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.run_lead_meeting_enrichment", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.copy_workdoc_blocks", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_item_doc_id", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_subitem", new_callable=AsyncMock)
+    @patch(
+        "crm_integration.rematch.find_existing_meeting_subitem_id",
+        new_callable=AsyncMock,
+    )
+    @patch("crm_integration.rematch.find_contact_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_items_by_ids", new_callable=AsyncMock)
+    async def test_rematch_creates_subitem_copies_workdoc_and_deletes_source(
+        self,
+        mock_fetch_items,
+        mock_find,
+        mock_find_existing,
+        mock_create_subitem,
+        mock_fetch_doc,
+        mock_copy_doc,
+        mock_create_doc,
+        mock_enrich,
+        mock_delete,
+    ):
+        from crm_integration.rematch import process_general_meeting_rematch
+
+        mock_fetch_items.return_value = [self._general_item()]
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+        mock_find_existing.return_value = None
+        mock_create_subitem.return_value = "555"
+        mock_fetch_doc.return_value = "source-doc-1"
+        mock_copy_doc.return_value = ("777", True, [])
+        mock_enrich.return_value = []
+        mock_delete.return_value = "9001"
+
+        result = await process_general_meeting_rematch("9001", settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.meeting_item_id, "555")
+        self.assertEqual(result.doc_id, "777")
+        self.assertTrue(result.doc_created)
+        self.assertTrue(result.source_deleted)
+        mock_create_subitem.assert_awaited_once()
+        mock_copy_doc.assert_awaited_once()
+        mock_create_doc.assert_not_awaited()
+        mock_enrich.assert_awaited_once()
+        mock_delete.assert_awaited_once_with("9001")
+
+    @patch("crm_integration.rematch.delete_monday_item", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.run_lead_meeting_enrichment", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.copy_workdoc_blocks", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_item_doc_id", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_subitem", new_callable=AsyncMock)
+    @patch(
+        "crm_integration.rematch.find_existing_meeting_subitem_id",
+        new_callable=AsyncMock,
+    )
+    @patch("crm_integration.rematch.find_contact_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_items_by_ids", new_callable=AsyncMock)
+    async def test_rematch_skipped_when_no_lead_match(
+        self,
+        mock_fetch_items,
+        mock_find,
+        mock_find_existing,
+        mock_create_subitem,
+        mock_fetch_doc,
+        mock_copy_doc,
+        mock_create_doc,
+        mock_enrich,
+        mock_delete,
+    ):
+        from crm_integration.rematch import process_general_meeting_rematch
+
+        mock_fetch_items.return_value = [self._general_item()]
+        mock_find.return_value = None
+
+        result = await process_general_meeting_rematch("9001", settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.match_type, "none")
+        mock_find_existing.assert_not_awaited()
+        mock_create_subitem.assert_not_awaited()
+        mock_delete.assert_not_awaited()
+        mock_enrich.assert_not_awaited()
+
+    @patch("crm_integration.rematch.delete_monday_item", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.run_lead_meeting_enrichment", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_workdoc", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.copy_workdoc_blocks", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_item_doc_id", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.create_meeting_subitem", new_callable=AsyncMock)
+    @patch(
+        "crm_integration.rematch.find_existing_meeting_subitem_id",
+        new_callable=AsyncMock,
+    )
+    @patch("crm_integration.rematch.find_contact_by_emails", new_callable=AsyncMock)
+    @patch("crm_integration.rematch.fetch_items_by_ids", new_callable=AsyncMock)
+    async def test_delete_failure_returns_success_with_warning(
+        self,
+        mock_fetch_items,
+        mock_find,
+        mock_find_existing,
+        mock_create_subitem,
+        mock_fetch_doc,
+        mock_copy_doc,
+        mock_create_doc,
+        mock_enrich,
+        mock_delete,
+    ):
+        from crm_integration.rematch import process_general_meeting_rematch
+
+        mock_fetch_items.return_value = [self._general_item()]
+        mock_find.return_value = ContactMatch(
+            item_id="111",
+            match_type="lead",
+            matched_email="client@example.com",
+        )
+        mock_find_existing.return_value = "existing-555"
+        mock_fetch_doc.return_value = None
+        mock_create_doc.return_value = ("888", True, [])
+        mock_enrich.return_value = []
+        mock_delete.side_effect = RuntimeError("delete failed")
+
+        result = await process_general_meeting_rematch("9001", settings=TEST_CRM_SETTINGS)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.meeting_item_id, "existing-555")
+        self.assertFalse(result.source_deleted)
+        self.assertTrue(
+            any("Source item delete failed" in warning for warning in result.warnings)
+        )
+        mock_create_subitem.assert_not_awaited()
+        mock_create_doc.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -365,6 +365,15 @@ async def fetch_all_doc_blocks(
     return all_blocks
 
 
+async def delete_monday_item(item_id: str) -> str:
+    """Delete a Monday item and return its deleted id."""
+    body = await execute_graphql(DELETE_ITEM_MUTATION, {"itemId": int(item_id)})
+    deleted_id = body.get("data", {}).get("delete_item", {}).get("id")
+    if not deleted_id:
+        raise RuntimeError(f"delete_item returned no id for item {item_id}")
+    return str(deleted_id)
+
+
 async def execute_graphql(
     query: str,
     variables: dict[str, Any],

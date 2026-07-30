@@ -11,9 +11,9 @@ import os
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from services.enrichment import enrich_jobs
+from services.enrichment import DEFAULT_CONTACT_INFO, enrich_jobs
 from services.lead_dedup import clear_seen_jobs
 from services.scraper import LINKEDIN_DEFAULT_URL, scrape_jobs
 
@@ -47,13 +47,17 @@ DEFAULT_SEARCH_URLS: dict[str, str] = {
 
 
 class LeadOpportunity(BaseModel):
-    company_name: str
-    job_title: str
-    track: Literal["A", "B"]
-    company_size: str
-    publish_date: str
-    job_link: str
-    source: str
+    """Excel-ready lead row. Serialized JSON keys match spreadsheet columns."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    company_name: str = Field(serialization_alias="Company Name")
+    job_title: str = Field(serialization_alias="Job Title")
+    job_summary: str = Field(serialization_alias="Job Summary")
+    job_link: str = Field(serialization_alias="Job Link")
+    contact_info: str = Field(serialization_alias="Contact Info")
+    track: Literal["A", "B"] = Field(serialization_alias="Track")
+    publish_date: str = Field(serialization_alias="Publish Date")
 
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
@@ -64,11 +68,11 @@ def _to_lead(job: dict) -> LeadOpportunity | None:
         return LeadOpportunity(
             company_name=job.get("company_name") or "Unknown",
             job_title=job.get("job_title") or "",
-            track=job["track"],
-            company_size=job.get("company_size") or "",
-            publish_date=job.get("publish_date") or "",
+            job_summary=job.get("job_summary") or "",
             job_link=job.get("job_link") or "",
-            source=job.get("source") or "",
+            contact_info=job.get("contact_info") or DEFAULT_CONTACT_INFO,
+            track=job["track"],
+            publish_date=job.get("publish_date") or "",
         )
     except (ValidationError, KeyError, TypeError) as exc:
         logger.warning("Skipping invalid enriched job %r: %s", job, exc)
@@ -92,6 +96,7 @@ async def scrape_leads(
     """Scrape a job board, enrich with LLM (size + track), return 100+ companies only.
 
     Uses ``LEADS_SCRAPE_URL`` when ``url`` is omitted.
+    Response JSON keys match Excel columns (Company Name, Job Title, …).
     """
     resolved_url = (url or os.environ.get("LEADS_SCRAPE_URL") or "").strip()
     if not resolved_url and source == "LinkedIn":
@@ -113,6 +118,7 @@ async def scrape_all() -> list[LeadOpportunity]:
 
     Each board is scraped independently: a failure on one site is logged as a
     warning and does not abort the remaining boards.
+    Response JSON keys match Excel columns (Company Name, Job Title, …).
     """
     combined_raw: list[dict] = []
 

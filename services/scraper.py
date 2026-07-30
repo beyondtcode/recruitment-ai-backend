@@ -119,6 +119,15 @@ _ALLJOBS_SPONSORED_CLASS_RE = re.compile(
 )
 
 
+DEFAULT_SNIPPET_SELECTOR = (
+    ".job-search-card__snippet, .base-search-card__snippet, "
+    "[class*='snippet'], [class*='description'], .job-description, "
+    ".job-desc, .description, p"
+)
+
+SNIPPET_MAX_CHARS = 800
+
+
 @dataclass(frozen=True)
 class BoardConfig:
     """CSS selectors and fetch options for a job-board listing page."""
@@ -132,6 +141,7 @@ class BoardConfig:
     publish_date: str = (
         "time, .date, .publish-date, .posted-date, [class*='date'], [datetime]"
     )
+    snippet: str = DEFAULT_SNIPPET_SELECTOR
     hosts: tuple[str, ...] = ()
     use_playwright: bool = False
     max_pages: int = 1
@@ -157,6 +167,10 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
             ".job-content-top [class*='date'], .job-content-top .AR, "
             ".job-content-top .T12, time, [datetime]"
         ),
+        snippet=(
+            ".job-content-top .job-content-top-desc, .job-content-top .T13, "
+            ".job-content-top [class*='desc'], .job-content-top p"
+        ),
         hosts=("alljobs.co.il",),
         use_playwright=True,
         max_pages=ALLJOBS_MAX_PAGES,
@@ -170,6 +184,10 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
         company=".job-item-company, .company-name, .companyName, [data-company]",
         link="h2 a, h3 a, .job-url, a.job-title, a[href*='/job/']",
         publish_date=".job-item-date, .date, time, [class*='date']",
+        snippet=(
+            ".job-item-description, .job-description, .job-item-content, "
+            "[class*='snippet'], [class*='description']"
+        ),
         hosts=("drushim.co.il",),
     ),
     "JobMaster": BoardConfig(
@@ -180,6 +198,10 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
         company=".JobItem-company, .company, .companyName, [class*='company']",
         link="h2 a, h3 a, .JobItem-title a, a.jobTitle, a[href]",
         publish_date=".JobItem-date, .date, time, [class*='date']",
+        snippet=(
+            ".JobItem-description, .job-description, .description, "
+            "[class*='snippet'], [class*='description']"
+        ),
         hosts=("jobmaster.co.il",),
     ),
     "Glassdoor": BoardConfig(
@@ -194,6 +216,10 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
         ),
         link='a[data-test="job-title"], a.JobCard_seoLink__',
         publish_date='[data-test="job-age"], .JobCard_listingAge__',
+        snippet=(
+            '[data-test="job-description-snippet"], .JobCard_jobDescriptionSnippet__, '
+            "[class*='snippet'], [class*='description']"
+        ),
         hosts=("glassdoor.com", "glassdoor.co.il"),
         use_playwright=True,
     ),
@@ -233,6 +259,7 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
         company=".base-search-card__subtitle, a.hidden-nested-link",
         link="a.base-card__full-link, a.base-search-card__full-link",
         publish_date="time.job-search-card__listdate, time",
+        snippet=".job-search-card__snippet, .base-search-card__snippet",
         hosts=("linkedin.com",),
         use_playwright=True,
     ),
@@ -404,6 +431,36 @@ def _extract_publish_date(card: Any, config: BoardConfig) -> str:
     return ""
 
 
+def _truncate_snippet(text: str, max_chars: int = SNIPPET_MAX_CHARS) -> str:
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _extract_snippet(card: Any, config: BoardConfig, title: str, company: str) -> str:
+    """Pull listing-card description/snippet text for LLM enrichment."""
+    if config.snippet and hasattr(card, "select"):
+        parts: list[str] = []
+        for el in card.select(config.snippet):
+            text = _text_or_empty(el)
+            if text and text not in parts:
+                parts.append(text)
+            if sum(len(p) for p in parts) >= SNIPPET_MAX_CHARS:
+                break
+        if parts:
+            return _truncate_snippet(" ".join(parts))
+
+    # Fallback: card body text with title/company stripped when present.
+    card_text = _text_or_empty(card)
+    if not card_text:
+        return ""
+    for noise in (title, company):
+        if noise and noise in card_text:
+            card_text = card_text.replace(noise, " ", 1)
+    return _truncate_snippet(card_text)
+
+
 def parse_job_cards(html: str, config: BoardConfig) -> list[dict[str, str]]:
     """Parse raw HTML into job dicts (unfiltered)."""
     soup = BeautifulSoup(html, "html.parser")
@@ -445,6 +502,7 @@ def parse_job_cards(html: str, config: BoardConfig) -> list[dict[str, str]]:
                 "job_link": job_link,
                 "publish_date": _extract_publish_date(card, config),
                 "source": config.source,
+                "snippet": _extract_snippet(card, config, title, company),
             }
         )
 
@@ -676,7 +734,7 @@ async def scrape_jobs(
     """Scrape a job board and return filtered Software Development / AI listings.
 
     Each dict has keys: ``job_title``, ``company_name``, ``job_link``,
-    ``publish_date``, ``source``.
+    ``publish_date``, ``source``, ``snippet``.
 
     Previously seen ``job_link`` values (SQLite dedup) are excluded so daily
     automation only returns new leads.

@@ -1,4 +1,4 @@
-"""LLM enrichment for Lead Scraping Agent (company size + track).
+"""LLM enrichment for Lead Scraping Agent (company size + track + summary).
 
 Env vars:
   ANTHROPIC_API_KEY / ANTHROPIC_MODEL — preferred provider (via core.config)
@@ -23,20 +23,26 @@ logger = logging.getLogger(__name__)
 
 Provider = Literal["anthropic", "openai"]
 
-MAX_TOKENS = 256
+MAX_TOKENS = 512
 CONCURRENCY_LIMIT = 5
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_CONTACT_INFO = "הגשה דרך הקישור במודעה"
 
 SYSTEM_PROMPT = """You classify job postings for a recruitment agency that ONLY places
 Software Development and AI/ML engineers (not fashion, retail, textile, or industrial
 "product developer" roles).
 
-Given a company name and job title, return ONLY a JSON object with:
+Given a company name, job title, and optional listing-card snippet text, return ONLY a JSON object with:
 - "company_size": exactly "100+" if the company likely has 100 or more employees, otherwise exactly "<100"
 - "track": "B" if the role is primarily AI / ML / LLM / Data Science; otherwise "A" (Software Development / Tech)
 - "is_tech_role": true only if this is a real software engineering, software development, or AI/ML/data role.
   Set false for non-tech product roles (e.g. fashion/textile/apparel product developer at brands like
   Golf, ADIKA, Castro), industrial/physical product design, merchandising, or similar.
+- "job_summary": a brief 1-sentence description of the role/requirements based on the snippet
+  (and title/company). Prefer concrete requirements from the snippet; do not invent details not
+  supported by the input. If the snippet is empty, summarize from the job title alone.
+- "contact_info": contact person name and/or CV/application email if clearly present in the snippet;
+  otherwise null (do not invent contacts).
 
 Use your knowledge of well-known companies when possible. If unsure about size, prefer "<100".
 If unsure whether the role is tech, prefer is_tech_role=false for ambiguous "product developer" titles
@@ -44,11 +50,17 @@ without clear software/engineering signals.
 Do not include markdown or extra keys."""
 
 USER_PROMPT_TEMPLATE = (
-    'Company: {company_name}\nJob title: {job_title}\n\nRespond with JSON only.'
+    "Company: {company_name}\n"
+    "Job title: {job_title}\n"
+    "Listing snippet:\n{snippet}\n\n"
+    "Respond with JSON only."
 )
 
 _SIZE_PLUS_RE = re.compile(r"100\s*\+|>=?\s*100|100\s*or\s*more", re.IGNORECASE)
 _SIZE_UNDER_RE = re.compile(r"<\s*100|under\s*100|less\s*than\s*100", re.IGNORECASE)
+_EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+)
 
 _anthropic_client: AsyncAnthropic | None = None
 _openai_client: AsyncOpenAI | None = None
@@ -144,7 +156,41 @@ def _normalize_is_tech_role(raw: Any) -> bool:
     return True
 
 
-def _normalize_classification(payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_job_summary(raw: Any, job_title: str) -> str:
+    if raw is None:
+        text = ""
+    else:
+        text = " ".join(str(raw).split()).strip()
+    if text:
+        return text
+    title = (job_title or "").strip()
+    if title:
+        return f"Opening for {title}."
+    return "Software / tech role opening."
+
+
+def _email_from_snippet(snippet: str) -> str | None:
+    match = _EMAIL_RE.search(snippet or "")
+    return match.group(0) if match else None
+
+
+def _normalize_contact_info(raw: Any, snippet: str) -> str:
+    if raw is not None:
+        text = " ".join(str(raw).split()).strip()
+        if text and text.lower() not in ("null", "none", "n/a", "-"):
+            return text
+    email = _email_from_snippet(snippet)
+    if email:
+        return email
+    return DEFAULT_CONTACT_INFO
+
+
+def _normalize_classification(
+    payload: dict[str, Any],
+    *,
+    job_title: str = "",
+    snippet: str = "",
+) -> dict[str, Any]:
     company_size = _normalize_company_size(payload.get("company_size"))
     track = _normalize_track(payload.get("track"))
     if company_size is None or track is None:
@@ -153,10 +199,25 @@ def _normalize_classification(payload: dict[str, Any]) -> dict[str, Any]:
         "company_size": company_size,
         "track": track,
         "is_tech_role": _normalize_is_tech_role(payload.get("is_tech_role")),
+        "job_summary": _normalize_job_summary(payload.get("job_summary"), job_title),
+        "contact_info": _normalize_contact_info(payload.get("contact_info"), snippet),
     }
 
 
-async def _classify_with_anthropic(company_name: str, job_title: str) -> dict[str, Any]:
+def _user_prompt(company_name: str, job_title: str, snippet: str) -> str:
+    snippet_text = (snippet or "").strip() or "(none)"
+    return USER_PROMPT_TEMPLATE.format(
+        company_name=company_name,
+        job_title=job_title,
+        snippet=snippet_text,
+    )
+
+
+async def _classify_with_anthropic(
+    company_name: str,
+    job_title: str,
+    snippet: str,
+) -> dict[str, Any]:
     response = await _get_anthropic_client().messages.create(
         model=settings.anthropic_model,
         max_tokens=MAX_TOKENS,
@@ -164,10 +225,7 @@ async def _classify_with_anthropic(company_name: str, job_title: str) -> dict[st
         messages=[
             {
                 "role": "user",
-                "content": USER_PROMPT_TEMPLATE.format(
-                    company_name=company_name,
-                    job_title=job_title,
-                ),
+                "content": _user_prompt(company_name, job_title, snippet),
             }
         ],
     )
@@ -178,10 +236,18 @@ async def _classify_with_anthropic(company_name: str, job_title: str) -> dict[st
     ]
     if not text_parts:
         raise ValueError("Anthropic response had no text content")
-    return _normalize_classification(_extract_json_object("\n".join(text_parts)))
+    return _normalize_classification(
+        _extract_json_object("\n".join(text_parts)),
+        job_title=job_title,
+        snippet=snippet,
+    )
 
 
-async def _classify_with_openai(company_name: str, job_title: str) -> dict[str, Any]:
+async def _classify_with_openai(
+    company_name: str,
+    job_title: str,
+    snippet: str,
+) -> dict[str, Any]:
     model = os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
     response = await _get_openai_client().chat.completions.create(
         model=model,
@@ -191,27 +257,29 @@ async def _classify_with_openai(company_name: str, job_title: str) -> dict[str, 
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": USER_PROMPT_TEMPLATE.format(
-                    company_name=company_name,
-                    job_title=job_title,
-                ),
+                "content": _user_prompt(company_name, job_title, snippet),
             },
         ],
     )
     content = response.choices[0].message.content if response.choices else None
     if not content:
         raise ValueError("OpenAI response had no content")
-    return _normalize_classification(_extract_json_object(content))
+    return _normalize_classification(
+        _extract_json_object(content),
+        job_title=job_title,
+        snippet=snippet,
+    )
 
 
 async def _classify_job(
     provider: Provider,
     company_name: str,
     job_title: str,
+    snippet: str,
 ) -> dict[str, Any]:
     if provider == "anthropic":
-        return await _classify_with_anthropic(company_name, job_title)
-    return await _classify_with_openai(company_name, job_title)
+        return await _classify_with_anthropic(company_name, job_title, snippet)
+    return await _classify_with_openai(company_name, job_title, snippet)
 
 
 async def _enrich_one(
@@ -221,13 +289,16 @@ async def _enrich_one(
 ) -> dict[str, Any] | None:
     company_name = (job.get("company_name") or "").strip() or "Unknown"
     job_title = (job.get("job_title") or "").strip()
+    snippet = (job.get("snippet") or "").strip()
     if not job_title:
         logger.warning("enrich_jobs: skipping job with empty title: %r", job)
         return None
 
     async with semaphore:
         try:
-            classification = await _classify_job(provider, company_name, job_title)
+            classification = await _classify_job(
+                provider, company_name, job_title, snippet
+            )
         except Exception:
             logger.exception(
                 "enrich_jobs: LLM failed for company=%r title=%r",
@@ -257,6 +328,8 @@ async def _enrich_one(
     enriched["job_title"] = job_title
     enriched["company_size"] = classification["company_size"]
     enriched["track"] = classification["track"]
+    enriched["job_summary"] = classification["job_summary"]
+    enriched["contact_info"] = classification["contact_info"]
     enriched.setdefault("publish_date", job.get("publish_date") or "")
     return enriched
 
@@ -264,8 +337,9 @@ async def _enrich_one(
 async def enrich_jobs(jobs: list[dict]) -> list[dict]:
     """Classify scraped jobs with an LLM and keep only companies estimated at 100+.
 
-    Returns dicts with original scrape fields plus ``company_size`` and ``track``.
-    Soft-fails per job so one LLM error does not abort the batch.
+    Returns dicts with original scrape fields plus ``company_size``, ``track``,
+    ``job_summary``, and ``contact_info``. Soft-fails per job so one LLM error
+    does not abort the batch.
     """
     if not jobs:
         return []

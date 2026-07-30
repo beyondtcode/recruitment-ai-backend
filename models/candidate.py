@@ -15,7 +15,11 @@ class ProgrammingLanguageExperience(BaseModel):
 
 
 class CandidateSchema(BaseModel):
-    name: str = Field(..., description="Full Name", json_schema_extra={"monday_id": "name"})
+    name: str = Field(
+        ...,
+        description="Full name as on the CV; prefer original Hebrew script when present",
+        json_schema_extra={"monday_id": "name"},
+    )
     salary_expectations: Optional[str] = Field(
         None,
         description="ציפיות שכר — free text (e.g. '20,000 ₪', '15K–18K', 'לפי שוק')",

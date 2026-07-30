@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
+
+# Playwright needs a Proactor loop for subprocesses on Windows.
+# Must run before any other imports that may touch asyncio.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -17,6 +25,7 @@ from crm_integration.batch import process_morning_briefs, run_daily_notetaker_ba
 from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
+from routers.leads import router as leads_router
 from services.cv_pipeline import run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
 from services.status_email import send_weekly_status_email
@@ -132,6 +141,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(crm_router)
+app.include_router(leads_router)
 
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
 
@@ -222,7 +232,7 @@ def _schedule_cv_pipeline(
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "message": "Server is running"}
 
 
 @app.get("/test-fetch-sarah")

@@ -96,7 +96,7 @@ SYSTEM_PROMPT = """You are an elite Israeli Tech Recruiter. Your task is to extr
 
 ## Contact (name, email, phone)
 44. **Priority sources:** Extract contact fields from the earliest content in the CV text — especially the `--- DOCX_HEADER ---` block (if present), the first lines of the document, and top-of-page tables — before experience or education sections.
-45. **`name` (English only):** MUST be in English (Latin script). If the CV name is in Hebrew (e.g. "יעל כהן"), transliterate/translate to English (e.g. "Yael Cohen"). Preserve standard English spelling for names already in English. Use the candidate's personal full name from the contact area. Do NOT use employer names, university names, or section headings as the candidate name.
+45. **`name` (prefer Hebrew):** Keep the candidate's name as written on the CV. If the name appears in Hebrew (e.g. "יעל כהן"), use the Hebrew form — do NOT transliterate or translate to English. If both Hebrew and English forms appear, prefer the Hebrew. Use English only when that is the only form on the CV. Use the candidate's personal full name from the contact area. Do NOT use employer names, university names, or section headings as the candidate name.
 46. **`email`:** Extract a valid email address from the contact area. Prefer explicit emails and `mailto:` hyperlinks; also parse bracketed URLs from the CV parser (e.g. `Email [mailto:user@example.com]`).
 47. **`phone`:** Extract Israeli mobile or landline numbers from the contact area only. Do NOT use GPA, test scores, ID numbers, or years as phone values.
 48. **Phone Number Cleanliness:** For the `phone` field, extract ONLY the raw digits. Strictly remove any dashes, spaces, parentheses, or special characters (e.g., convert "055-6722091" or "055 (672) 2091" into "0556722091").
@@ -144,9 +144,9 @@ JOB DESCRIPTION INPUT:
 • ניסיון ב-RT Embedded ו-GIT/JIRA – חובה
 • ניסיון ב-OOD ודיזיין פטרנס – חובה"
 
-CANDIDATE CV INPUT (Sara Mauda):
+CANDIDATE CV INPUT (שרה מעודה):
 {
-  "name": "Sara Mauda",
+  "name": "שרה מעודה",
   "education": "הנדסת תוכנה מעשיים",
   "years_of_experience": 0.0,
   "experience_details": "BeyondCode (2026 - Present): AI Automation Engineer. Built Claude API and Monday integrations. Academic projects in C++, Angular, Spring Boot."

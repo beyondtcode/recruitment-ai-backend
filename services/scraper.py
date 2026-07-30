@@ -21,7 +21,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -92,6 +92,25 @@ _PUBLISH_DATE_RE = re.compile(
     r"(?:לפני\s+\d+\s+(?:דקה|דקות|שעה|שעות|יום|ימים|שבוע|שבועות)|"
     r"אתמול|היום|"
     r"\d{1,2}[./]\d{1,2}[./]\d{2,4})",
+    re.IGNORECASE,
+)
+
+_PUBLISH_NOISE_TAGS: tuple[str, ...] = (
+    "חברת השמה",
+    "כח אדם",
+    "כוח אדם",
+    "משרה בלעדית",
+)
+_PUBLISH_NOISE_RE = re.compile(
+    "|".join(re.escape(tag) for tag in _PUBLISH_NOISE_TAGS),
+    re.IGNORECASE,
+)
+_ABSOLUTE_DATE_RE = re.compile(
+    r"(\d{1,2})[./](\d{1,2})[./](\d{2,4})"
+)
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+_RELATIVE_HE_RE = re.compile(
+    r"לפני\s+(\d+)\s+(דקה|דקות|שעה|שעות|יום|ימים|שבוע|שבועות)",
     re.IGNORECASE,
 )
 
@@ -412,6 +431,157 @@ def _first_href(element: Any, base_url: str) -> str:
     return urljoin(base_url, href)
 
 
+def _clean_job_link(url: str) -> str:
+    """Strip tracking query/fragment and decode percent-encoded path characters."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return unquote(raw.split("?", 1)[0].split("#", 1)[0])
+    cleaned = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return unquote(cleaned)
+
+
+def _normalize_job_title(title: str) -> str:
+    """Collapse whitespace and remove spaces around slashes (e.g. מפתח /ת → מפתח/ת)."""
+    text = " ".join((title or "").split()).strip()
+    if not text:
+        return ""
+    return re.sub(r"\s*/\s*", "/", text)
+
+
+def _normalize_publish_date(raw: str) -> str:
+    """Clean board metadata and standardize absolute/relative publish strings."""
+    text = " ".join((raw or "").split()).strip()
+    if not text:
+        return ""
+    text = _PUBLISH_NOISE_RE.sub(" ", text)
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+
+    iso = _ISO_DATE_RE.search(text)
+    if iso:
+        return f"{iso.group(1)}-{iso.group(2)}-{iso.group(3)}"
+
+    abs_match = _ABSOLUTE_DATE_RE.search(text)
+    if abs_match:
+        day, month, year = abs_match.group(1), abs_match.group(2), abs_match.group(3)
+        if len(year) == 2:
+            year = f"20{year}"
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+    if "היום" in text:
+        return "היום"
+    if "אתמול" in text:
+        return "אתמול"
+
+    rel = _RELATIVE_HE_RE.search(text)
+    if rel:
+        amount = int(rel.group(1))
+        unit = rel.group(2)
+        if unit in ("דקה", "דקות", "שעה", "שעות"):
+            return "היום"
+        if unit in ("יום", "ימים") and amount == 1:
+            return "אתמול"
+        return f"לפני {amount} {unit}"
+
+    match = _PUBLISH_DATE_RE.search(text)
+    if match:
+        return match.group(0).strip()
+    # Keep short leftover text if it still looks like a date fragment.
+    if len(text) <= 40:
+        return text
+    return ""
+
+
+def _is_unknown_company(name: str) -> bool:
+    return not name or name.strip().casefold() in ("unknown", "n/a", "none", "-")
+
+
+def _company_from_card_text(card: Any, title: str) -> str:
+    """Pick a short non-title, non-date, non-noise line from card body text."""
+    if not hasattr(card, "get_text"):
+        return ""
+    lines = [
+        " ".join(line.split()).strip()
+        for line in card.get_text("\n", strip=True).split("\n")
+    ]
+    title_norm = " ".join((title or "").split()).casefold()
+    for candidate in lines:
+        if not candidate or len(candidate) > 80:
+            continue
+        if title_norm and candidate.casefold() == title_norm:
+            continue
+        if _PUBLISH_DATE_RE.search(candidate):
+            continue
+        if _PUBLISH_NOISE_RE.search(candidate):
+            candidate = " ".join(_PUBLISH_NOISE_RE.sub(" ", candidate).split()).strip()
+            if not candidate:
+                continue
+        if _is_unknown_company(candidate):
+            continue
+        normalized_date = _normalize_publish_date(candidate)
+        if normalized_date in ("היום", "אתמול") or _ABSOLUTE_DATE_RE.fullmatch(candidate):
+            continue
+        if _ISO_DATE_RE.fullmatch(candidate):
+            continue
+        return candidate
+    return ""
+
+
+def _extract_company_name(card: Any, config: BoardConfig, title: str) -> str:
+    """Resolve company via selector, then attrs / non-title anchors / card text."""
+    company = ""
+    if hasattr(card, "select_one") and config.company:
+        company_el = card.select_one(config.company)
+        company = _text_or_empty(company_el)
+
+    if not _is_unknown_company(company):
+        return company
+
+    if config.default_company:
+        return config.default_company
+
+    for attr in ("data-company", "data-company-name", "data-employer"):
+        if hasattr(card, "get"):
+            value = (card.get(attr) or "").strip()
+            if value and not _is_unknown_company(value):
+                return " ".join(value.split())
+            # Also check descendants with the attribute.
+            if hasattr(card, "find"):
+                el = card.find(attrs={attr: True})
+                if el is not None:
+                    value = (el.get(attr) or "").strip()
+                    if value and not _is_unknown_company(value):
+                        return " ".join(value.split())
+
+    if hasattr(card, "select") and config.company:
+        title_href = ""
+        if hasattr(card, "select_one") and config.link:
+            link_el = card.select_one(config.link)
+            title_href = (_first_href(link_el, config.url) or "").casefold()
+        for el in card.select(config.company):
+            text = _text_or_empty(el)
+            if text and not _is_unknown_company(text):
+                return text
+            href = _first_href(el, config.url)
+            if href and title_href and href.casefold() == title_href:
+                continue
+            # Anchor title/aria sometimes holds the employer name.
+            for attr in ("title", "aria-label"):
+                label = (el.get(attr) or "").strip() if hasattr(el, "get") else ""
+                if label and not _is_unknown_company(label) and label != title:
+                    return " ".join(label.split())
+
+    fallback = _company_from_card_text(card, title)
+    if fallback:
+        return fallback
+    return "Unknown"
+
+
 def _extract_publish_date(card: Any, config: BoardConfig) -> str:
     """Pull published date/text from a card via selector, then regex fallback."""
     if config.publish_date and hasattr(card, "select"):
@@ -480,27 +650,37 @@ def parse_job_cards(html: str, config: BoardConfig) -> list[dict[str, str]]:
         if title_el is None and getattr(card, "name", None) == "a":
             title_el = card
 
-        title = _text_or_empty(title_el)
+        title = _normalize_job_title(_text_or_empty(title_el))
         if not title:
             continue
 
-        company_el = card.select_one(config.company) if hasattr(card, "select_one") else None
-        company = _text_or_empty(company_el) or config.default_company or "Unknown"
+        company = _extract_company_name(card, config, title)
 
         link_el = card.select_one(config.link) if hasattr(card, "select_one") else title_el
-        job_link = _first_href(link_el, config.url) or _first_href(title_el, config.url)
-
-        if job_link and job_link in seen_links:
+        raw_link = (
+            _first_href(link_el, config.url)
+            or _first_href(title_el, config.url)
+            or (
+                _first_href(card.find("a", href=True), config.url)
+                if hasattr(card, "find")
+                else ""
+            )
+        )
+        job_link = _clean_job_link(raw_link)
+        if not job_link:
             continue
-        if job_link:
-            seen_links.add(job_link)
+        if job_link in seen_links:
+            continue
+        seen_links.add(job_link)
 
         jobs.append(
             {
                 "job_title": title,
                 "company_name": company,
                 "job_link": job_link,
-                "publish_date": _extract_publish_date(card, config),
+                "publish_date": _normalize_publish_date(
+                    _extract_publish_date(card, config)
+                ),
                 "source": config.source,
                 "snippet": _extract_snippet(card, config, title, company),
             }

@@ -18,6 +18,11 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from core.config import settings
+from services.scraper import (
+    _clean_job_link,
+    _normalize_job_title,
+    _normalize_publish_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,9 +292,15 @@ async def _enrich_one(
     provider: Provider,
     semaphore: asyncio.Semaphore,
 ) -> dict[str, Any] | None:
-    company_name = (job.get("company_name") or "").strip() or "Unknown"
-    job_title = (job.get("job_title") or "").strip()
+    job_link = _clean_job_link(job.get("job_link") or "")
+    if not job_link:
+        logger.warning("enrich_jobs: skipping job with empty job_link: %r", job)
+        return None
+
+    company_name = " ".join((job.get("company_name") or "").split()).strip() or "Unknown"
+    job_title = _normalize_job_title(job.get("job_title") or "")
     snippet = (job.get("snippet") or "").strip()
+    publish_date = _normalize_publish_date(job.get("publish_date") or "")
     if not job_title:
         logger.warning("enrich_jobs: skipping job with empty title: %r", job)
         return None
@@ -326,11 +337,12 @@ async def _enrich_one(
     enriched = dict(job)
     enriched["company_name"] = company_name
     enriched["job_title"] = job_title
+    enriched["job_link"] = job_link
+    enriched["publish_date"] = publish_date
     enriched["company_size"] = classification["company_size"]
     enriched["track"] = classification["track"]
     enriched["job_summary"] = classification["job_summary"]
     enriched["contact_info"] = classification["contact_info"]
-    enriched.setdefault("publish_date", job.get("publish_date") or "")
     return enriched
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
@@ -74,8 +75,17 @@ async def analyze_match(body: MatchRequest) -> MatchAnalysis:
 @router.post("/analyze-candidate-jobs", response_model=BatchMatchResponse)
 async def analyze_candidate_jobs(body: CandidateOnlyRequest) -> BatchMatchResponse:
     """Match a candidate against all daily jobs; return threshold-passing matches."""
+    started = time.perf_counter()
     try:
-        return await analyze_candidate_against_all_jobs(body)
+        result = await analyze_candidate_against_all_jobs(body)
+        logger.info(
+            "analyze-candidate-jobs: scanned=%d matches=%d elapsed=%.1fs email=%s",
+            result.total_scanned,
+            result.matches_found,
+            time.perf_counter() - started,
+            body.candidate_email,
+        )
+        return result
     except ValidationError as exc:
         logger.warning("Batch match validation error: %s", exc)
         raise HTTPException(

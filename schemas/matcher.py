@@ -45,3 +45,9 @@ class BatchMatchResponse(BaseModel):
     total_scanned: int
     matches_found: int
     matches: list[MatchAnalysis] = Field(default_factory=list)
+
+
+class JobScrapeTestResponse(BaseModel):
+    total_found: int
+    new_jobs_count: int
+    jobs: list[JobInput] = Field(default_factory=list)

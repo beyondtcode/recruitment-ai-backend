@@ -20,6 +20,7 @@ from schemas.matcher import (
     MatchAnalysis,
     MatchRequest,
 )
+from services.job_scraper_service import scrape_daily_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -203,68 +204,19 @@ async def analyze_job_match(request: MatchRequest) -> MatchAnalysis:
         raise ValueError(f"Failed to build MatchAnalysis: {exc}") from exc
 
 
-_MOCK_DAILY_JOBS: list[JobInput] = [
-    JobInput(
-        id="mock-job-001",
-        title="Backend Developer (Python)",
-        company="Monday.com",
-        description=(
-            "We are looking for a Backend Developer to build and maintain APIs and "
-            "data services. Requirements: 3+ years Python experience, FastAPI or "
-            "Django, PostgreSQL, cloud (AWS/GCP), strong system design. Bonus: "
-            "experience with async workers, Redis, and Israeli tech product companies."
-        ),
-        url="https://example.com/jobs/monday-backend-python",
-    ),
-    JobInput(
-        id="mock-job-002",
-        title="Fullstack Engineer",
-        company="Wix",
-        description=(
-            "Fullstack Engineer for a product team. Stack: TypeScript/React on the "
-            "frontend and Node.js or Python on the backend. 4+ years experience, "
-            "ownership of features end-to-end, CI/CD familiarity. Adjacent backend "
-            "or frontend specialists with transferable skills are welcome."
-        ),
-        url="https://example.com/jobs/wix-fullstack",
-    ),
-    JobInput(
-        id="mock-job-003",
-        title="QA Automation Engineer",
-        company="Check Point",
-        description=(
-            "QA Automation Engineer for cybersecurity products. Requirements: "
-            "automated testing with Python or JavaScript, Selenium/Playwright, "
-            "API testing, CI pipelines. 2+ years in QA automation. Understanding "
-            "of security products is a plus but not mandatory."
-        ),
-        url="https://example.com/jobs/checkpoint-qa-automation",
-    ),
-    JobInput(
-        id="mock-job-004",
-        title="Data Engineer",
-        company="Fiverr",
-        description=(
-            "Data Engineer to design ETL/ELT pipelines and warehouse models. "
-            "Requirements: SQL expertise, Python, Airflow or similar orchestrators, "
-            "cloud data warehouses (BigQuery/Snowflake/Redshift). Experience with "
-            "streaming (Kafka) is advantageous."
-        ),
-        url="https://example.com/jobs/fiverr-data-engineer",
-    ),
-]
-
-
 async def get_daily_jobs() -> list[JobInput]:
-    """Return current scraped/daily jobs for matching.
-
-    Until a jobs catalog store is wired, returns a hardcoded mock list.
-    """
-    logger.warning(
-        "get_daily_jobs: using %d mock jobs (no jobs catalog DB wired yet)",
-        len(_MOCK_DAILY_JOBS),
-    )
-    return list(_MOCK_DAILY_JOBS)
+    """Return newly scraped Israeli tech jobs for matching (30-day dedup)."""
+    try:
+        result = await scrape_daily_jobs()
+        logger.info(
+            "get_daily_jobs: %d total, %d new after dedup",
+            result.total_found,
+            result.new_jobs_count,
+        )
+        return result.jobs
+    except Exception:
+        logger.exception("get_daily_jobs: scrape failed")
+        return []
 
 
 async def analyze_candidate_against_all_jobs(

@@ -10,9 +10,11 @@ from pydantic import ValidationError
 from schemas.matcher import (
     BatchMatchResponse,
     CandidateOnlyRequest,
+    JobScrapeTestResponse,
     MatchAnalysis,
     MatchRequest,
 )
+from services.job_scraper_service import scrape_daily_jobs
 from services.matcher_service import (
     analyze_candidate_against_all_jobs,
     analyze_job_match,
@@ -21,6 +23,21 @@ from services.matcher_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["matcher"])
+
+
+@router.get("/jobs/scrape-test", response_model=JobScrapeTestResponse)
+async def scrape_test_jobs() -> JobScrapeTestResponse:
+    """Manually trigger board scrape and preview newly seen jobs (30-day dedup)."""
+    try:
+        result = await scrape_daily_jobs()
+        return JobScrapeTestResponse(
+            total_found=result.total_found,
+            new_jobs_count=result.new_jobs_count,
+            jobs=result.jobs,
+        )
+    except Exception:
+        logger.exception("scrape-test: unexpected failure")
+        return JobScrapeTestResponse(total_found=0, new_jobs_count=0, jobs=[])
 
 
 @router.post("/analyze-match", response_model=MatchAnalysis)

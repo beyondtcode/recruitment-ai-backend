@@ -910,14 +910,16 @@ async def scrape_jobs(
     source: str = "GenericJobBoard",
     config: BoardConfig | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    apply_lead_dedup: bool = True,
 ) -> list[dict[str, str]]:
     """Scrape a job board and return filtered Software Development / AI listings.
 
     Each dict has keys: ``job_title``, ``company_name``, ``job_link``,
     ``publish_date``, ``source``, ``snippet``.
 
-    Previously seen ``job_link`` values (SQLite dedup) are excluded so daily
-    automation only returns new leads.
+    Previously seen ``job_link`` values (SQLite lead dedup) are excluded so daily
+    automation only returns new leads, unless ``apply_lead_dedup`` is False
+    (used by the matcher job scraper which has its own store).
 
     Parameters
     ----------
@@ -931,6 +933,9 @@ async def scrape_jobs(
         the URL host or ``BOARD_CONFIGS``.
     timeout:
         Fetch timeout in seconds (httpx or Playwright).
+    apply_lead_dedup:
+        When True (default), filter and mark via ``lead_dedup``. When False,
+        return keyword-filtered jobs without touching the lead seen store.
 
     Returns an empty list on network/parse failures (errors are logged).
     """
@@ -999,16 +1004,25 @@ async def scrape_jobs(
     logger.info("scrape_jobs: extracted %d titles: %s", len(titles), titles)
 
     filtered = filter_jobs(raw_jobs)
-    new_jobs = filter_unseen_jobs(filtered)
-    if new_jobs:
-        mark_jobs_seen(new_jobs)
+    if apply_lead_dedup:
+        new_jobs = filter_unseen_jobs(filtered)
+        if new_jobs:
+            mark_jobs_seen(new_jobs)
+        logger.info(
+            "scrape_jobs: %s → %d raw, %d after filter, %d new after dedup (source=%s)",
+            board.url,
+            len(raw_jobs),
+            len(filtered),
+            len(new_jobs),
+            board.source,
+        )
+        return new_jobs
 
     logger.info(
-        "scrape_jobs: %s → %d raw, %d after filter, %d new after dedup (source=%s)",
+        "scrape_jobs: %s → %d raw, %d after filter (lead dedup skipped, source=%s)",
         board.url,
         len(raw_jobs),
         len(filtered),
-        len(new_jobs),
         board.source,
     )
-    return new_jobs
+    return filtered

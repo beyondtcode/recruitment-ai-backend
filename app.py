@@ -26,6 +26,7 @@ from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
 from routers.leads import router as leads_router
+from routers.matcher import router as matcher_router
 from services.cv_pipeline import run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
 from services.status_email import send_weekly_status_email
@@ -142,6 +143,7 @@ app = FastAPI(
 )
 app.include_router(crm_router)
 app.include_router(leads_router)
+app.include_router(matcher_router)
 
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
 

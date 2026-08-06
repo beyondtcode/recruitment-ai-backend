@@ -176,12 +176,6 @@ def _get_client() -> AsyncAnthropic:
     return _client
 
 
-def _matcher_model() -> str:
-    """Prefer the light matcher model; empty override falls back to default settings model."""
-    configured = (settings.anthropic_matcher_model or "").strip()
-    return configured or settings.anthropic_model
-
-
 def _tool_input_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -358,10 +352,9 @@ def prefilter_jobs_for_candidate(
 
 async def analyze_job_match(request: MatchRequest) -> MatchAnalysis:
     """Score a candidate against a single job via Claude (Wide Funnel)."""
-    model = _matcher_model()
     try:
         response = await _get_client().messages.create(
-            model=model,
+            model=settings.anthropic_model,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_user_content(request)}],
@@ -548,7 +541,7 @@ async def analyze_candidate_against_all_jobs(
         len(selected),
         len(matches),
         elapsed,
-        _matcher_model(),
+        settings.anthropic_model,
     )
 
     return BatchMatchResponse(

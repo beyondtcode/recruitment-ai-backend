@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
+from services.email_service import BODY_SNIPPET_MAX_CHARS, _body_snippet_for, html_to_plain_text
 from services.position_routing import (
     ActivePosition,
     build_board_id_to_name,
     build_board_name_index,
     extract_position_hint,
+    match_cv_to_position,
     match_email_to_position,
     normalize_position_name,
     resolve_positions_with_boards,
@@ -94,6 +97,34 @@ class TestExtractPositionHint(unittest.TestCase):
         self.assertIsNone(extract_position_hint("חיפוש עבודה - 4 שנות נסיון"))
 
 
+class TestHtmlBodySnippet(unittest.TestCase):
+    def test_html_to_plain_text_strips_tags(self):
+        html = "<html><body><p>מועמדות לתפקיד <b>CTO</b></p><script>x()</script></body></html>"
+        text = html_to_plain_text(html)
+        self.assertIn("מועמדות לתפקיד CTO", text)
+        self.assertNotIn("<", text)
+        self.assertNotIn("x()", text)
+
+    def test_body_snippet_falls_back_to_html(self):
+        msg = SimpleNamespace(
+            text="",
+            html="<div>משרה: Technology Business Lead</div>",
+        )
+        snippet = _body_snippet_for(msg)
+        self.assertIn("Technology Business Lead", snippet)
+
+    def test_body_snippet_prefers_plain_text(self):
+        msg = SimpleNamespace(
+            text="plain subject line about CTO",
+            html="<div>ignored html</div>",
+        )
+        self.assertEqual(_body_snippet_for(msg), "plain subject line about CTO")
+
+    def test_body_snippet_max_chars(self):
+        msg = SimpleNamespace(text="a" * 5000, html="")
+        self.assertEqual(len(_body_snippet_for(msg)), BODY_SNIPPET_MAX_CHARS)
+
+
 class TestMatchEmailToPosition(unittest.TestCase):
     def setUp(self):
         self.positions = (
@@ -144,6 +175,28 @@ class TestMatchEmailToPosition(unittest.TestCase):
         assert match is not None
         self.assertEqual(match.position.item_name, "Technology Businesses Lead")
 
+    def test_matches_drushim_title_via_job_title_alias(self):
+        # Even without requirements text, alias maps job-board title → Monday position.
+        positions = (
+            _position(
+                "משרה עבור עופר",
+                board_id="board-ofer",
+                board_name="משרה לעופר",
+                requirements_text="",
+            ),
+            _position("CTO", board_id="board-cto", board_name="CTO"),
+        )
+        match = match_email_to_position(
+            'קו"ח: Full-Stack Microsoft Developer | Khaled mussa mussa | עילוט',
+            "",
+            positions,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.position.item_name, "משרה עבור עופר")
+        self.assertEqual(match.board_id, "board-ofer")
+        self.assertEqual(match.score, 100)
+
     def test_matches_drushim_title_via_requirements_text(self):
         match = match_email_to_position(
             'קו"ח: Full-Stack Microsoft Developer | Khaled mussa mussa | עילוט',
@@ -164,6 +217,69 @@ class TestMatchEmailToPosition(unittest.TestCase):
             _position("CTO", board_id=None),
         )
         match = match_email_to_position("מועמדות לתפקיד CTO", "", positions)
+        self.assertIsNone(match)
+
+    def test_html_body_snippet_can_drive_match(self):
+        match = match_email_to_position(
+            "קורות חיים",
+            "משרה: Technology Business Lead",
+            self.positions,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.position.item_name, "Technology Businesses Lead")
+
+
+class TestMatchCvToPosition(unittest.TestCase):
+    def setUp(self):
+        self.positions = (
+            _position("CTO", board_id="board-cto", board_name="CTO"),
+            _position(
+                "Technology Businesses Lead",
+                board_id="board-tbl",
+                board_name="Technology Businesses Lead",
+            ),
+            _position(
+                "משרה עבור עופר",
+                board_id="board-ofer",
+                board_name="משרה לעופר",
+            ),
+        )
+
+    def test_matches_role_mentioned_in_cv(self):
+        cv_text = (
+            "John Doe\n"
+            "Objective: Applying for the CTO position in Tel Aviv.\n"
+            "Experience: 12 years leading engineering organizations.\n"
+            "Skills: Strategy, people management, product.\n"
+            "Education: BSc Computer Science.\n"
+        )
+        match = match_cv_to_position(cv_text, self.positions, email_subject="קורות חיים")
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.position.item_name, "CTO")
+
+    def test_matches_job_title_alias_phrase_in_cv(self):
+        cv_text = (
+            "Candidate Name\n"
+            "Target role: Full-Stack Microsoft Developer\n"
+            "Experience: .NET, Azure, C#, SQL Server.\n"
+            "Skills: ASP.NET, Blazor.\n"
+            "Education: BSc Software Engineering.\n"
+        )
+        match = match_cv_to_position(cv_text, self.positions)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.position.item_name, "משרה עבור עופר")
+
+    def test_generic_cv_does_not_match(self):
+        cv_text = (
+            "Jane Smith\n"
+            "Experience: retail sales associate for five years.\n"
+            "Skills: customer service, cash register.\n"
+            "Education: high school diploma.\n"
+        )
+        match = match_cv_to_position(cv_text, self.positions, email_subject="קורות חיים")
         self.assertIsNone(match)
 
 

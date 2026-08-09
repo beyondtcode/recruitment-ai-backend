@@ -21,6 +21,7 @@ from services.position_routing import (
     PositionMatch,
     RoutingContext,
     load_routing_context,
+    match_cv_to_position,
     match_email_to_position,
     resolve_job_requirements_for_match,
 )
@@ -87,20 +88,32 @@ def _record_processed(state: dict[str, str], key: str, *, now: datetime) -> None
     state[key] = now.isoformat()
 
 
-def _validate_cv_text(file_bytes: bytes, filename: str) -> str | None:
-    """Return a skip reason if the attachment text fails pre-Claude validation."""
+def _extract_and_validate_cv_text(
+    file_bytes: bytes, filename: str
+) -> tuple[str | None, str | None]:
+    """
+    Extract CV text and validate.
+
+    Returns (skip_reason, text). On success skip_reason is None and text is set.
+    """
     try:
         text = extract_text_from_file(file_bytes, filename)
     except ValueError:
-        return "unreadable_file"
+        return "unreadable_file", None
 
     if len(text.strip()) < MIN_CV_TEXT_CHARS:
-        return "text_too_short"
+        return "text_too_short", None
 
     if not is_plausible_cv_text(text):
-        return "not_cv_content"
+        return "not_cv_content", None
 
-    return None
+    return None, text
+
+
+def _validate_cv_text(file_bytes: bytes, filename: str) -> str | None:
+    """Return a skip reason if the attachment text fails pre-Claude validation."""
+    skip_reason, _text = _extract_and_validate_cv_text(file_bytes, filename)
+    return skip_reason
 
 
 def _routing_detail(
@@ -108,6 +121,7 @@ def _routing_detail(
     match: PositionMatch | None,
     *,
     routed: bool,
+    match_source: str = "none",
 ) -> dict[str, object]:
     return {
         "filename": attachment.filename,
@@ -115,6 +129,8 @@ def _routing_detail(
         "matched_position": match.position.item_name if match else None,
         "board_id": match.board_id if match else None,
         "routed_to_job_board": routed,
+        "match_source": match_source,
+        "match_score": match.score if match else None,
     }
 
 
@@ -140,12 +156,15 @@ async def _process_attachment(
 
     try:
         file_bytes = file_path.read_bytes()
-        skip_reason = _validate_cv_text(file_bytes, attachment.filename)
+        skip_reason, cv_text = _extract_and_validate_cv_text(
+            file_bytes, attachment.filename
+        )
         if skip_reason:
             file_path.unlink(missing_ok=True)
             return "skipped", skip_reason, None
 
         match: PositionMatch | None = None
+        match_source = "none"
         if routing_context is not None:
             match = match_email_to_position(
                 attachment.subject,
@@ -153,6 +172,17 @@ async def _process_attachment(
                 routing_context.active_positions,
                 board_name_to_id=routing_context.board_name_to_id,
             )
+            if match and match.board_id:
+                match_source = "email"
+            elif cv_text:
+                match = match_cv_to_position(
+                    cv_text,
+                    routing_context.active_positions,
+                    board_name_to_id=routing_context.board_name_to_id,
+                    email_subject=attachment.subject,
+                )
+                if match and match.board_id:
+                    match_source = "cv"
 
         if match and match.board_id:
             job_requirements = await resolve_job_requirements_for_match(match)
@@ -164,7 +194,12 @@ async def _process_attachment(
                 job_requirements=job_requirements,
                 reject_low_confidence_no_identity=True,
             )
-            route_detail = _routing_detail(attachment, match, routed=True)
+            route_detail = _routing_detail(
+                attachment,
+                match,
+                routed=True,
+                match_source=match_source,
+            )
         else:
             result = await process_cv_bytes(
                 file_bytes,
@@ -173,7 +208,12 @@ async def _process_attachment(
                 sync_to_hub=False,
                 reject_low_confidence_no_identity=True,
             )
-            route_detail = _routing_detail(attachment, match, routed=False)
+            route_detail = _routing_detail(
+                attachment,
+                match,
+                routed=False,
+                match_source="none",
+            )
 
         file_path.unlink(missing_ok=True)
         _record_processed(processed_state, dedup_key, now=now)

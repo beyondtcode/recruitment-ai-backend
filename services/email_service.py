@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import html as html_lib
 import logging
 import os
 import re
@@ -21,11 +22,18 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 TEMP_CV_DIR = _BACKEND_ROOT / "temp_received_cvs"
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 MIN_ATTACHMENT_BYTES = 2048
+BODY_SNIPPET_MAX_CHARS = 2000
 
 _DENYLISTED_FILENAME_RE = re.compile(
     r"(image\d*|logo|signature|banner|spacer|pixel|icon|footer|header)",
     re.IGNORECASE,
 )
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
+_HTML_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -68,8 +76,21 @@ def _attachment_reject_reason(filename: str, payload: bytes) -> str | None:
     return None
 
 
-def _body_snippet_for(msg, *, max_chars: int = 500) -> str:
+def html_to_plain_text(html: str) -> str:
+    """Convert HTML email body to collapsed plain text for position matching."""
+    if not html or not html.strip():
+        return ""
+    cleaned = _HTML_SCRIPT_STYLE_RE.sub(" ", html)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    cleaned = html_lib.unescape(cleaned)
+    return _WHITESPACE_RE.sub(" ", cleaned).strip()
+
+
+def _body_snippet_for(msg, *, max_chars: int = BODY_SNIPPET_MAX_CHARS) -> str:
     text = (getattr(msg, "text", None) or "").strip()
+    if not text:
+        html = getattr(msg, "html", None) or ""
+        text = html_to_plain_text(html)
     if not text:
         return ""
     return text[:max_chars]

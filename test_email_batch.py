@@ -163,8 +163,8 @@ class TestProcessEmailCvBatch(unittest.IsolatedAsyncioTestCase):
                         new_callable=AsyncMock,
                         return_value=RoutingContext(active_positions=(), board_name_to_id={}),
                     ), patch(
-                        "services.email_batch._validate_cv_text",
-                        return_value="not_cv_content",
+                        "services.email_batch._extract_and_validate_cv_text",
+                        return_value=("not_cv_content", None),
                     ), patch(
                         "services.email_batch.process_cv_bytes",
                         new_callable=AsyncMock,
@@ -202,10 +202,13 @@ class TestProcessEmailCvBatch(unittest.IsolatedAsyncioTestCase):
                         new_callable=AsyncMock,
                         return_value=RoutingContext(active_positions=(), board_name_to_id={}),
                     ), patch(
-                        "services.email_batch._validate_cv_text",
-                        return_value=None,
+                        "services.email_batch._extract_and_validate_cv_text",
+                        return_value=(None, "John Doe experience skills education " * 20),
                     ), patch(
                         "services.email_batch.match_email_to_position",
+                        return_value=None,
+                    ), patch(
+                        "services.email_batch.match_cv_to_position",
                         return_value=None,
                     ), patch(
                         "services.email_batch.get_main_hub_board_id",
@@ -220,6 +223,7 @@ class TestProcessEmailCvBatch(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(summary["created_count"], 1)
                     self.assertEqual(summary["main_hub_only_count"], 1)
                     self.assertEqual(summary["error_count"], 0)
+                    self.assertEqual(summary["routing"][0]["match_source"], "none")
                     mock_process.assert_called_once()
                     kwargs = mock_process.await_args.kwargs
                     self.assertFalse(kwargs["sync_to_hub"])
@@ -272,8 +276,8 @@ class TestProcessEmailCvBatch(unittest.IsolatedAsyncioTestCase):
                         new_callable=AsyncMock,
                         return_value=routing_context,
                     ), patch(
-                        "services.email_batch._validate_cv_text",
-                        return_value=None,
+                        "services.email_batch._extract_and_validate_cv_text",
+                        return_value=(None, "John Doe CTO experience skills education " * 10),
                     ), patch(
                         "services.email_batch.match_email_to_position",
                         return_value=match,
@@ -290,12 +294,81 @@ class TestProcessEmailCvBatch(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(summary["created_count"], 1)
                     self.assertEqual(summary["routed_to_job_board_count"], 1)
+                    self.assertEqual(summary["routing"][0]["match_source"], "email")
                     mock_process.assert_called_once()
                     kwargs = mock_process.await_args.kwargs
                     self.assertEqual(kwargs["board_id"], "5099999999")
                     self.assertTrue(kwargs["sync_to_hub"])
                     self.assertEqual(kwargs["job_requirements"], "CTO requirements")
 
+    async def test_routes_via_cv_fallback_when_email_misses(self):
+        with patch("services.email_batch._email_credentials_configured", return_value=True):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                state_file = tmp_path / ".processed_attachments.json"
+                with patch("services.email_batch.PROCESSED_STATE_FILE", state_file), patch(
+                    "services.email_batch.TEMP_CV_DIR", tmp_path
+                ):
+                    attachment = CvEmailAttachment(
+                        path=str(tmp_path / "cv.pdf"),
+                        message_id="<msg-5@example.com>",
+                        filename="cv.pdf",
+                        sha256="mno345",
+                        size_bytes=5000,
+                        subject="קורות חיים",
+                    )
+                    Path(attachment.path).write_bytes(PDF_HEADER)
 
-if __name__ == "__main__":
-    unittest.main()
+                    position = ActivePosition(
+                        item_id="pos-1",
+                        item_name="CTO",
+                        requirements_text="",
+                        recruiter_people_text="",
+                        updated_at="2026-07-01T00:00:00Z",
+                        board_id="5099999999",
+                        board_name="CTO",
+                    )
+                    routing_context = RoutingContext(
+                        active_positions=(position,),
+                        board_name_to_id={"cto": "5099999999"},
+                    )
+                    match = PositionMatch(
+                        position=position,
+                        board_id="5099999999",
+                        score=90,
+                        matched_hint="CTO",
+                    )
+
+                    with patch(
+                        "services.email_batch.fetch_cv_attachments",
+                        return_value=[attachment],
+                    ), patch(
+                        "services.email_batch.load_routing_context",
+                        new_callable=AsyncMock,
+                        return_value=routing_context,
+                    ), patch(
+                        "services.email_batch._extract_and_validate_cv_text",
+                        return_value=(None, "Seeking CTO role experience skills education " * 10),
+                    ), patch(
+                        "services.email_batch.match_email_to_position",
+                        return_value=None,
+                    ), patch(
+                        "services.email_batch.match_cv_to_position",
+                        return_value=match,
+                    ) as mock_cv_match, patch(
+                        "services.email_batch.resolve_job_requirements_for_match",
+                        new_callable=AsyncMock,
+                        return_value=None,
+                    ), patch(
+                        "services.email_batch.process_cv_bytes",
+                        new_callable=AsyncMock,
+                        return_value=UpsertResult(item_id="789", created=True),
+                    ) as mock_process:
+                        summary = await process_email_cv_batch()
+
+                    self.assertEqual(summary["routed_to_job_board_count"], 1)
+                    self.assertEqual(summary["routing"][0]["match_source"], "cv")
+                    mock_cv_match.assert_called_once()
+                    mock_process.assert_called_once()
+                    self.assertEqual(mock_process.await_args.kwargs["board_id"], "5099999999")
+                    self.assertTrue(mock_process.await_args.kwargs["sync_to_hub"])

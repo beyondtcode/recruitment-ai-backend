@@ -33,10 +33,41 @@ POSITION_REQUIREMENTS_COLUMN_ID = "long_text_mm4mzfzg"
 POSITION_RECRUITER_COLUMN_ID = "person"
 ACTIVE_RECRUITING_STATUS_LABEL = "גיוס פעיל"
 MATCH_SCORE_THRESHOLD = 60
+CV_MATCH_TEXT_MAX_CHARS = 8000
 
+# Monday position-request item name -> job-board display name
 POSITION_NAME_ALIASES: dict[str, str] = {
     "משרה עבור עופר": "משרה לעופר",
 }
+
+# Job-board / inbox title phrases -> Monday position-request item name
+JOB_TITLE_ALIASES: dict[str, str] = {
+    "full stack microsoft developer": "משרה עבור עופר",
+    "full-stack microsoft developer": "משרה עבור עופר",
+    "technology business lead": "Technology Businesses Lead",
+    "technology businesses lead": "Technology Businesses Lead",
+}
+
+_TOKEN_STOPWORDS = frozenset(
+    {
+        "משרה",
+        "לתפקיד",
+        "עבור",
+        "the",
+        "and",
+        "for",
+        "with",
+        "developer",
+        "engineer",
+        "manager",
+        "lead",
+        "senior",
+        "junior",
+        "full",
+        "stack",
+        "fullstack",
+    }
+)
 
 _ACTIVE_POSITIONS_QUERY = """
 query ($boardId: [ID!]!, $limit: Int!) {
@@ -74,6 +105,10 @@ query ($limit: Int!, $page: Int!) {
 
 _DRUSHIM_SUBJECT_RE = re.compile(
     r'קו["\u05f4]ח:\s*(.+?)\s*\|',
+    re.IGNORECASE,
+)
+_ALLJOBS_SUBJECT_RE = re.compile(
+    r"(?:מועמד(?:ות)?|CV|Resume)\s+(?:for|ל(?:תפקיד|משרת)?)\s*[-:]?\s*(.+)",
     re.IGNORECASE,
 )
 _HEBREW_APPLICATION_RE = re.compile(
@@ -353,6 +388,7 @@ def extract_position_hint(subject: str, body_snippet: str = "") -> str | None:
         _HEBREW_POSITION_RE,
         _HEBREW_FOR_ROLE_RE,
         _ENGLISH_FOR_ROLE_RE,
+        _ALLJOBS_SUBJECT_RE,
     ):
         match = pattern.search(subject) or pattern.search(combined)
         if match:
@@ -372,7 +408,39 @@ def extract_position_hint(subject: str, body_snippet: str = "") -> str | None:
 
 def _token_set(text: str) -> set[str]:
     normalized = normalize_position_name(text)
-    return {token for token in normalized.split() if len(token) > 1}
+    return {
+        token
+        for token in normalized.split()
+        if len(token) > 1 and token not in _TOKEN_STOPWORDS
+    }
+
+
+def _resolve_job_title_alias(hint: str) -> str | None:
+    """Map a job-board title phrase to a Monday position-request item name."""
+    normalized = normalize_position_name(hint)
+    if not normalized:
+        return None
+    for alias_key, position_name in JOB_TITLE_ALIASES.items():
+        alias_normalized = normalize_position_name(alias_key)
+        if not alias_normalized:
+            continue
+        if (
+            normalized == alias_normalized
+            or normalized in alias_normalized
+            or alias_normalized in normalized
+        ):
+            return position_name
+    return None
+
+
+def _position_name_candidates(position: ActivePosition) -> list[str]:
+    candidates = [position.item_name]
+    if position.board_name:
+        candidates.append(position.board_name)
+    alias = POSITION_NAME_ALIASES.get(position.item_name)
+    if alias:
+        candidates.append(alias)
+    return candidates
 
 
 def _score_match(hint: str, position: ActivePosition) -> int:
@@ -380,14 +448,19 @@ def _score_match(hint: str, position: ActivePosition) -> int:
     if not normalized_hint:
         return 0
 
-    name_candidates = [position.item_name]
-    if position.board_name:
-        name_candidates.append(position.board_name)
-    alias = POSITION_NAME_ALIASES.get(position.item_name)
-    if alias:
-        name_candidates.append(alias)
-
     best = 0
+    aliased_position = _resolve_job_title_alias(hint)
+    if aliased_position:
+        if normalize_position_name(aliased_position) == normalize_position_name(
+            position.item_name
+        ):
+            best = max(best, 100)
+        elif normalize_position_name(aliased_position) == normalize_position_name(
+            position.board_name or ""
+        ):
+            best = max(best, 100)
+
+    name_candidates = _position_name_candidates(position)
     for candidate in name_candidates:
         normalized_candidate = normalize_position_name(candidate)
         if not normalized_candidate:
@@ -413,27 +486,41 @@ def _score_match(hint: str, position: ActivePosition) -> int:
     return best
 
 
-def match_email_to_position(
-    subject: str,
-    body_snippet: str,
+def match_text_to_position(
+    primary_text: str,
+    secondary_text: str,
     active_positions: tuple[ActivePosition, ...] | list[ActivePosition],
     *,
     board_name_to_id: dict[str, str] | None = None,
+    extra_hints: list[str] | None = None,
 ) -> PositionMatch | None:
     """
-    Match an email to an active position and its job board.
+    Match free text (email subject/body or CV) to an active position board.
 
     Returns None when no confident match is found (caller should use Main Hub).
     """
+    del board_name_to_id  # reserved for callers; board_id comes from ActivePosition
     if not active_positions:
         return None
 
+    primary_text = (primary_text or "").strip()
+    secondary_text = (secondary_text or "").strip()
+
     hints: list[str] = []
-    extracted = extract_position_hint(subject, body_snippet)
+    extracted = extract_position_hint(primary_text, secondary_text)
     if extracted:
         hints.append(extracted)
-    if subject.strip():
-        hints.append(subject.strip())
+    if primary_text:
+        hints.append(primary_text)
+    if secondary_text and secondary_text != primary_text:
+        # Prefer shorter secondary snippets as whole-text hints for email bodies;
+        # for long CV text, rely on extracted hints + primary only.
+        if len(secondary_text) <= 500:
+            hints.append(secondary_text)
+    for hint in extra_hints or []:
+        cleaned = (hint or "").strip()
+        if cleaned and cleaned not in hints:
+            hints.append(cleaned)
 
     best_match: PositionMatch | None = None
     for hint in hints:
@@ -458,15 +545,72 @@ def match_email_to_position(
                 if position.updated_at > best_match.position.updated_at:
                     best_match = candidate
 
-    if best_match:
+    return best_match
+
+
+def match_email_to_position(
+    subject: str,
+    body_snippet: str,
+    active_positions: tuple[ActivePosition, ...] | list[ActivePosition],
+    *,
+    board_name_to_id: dict[str, str] | None = None,
+) -> PositionMatch | None:
+    """
+    Match an email to an active position and its job board.
+
+    Returns None when no confident match is found (caller should use Main Hub).
+    """
+    match = match_text_to_position(
+        subject,
+        body_snippet,
+        active_positions,
+        board_name_to_id=board_name_to_id,
+    )
+    if match:
         logger.info(
             "Matched email subject %r to position %r (board %s, score %d)",
             subject,
-            best_match.position.item_name,
-            best_match.board_id,
-            best_match.score,
+            match.position.item_name,
+            match.board_id,
+            match.score,
         )
-    return best_match
+    return match
+
+
+def match_cv_to_position(
+    cv_text: str,
+    active_positions: tuple[ActivePosition, ...] | list[ActivePosition],
+    *,
+    board_name_to_id: dict[str, str] | None = None,
+    email_subject: str = "",
+) -> PositionMatch | None:
+    """
+    Match CV plain text to an active position when email heuristics miss.
+
+    Uses the same scoring as email matching. Truncates long CV text.
+    """
+    text = (cv_text or "").strip()
+    if not text:
+        return None
+    if len(text) > CV_MATCH_TEXT_MAX_CHARS:
+        text = text[:CV_MATCH_TEXT_MAX_CHARS]
+
+    match = match_text_to_position(
+        text,
+        "",
+        active_positions,
+        board_name_to_id=board_name_to_id,
+        extra_hints=[email_subject] if email_subject.strip() else None,
+    )
+    if match:
+        logger.info(
+            "Matched CV text to position %r (board %s, score %d, hint %r)",
+            match.position.item_name,
+            match.board_id,
+            match.score,
+            match.matched_hint[:80],
+        )
+    return match
 
 
 async def resolve_job_requirements_for_match(match: PositionMatch) -> str | None:

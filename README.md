@@ -98,6 +98,7 @@ This starts FastAPI with:
 
 - CV webhook at `POST /monday-webhook`
 - Job-fit webhook at `POST /monday-job-fit-webhook` (job boards only)
+- Exam → Hub webhook at `POST /monday-exam-webhook` (מבחנים)
 - CRM webhook at `POST /nodetaker-webhook`
 - A **morning briefing cron** at 07:00 Asia/Jerusalem (in-process; requires the server to be awake)
 - A **daily email CV batch** at 08:00 Asia/Jerusalem (in-process; scans IMAP and upserts to Main Hub)
@@ -145,6 +146,13 @@ Create a `.env` file. Variables are grouped by which system needs them.
 | `MONDAY_FILE_COLUMN_ID` | No       | Column ID for CV file uploads (default: `file_mm3gnkmj`) |
 | `MONDAY_GROUP_ID`       | No       | Group for new items (default: `topics`)                  |
 
+### Exam board → Hub (`POST /monday-exam-webhook`)
+
+| Variable                                  | Required | Purpose                                                                 |
+| ----------------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `MONDAY_EXAM_BOARD_ID`                    | No       | מבחנים board ID (default: `5097679903`)                                 |
+| `MONDAY_EXAM_TO_HUB_RELATION_COLUMN_ID`   | No       | Exam Connect → Hub (default: `board_relation_mm3xpjrx`)                 |
+| `MONDAY_HUB_TO_EXAM_RELATION_COLUMN_ID`   | No       | Hub Connect → Exam (default: `board_relation_mm3xds1f`)                 |
 
 ### Email ingestion (scheduled job + CLI)
 
@@ -199,6 +207,7 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 | `GET`  | `/health`            | Liveness check — returns `{"status": "ok"}`                       |
 | `POST` | `/monday-webhook`          | Monday.com webhook for CV processing                                 |
 | `POST` | `/monday-job-fit-webhook`  | Monday.com webhook for job-fit scoring on job boards (no Hub sync)   |
+| `POST` | `/monday-exam-webhook`     | Exam board (מבחנים) → Hub upsert + bidirectional Connect links       |
 | `POST` | `/nodetaker-webhook`       | NodeTaker webhook for meeting → CRM                                  |
 | `GET`  | `/test-fetch-sarah`  | **Dev only** — manually fetch a test meeting and run CRM pipeline |
 
@@ -232,6 +241,21 @@ Flow:
 4. Download the CV → Claude job-fit analysis → update the **source job-board item** only (`sync_to_hub=False`).
 
 Point a Monday automation on job boards at this URL so scoring is independent of hub CV ingest.
+
+### `POST /monday-exam-webhook`
+
+Triggered when an item is created on the **מבחנים** (Exam) board (`MONDAY_EXAM_BOARD_ID`, default `5097679903`). Same Monday payload shapes as `/monday-webhook` (`create_item` / `create_pulse`, optional file-column change, or custom-app `inputFields`).
+
+Flow:
+
+1. Respond immediately with `{"status": "success"}` (work runs in the background).
+2. Ignore boards other than the Exam board.
+3. Read name / email / phone and context fields from the exam item.
+4. If a CV file is attached, Claude-extract and upsert the Main Hub; otherwise upsert from exam fields only (no resume required).
+5. Fold מקור מועמד / משרה / מסלול נבחן / exam notes into Hub הערות (`long_text_mm3g3yhw`).
+6. Set Connect columns both ways: Exam `board_relation_mm3xpjrx` ↔ Hub `board_relation_mm3xds1f`.
+
+Point a Monday automation on מבחנים “item created” at `https://api.beyondtcode.com/monday-exam-webhook`.
 
 ### `POST /nodetaker-webhook`
 
@@ -337,6 +361,7 @@ recruitment-ai-backend/
 ├── services/
 │   ├── ai_service.py       # Claude CV extraction + validation + sanitizers
 │   ├── cv_pipeline.py      # Shared CV flow used by email, webhook, and tests
+│   ├── exam_pipeline.py    # Exam board → Hub upsert + Connect links
 │   ├── email_batch.py      # Daily email CV batch orchestration, validation, dedup
 │   ├── email_service.py    # IMAP: fetch PDF/DOCX attachments (all messages in window)
 │   └── monday_service.py   # Monday GraphQL: upsert candidates, column mapping, file upload
@@ -455,6 +480,7 @@ pytest
 | `test_monday_cv_file.py`        | Downloading CV files from Monday items                                                                  |
 | `test_monday_upsert.py`         | Candidate upsert logic and column mapping                                                               |
 | `test_webhook.py`               | Monday CV webhook parsing                                                                               |
+| `test_exam_webhook.py`          | Exam → Hub webhook + no-CV field mapping / link scheduling                                              |
 | `test_connection.py`            | Quick Monday API connectivity check                                                                     |
 
 
@@ -472,6 +498,7 @@ Point Monday webhooks at:
 
 - CV processing → `https://<your-host>/monday-webhook`
 - Job-fit scoring (job boards) → `https://<your-host>/monday-job-fit-webhook`
+- Exam → Hub candidate sync → `https://<your-host>/monday-exam-webhook`
 - NodeTaker meetings → `https://<your-host>/nodetaker-webhook`
 
 ---

@@ -29,6 +29,7 @@ from routers.leads import router as leads_router
 from routers.matcher import router as matcher_router
 from services.cv_pipeline import run_job_fit_pipeline_sync, run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
+from services.exam_pipeline import process_exam_to_hub_sync
 from services.status_email import send_weekly_status_email
 
 load_dotenv()
@@ -248,6 +249,22 @@ def _schedule_job_fit_pipeline(
     return {"status": "success"}
 
 
+def _schedule_exam_pipeline(
+    background_tasks: BackgroundTasks,
+    item_id: str,
+    board_id: str,
+    trigger_uuid: object = None,
+) -> dict[str, str]:
+    logger.info(
+        "Monday exam→hub webhook accepted: item_id=%s board_id=%s trigger=%s",
+        item_id,
+        board_id,
+        trigger_uuid,
+    )
+    background_tasks.add_task(process_exam_to_hub_sync, item_id, board_id)
+    return {"status": "success"}
+
+
 def _handle_monday_item_webhook(
     body: dict[str, Any],
     background_tasks: BackgroundTasks,
@@ -389,4 +406,28 @@ async def monday_job_fit_webhook(
         body,
         background_tasks,
         schedule=_schedule_job_fit_pipeline,
+    )
+
+
+@app.post("/monday-exam-webhook")
+async def monday_exam_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Upsert Main Hub from מבחנים and set bidirectional Connect links.
+
+    Point a Monday automation on the Exam board (item created) at this URL.
+    When the exam item has no CV, name/email/phone plus folded context are used.
+    """
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception as exc:
+        logger.warning("Monday exam webhook: invalid JSON body: %s", exc)
+        return JSONResponse(status_code=400, content={"status": "error", "detail": "Invalid JSON"})
+
+    logger.info("Exam webhook raw body received: %s", body)
+    return _handle_monday_item_webhook(
+        body,
+        background_tasks,
+        schedule=_schedule_exam_pipeline,
     )

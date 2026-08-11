@@ -64,5 +64,82 @@ class ProcessCvBytesConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(os.path.exists(path))
 
 
+class ProcessMondayJobFitWebhookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_main_hub_board(self):
+        with (
+            patch.object(cv_pipeline, "is_job_board", return_value=False),
+            patch.object(
+                cv_pipeline,
+                "fetch_board_job_requirements",
+                new_callable=AsyncMock,
+            ) as mock_reqs,
+            patch.object(
+                cv_pipeline,
+                "get_item_cv_file_url",
+                new_callable=AsyncMock,
+            ) as mock_file,
+            patch.object(cv_pipeline, "process_cv_bytes", new_callable=AsyncMock) as mock_process,
+        ):
+            await cv_pipeline.process_monday_job_fit_webhook("111", "5096673346")
+
+        mock_reqs.assert_not_awaited()
+        mock_file.assert_not_awaited()
+        mock_process.assert_not_awaited()
+
+    async def test_skips_when_job_requirements_missing(self):
+        with (
+            patch.object(cv_pipeline, "is_job_board", return_value=True),
+            patch.object(
+                cv_pipeline,
+                "fetch_board_job_requirements",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                cv_pipeline,
+                "get_item_cv_file_url",
+                new_callable=AsyncMock,
+            ) as mock_file,
+            patch.object(cv_pipeline, "process_cv_bytes", new_callable=AsyncMock) as mock_process,
+        ):
+            await cv_pipeline.process_monday_job_fit_webhook("111", "5098534551")
+
+        mock_file.assert_not_awaited()
+        mock_process.assert_not_awaited()
+
+    async def test_scores_job_board_without_hub_sync(self):
+        with (
+            patch.object(cv_pipeline, "is_job_board", return_value=True),
+            patch.object(
+                cv_pipeline,
+                "fetch_board_job_requirements",
+                new_callable=AsyncMock,
+                return_value="Must know Python",
+            ),
+            patch.object(
+                cv_pipeline,
+                "get_item_cv_file_url",
+                new_callable=AsyncMock,
+                return_value=("https://example.com/cv.pdf", "cv.pdf"),
+            ),
+            patch.object(
+                cv_pipeline,
+                "download_cv_from_url",
+                new_callable=AsyncMock,
+                return_value=b"%PDF-1.4",
+            ),
+            patch.object(cv_pipeline, "process_cv_bytes", new_callable=AsyncMock) as mock_process,
+        ):
+            mock_process.return_value = cv_pipeline.UpsertResult(item_id="111", created=False)
+            await cv_pipeline.process_monday_job_fit_webhook("111", "5098534551")
+
+        mock_process.assert_awaited_once()
+        kwargs = mock_process.await_args.kwargs
+        self.assertEqual(kwargs["board_id"], "5098534551")
+        self.assertEqual(kwargs["source_item_id"], "111")
+        self.assertEqual(kwargs["job_requirements"], "Must know Python")
+        self.assertFalse(kwargs["sync_to_hub"])
+
+
 if __name__ == "__main__":
     unittest.main()

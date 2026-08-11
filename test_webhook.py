@@ -164,5 +164,59 @@ class MondayWebhookTests(unittest.TestCase):
         self.assertEqual(response.json(), {"status": "ignored"})
 
 
+class MondayJobFitWebhookTests(unittest.TestCase):
+    def test_challenge_echo(self):
+        response = client.post(
+            "/monday-job-fit-webhook",
+            json={"challenge": "job-fit-challenge"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"challenge": "job-fit-challenge"})
+
+    @patch("app.run_job_fit_pipeline_sync")
+    def test_create_item_schedules_job_fit_pipeline(self, mock_pipeline):
+        payload = {
+            "event": {
+                "type": "create_item",
+                "boardId": 9876543210,
+                "pulseId": 1112223333,
+                "triggerUuid": "job-fit-uuid",
+            }
+        }
+        response = client.post("/monday-job-fit-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("1112223333", "9876543210")
+
+    @patch("app.run_job_fit_pipeline_sync")
+    def test_custom_app_schedules_job_fit_pipeline(self, mock_pipeline):
+        payload = {
+            "payload": {
+                "blockKind": "action",
+                "inputFields": {
+                    "itemId": 5556667777,
+                    "boardId": 5098534551,
+                },
+            },
+            "runtimeMetadata": {"triggerUuid": "custom-job-fit"},
+        }
+        response = client.post("/monday-job-fit-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        mock_pipeline.assert_called_once_with("5556667777", "5098534551")
+
+    def test_ignores_unsupported_events(self):
+        payload = {
+            "event": {
+                "type": "delete_pulse",
+                "boardId": 123,
+                "pulseId": 456,
+            }
+        }
+        response = client.post("/monday-job-fit-webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ignored"})
+
+
 if __name__ == "__main__":
     unittest.main()

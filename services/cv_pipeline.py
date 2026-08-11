@@ -191,6 +191,53 @@ async def process_monday_webhook(item_id: str, board_id: str) -> None:
     )
 
 
+async def process_monday_job_fit_webhook(item_id: str, board_id: str) -> None:
+    """Score a candidate against דרישות משרה on a job board only (no Main Hub sync).
+
+    Intended for a dedicated Monday automation on per-job boards so hub ingest
+    via ``/monday-webhook`` can complete independently of job-fit scoring.
+    """
+    logger.info(
+        "Processing Monday job-fit webhook: item_id=%s board_id=%s",
+        item_id,
+        board_id,
+    )
+
+    if not is_job_board(board_id):
+        logger.info(
+            "Job-fit webhook ignored: board %s is the Main Hub (job boards only)",
+            board_id,
+        )
+        return
+
+    job_requirements = await fetch_board_job_requirements(board_id)
+    if not job_requirements:
+        logger.error(
+            "Job-fit webhook skipped: no דרישות משרה on board %s for item %s",
+            board_id,
+            item_id,
+        )
+        return
+
+    logger.info(
+        "Loaded job requirements (%d chars) for job-fit on board %s",
+        len(job_requirements),
+        board_id,
+    )
+
+    url, filename = await get_item_cv_file_url(item_id, board_id)
+    file_bytes = await download_cv_from_url(url)
+
+    await process_cv_bytes(
+        file_bytes,
+        filename,
+        board_id=board_id,
+        sync_to_hub=False,
+        source_item_id=item_id,
+        job_requirements=job_requirements,
+    )
+
+
 def _run_async_from_sync(coro) -> None:
     """Run *coro* from sync code whether or not an event loop is already running."""
     try:
@@ -229,6 +276,27 @@ def run_webhook_pipeline_sync(item_id: str, board_id: str) -> None:
     except Exception as exc:
         logger.exception(
             "Webhook pipeline failed for item %s on board %s: %s",
+            item_id,
+            board_id,
+            exc,
+        )
+
+
+def run_job_fit_pipeline_sync(item_id: str, board_id: str) -> None:
+    """Sync entry point for the dedicated job-fit Monday webhook."""
+    try:
+        _run_async_from_sync(process_monday_job_fit_webhook(item_id, board_id))
+    except ValidationError as exc:
+        logger.error(
+            "Job-fit validation failed for Monday item %s on board %s: %s",
+            item_id,
+            board_id,
+            exc,
+            exc_info=True,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Job-fit pipeline failed for item %s on board %s: %s",
             item_id,
             board_id,
             exc,

@@ -97,6 +97,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 This starts FastAPI with:
 
 - CV webhook at `POST /monday-webhook`
+- Job-fit webhook at `POST /monday-job-fit-webhook` (job boards only)
 - CRM webhook at `POST /nodetaker-webhook`
 - A **morning briefing cron** at 07:00 Asia/Jerusalem (in-process; requires the server to be awake)
 - A **daily email CV batch** at 08:00 Asia/Jerusalem (in-process; scans IMAP and upserts to Main Hub)
@@ -196,8 +197,9 @@ Required for the **08:00 daily email CV batch** in `app.py` and for manual runs 
 | Method | Path                 | Purpose                                                           |
 | ------ | -------------------- | ----------------------------------------------------------------- |
 | `GET`  | `/health`            | Liveness check — returns `{"status": "ok"}`                       |
-| `POST` | `/monday-webhook`    | Monday.com webhook for CV processing                              |
-| `POST` | `/nodetaker-webhook` | NodeTaker webhook for meeting → CRM                               |
+| `POST` | `/monday-webhook`          | Monday.com webhook for CV processing                                 |
+| `POST` | `/monday-job-fit-webhook`  | Monday.com webhook for job-fit scoring on job boards (no Hub sync)   |
+| `POST` | `/nodetaker-webhook`       | NodeTaker webhook for meeting → CRM                                  |
 | `GET`  | `/test-fetch-sarah`  | **Dev only** — manually fetch a test meeting and run CRM pipeline |
 
 
@@ -214,8 +216,22 @@ Flow:
 2. Download the CV file from the Monday item.
 3. Extract text → send to Claude → upsert candidate fields on the source board.
 4. If the source board is not the Main Hub, also sync to the Main Hub board.
+5. On job boards, fetch דרישות משרה and write `job_fit_score` / `job_fit_reasoning` when applicable.
 
 Monday URL verification: if the body contains `"challenge"`, the server echoes it back.
+
+### `POST /monday-job-fit-webhook`
+
+Dedicated job-fit path for **per-job boards** (not Main Hub). Same Monday payload shapes as `/monday-webhook` (`create_item` / `create_pulse`, file-column change, or custom-app `inputFields`).
+
+Flow:
+
+1. Respond immediately with `{"status": "success"}` (work runs in the background).
+2. Ignore Main Hub boards.
+3. Require non-empty דרישות משרה on the board; otherwise skip with an error log.
+4. Download the CV → Claude job-fit analysis → update the **source job-board item** only (`sync_to_hub=False`).
+
+Point a Monday automation on job boards at this URL so scoring is independent of hub CV ingest.
 
 ### `POST /nodetaker-webhook`
 
@@ -455,6 +471,7 @@ The project is configured for [Render](https://render.com) via `render.yaml`:
 Point Monday webhooks at:
 
 - CV processing → `https://<your-host>/monday-webhook`
+- Job-fit scoring (job boards) → `https://<your-host>/monday-job-fit-webhook`
 - NodeTaker meetings → `https://<your-host>/nodetaker-webhook`
 
 ---

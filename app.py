@@ -27,7 +27,7 @@ from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
 from routers.leads import router as leads_router
 from routers.matcher import router as matcher_router
-from services.cv_pipeline import run_webhook_pipeline_sync
+from services.cv_pipeline import run_job_fit_pipeline_sync, run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
 from services.status_email import send_weekly_status_email
 
@@ -232,6 +232,68 @@ def _schedule_cv_pipeline(
     return {"status": "success"}
 
 
+def _schedule_job_fit_pipeline(
+    background_tasks: BackgroundTasks,
+    item_id: str,
+    board_id: str,
+    trigger_uuid: object = None,
+) -> dict[str, str]:
+    logger.info(
+        "Monday job-fit webhook accepted: item_id=%s board_id=%s trigger=%s",
+        item_id,
+        board_id,
+        trigger_uuid,
+    )
+    background_tasks.add_task(run_job_fit_pipeline_sync, item_id, board_id)
+    return {"status": "success"}
+
+
+def _handle_monday_item_webhook(
+    body: dict[str, Any],
+    background_tasks: BackgroundTasks,
+    *,
+    schedule,
+) -> JSONResponse:
+    """Shared Monday challenge / custom-app / event parsing for CV webhooks."""
+    if "challenge" in body:
+        challenge = body["challenge"]
+        logger.info("Monday webhook challenge received")
+        return JSONResponse(content={"challenge": challenge})
+
+    custom_payload = body.get("payload")
+    if isinstance(custom_payload, dict):
+        item_id, board_id, trigger_uuid = _extract_ids_from_custom_app(body)
+        if item_id is not None and board_id is not None:
+            return JSONResponse(
+                content=schedule(background_tasks, item_id, board_id, trigger_uuid)
+            )
+
+    event = body.get("event")
+    if not isinstance(event, dict):
+        logger.info("Monday webhook: no recognized payload or event, ignoring")
+        return JSONResponse(content={"status": "ignored"})
+
+    item_id, board_id, event_matched = _parse_event(event)
+    if not event_matched:
+        return JSONResponse(content={"status": "ignored"})
+
+    if item_id is None or board_id is None:
+        logger.warning("Monday webhook: event missing pulseId or boardId: %s", event)
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": "Missing pulseId or boardId"},
+        )
+
+    return JSONResponse(
+        content=schedule(
+            background_tasks,
+            item_id,
+            board_id,
+            event.get("triggerUuid"),
+        )
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "message": "Server is running"}
@@ -299,36 +361,32 @@ async def monday_webhook(request: Request, background_tasks: BackgroundTasks) ->
         return JSONResponse(status_code=400, content={"status": "error", "detail": "Invalid JSON"})
 
     logger.info(f"Raw body received: {body}")
+    return _handle_monday_item_webhook(
+        body,
+        background_tasks,
+        schedule=_schedule_cv_pipeline,
+    )
 
-    if "challenge" in body:
-        challenge = body["challenge"]
-        logger.info("Monday webhook challenge received")
-        return JSONResponse(content={"challenge": challenge})
 
-    custom_payload = body.get("payload")
-    if isinstance(custom_payload, dict):
-        item_id, board_id, trigger_uuid = _extract_ids_from_custom_app(body)
-        if item_id is not None and board_id is not None:
-            return JSONResponse(
-                content=_schedule_cv_pipeline(background_tasks, item_id, board_id, trigger_uuid)
-            )
+@app.post("/monday-job-fit-webhook")
+async def monday_job_fit_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Score job fit on a per-job Monday board (no Main Hub sync).
 
-    event = body.get("event")
-    if not isinstance(event, dict):
-        logger.info("Monday webhook: no recognized payload or event, ignoring")
-        return JSONResponse(content={"status": "ignored"})
+    Point a Monday automation on job boards at this URL so דרישות משרה
+    scoring runs separately from hub CV ingest via ``/monday-webhook``.
+    """
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception as exc:
+        logger.warning("Monday job-fit webhook: invalid JSON body: %s", exc)
+        return JSONResponse(status_code=400, content={"status": "error", "detail": "Invalid JSON"})
 
-    item_id, board_id, event_matched = _parse_event(event)
-    if not event_matched:
-        return JSONResponse(content={"status": "ignored"})
-
-    if item_id is None or board_id is None:
-        logger.warning("Monday webhook: event missing pulseId or boardId: %s", event)
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "detail": "Missing pulseId or boardId"},
-        )
-
-    return JSONResponse(
-        content=_schedule_cv_pipeline(background_tasks, item_id, board_id, event.get("triggerUuid"))
+    logger.info("Job-fit webhook raw body received: %s", body)
+    return _handle_monday_item_webhook(
+        body,
+        background_tasks,
+        schedule=_schedule_job_fit_pipeline,
     )

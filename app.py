@@ -11,6 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from typing import Any
@@ -25,12 +26,14 @@ from crm_integration.batch import process_morning_briefs, run_daily_notetaker_ba
 from crm_integration.monday_fetcher import ISR_TZ, fetch_meeting_by_participants
 from crm_integration.pipeline import process_nodetaker_webhook
 from crm_integration.routes import router as crm_router
+from routers.invoices import router as invoices_router
 from routers.leads import router as leads_router
 from routers.matcher import router as matcher_router
 from services.cv_pipeline import run_job_fit_pipeline_sync, run_webhook_pipeline_sync
 from services.email_batch import process_email_cv_batch
 from services.exam_pipeline import process_exam_to_hub_sync
 from services.status_email import send_weekly_status_email
+from services.supplier_invoices import trigger_supplier_invoices_batch
 
 load_dotenv()
 
@@ -94,6 +97,66 @@ async def _run_weekly_status_email() -> None:
         logger.exception("Weekly system health-check email failed")
 
 
+async def _run_supplier_invoice_batch() -> None:
+    logger.info("Daily supplier invoice batch started")
+    try:
+        summary = await trigger_supplier_invoices_batch()
+        logger.info(
+            "Daily supplier invoice batch finished: status=%s emails_found=%d "
+            "unique=%d triggered=%d failed=%d",
+            summary.get("status"),
+            summary.get("emails_found", 0),
+            summary.get("unique", summary.get("total", 0)),
+            summary.get("triggered", 0),
+            summary.get("failed", 0),
+        )
+    except Exception:
+        logger.exception("Daily supplier invoice batch failed")
+
+
+def _supplier_invoice_cron_enabled() -> bool:
+    return os.getenv("ENABLE_SUPPLIER_INVOICE_CRON", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _supplier_invoice_cron_hour() -> int:
+    raw = os.getenv("SUPPLIER_INVOICE_CRON_HOUR", "7")
+    try:
+        hour = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid SUPPLIER_INVOICE_CRON_HOUR=%r; using default 7", raw
+        )
+        return 7
+    if not 0 <= hour <= 23:
+        logger.warning(
+            "SUPPLIER_INVOICE_CRON_HOUR=%r out of range; using default 7", raw
+        )
+        return 7
+    return hour
+
+
+def _supplier_invoice_cron_minute() -> int:
+    raw = os.getenv("SUPPLIER_INVOICE_CRON_MINUTE", "30")
+    try:
+        minute = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid SUPPLIER_INVOICE_CRON_MINUTE=%r; using default 30", raw
+        )
+        return 30
+    if not 0 <= minute <= 59:
+        logger.warning(
+            "SUPPLIER_INVOICE_CRON_MINUTE=%r out of range; using default 30", raw
+        )
+        return 30
+    return minute
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone=ISR_TZ)
@@ -127,10 +190,34 @@ async def lifespan(app: FastAPI):
         id="weekly_status_email",
         replace_existing=True,
     )
+    supplier_invoice_cron = _supplier_invoice_cron_enabled()
+    supplier_invoice_hour = _supplier_invoice_cron_hour()
+    supplier_invoice_minute = _supplier_invoice_cron_minute()
+    if supplier_invoice_cron:
+        scheduler.add_job(
+            _run_supplier_invoice_batch,
+            trigger=CronTrigger(
+                hour=supplier_invoice_hour,
+                minute=supplier_invoice_minute,
+                timezone=ISR_TZ,
+            ),
+            id="daily_supplier_invoice_batch",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
     scheduler.start()
+    cron_note = (
+        f", supplier invoices daily at "
+        f"{supplier_invoice_hour:02d}:{supplier_invoice_minute:02d}"
+        if supplier_invoice_cron
+        else ""
+    )
     logger.info(
-        "APScheduler started: notetaker batch at 10:00, morning briefings at 07:00, "
-        "email CV batch at 08:00, weekly status email Sunday 09:00 Asia/Jerusalem"
+        "APScheduler started: notetaker batch at 00:00, morning briefings at 07:00, "
+        "email CV batch at 08:00, weekly status email Sunday 09:00 Asia/Jerusalem%s",
+        cron_note,
     )
     yield
     scheduler.shutdown(wait=False)
@@ -144,6 +231,7 @@ app = FastAPI(
 )
 app.include_router(crm_router)
 app.include_router(leads_router)
+app.include_router(invoices_router)
 app.include_router(matcher_router)
 
 FILE_COLUMN_WEBHOOK_TYPE = "change_column_value"
@@ -314,6 +402,17 @@ def _handle_monday_item_webhook(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "message": "Server is running"}
+
+
+@app.get("/trigger-invoices")
+async def trigger_invoices(background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Manual test hook: run the supplier invoice batch in the background."""
+    logger.info("Manual supplier invoice batch trigger requested")
+    background_tasks.add_task(_run_supplier_invoice_batch)
+    return {
+        "status": "Batch triggered manually",
+        "message": "Check logs for progress",
+    }
 
 
 @app.get("/test-fetch-sarah")

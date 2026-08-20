@@ -146,6 +146,12 @@ class ExamPipelineUnitTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 exam_pipeline,
+                "resolve_existing_hub_item",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                exam_pipeline,
                 "_try_get_exam_cv_file",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -157,7 +163,7 @@ class ExamPipelineUnitTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 exam_pipeline,
-                "upsert_candidate_item",
+                "_upsert_hub_candidate",
                 new_callable=AsyncMock,
                 return_value=("hub-9", True),
             ) as mock_upsert,
@@ -171,8 +177,8 @@ class ExamPipelineUnitTests(unittest.IsolatedAsyncioTestCase):
 
             mock_upsert.assert_awaited_once()
             upsert_kwargs = mock_upsert.await_args.kwargs
-            self.assertEqual(upsert_kwargs["board_id"], HUB_BOARD_ID)
-            self.assertIsNone(upsert_kwargs["cv_file_path"])
+            self.assertEqual(upsert_kwargs["hub_board_id"], HUB_BOARD_ID)
+            self.assertIsNone(upsert_kwargs["existing_hub"])
             candidate = mock_upsert.await_args.args[0]
             self.assertEqual(candidate.email, "dana@example.com")
             self.assertIn("מקור מועמד: Referral", candidate.recruiter_notes or "")
@@ -180,6 +186,69 @@ class ExamPipelineUnitTests(unittest.IsolatedAsyncioTestCase):
             mock_link.assert_awaited_once_with(
                 exam_item_id="exam-1",
                 hub_item_id="hub-9",
+                exam_board_id=EXAM_BOARD_ID,
+                hub_board_id=HUB_BOARD_ID,
+            )
+
+    async def test_process_exam_to_hub_updates_existing_by_email(self):
+        from services.monday_service import FoundItem
+
+        fields = ExamItemFields(
+            item_id="exam-2",
+            name="Dana",
+            email="dana@example.com",
+            phone="0501112233",
+            source="Referral",
+            position="Frontend",
+            track="Junior",
+            notes="Hi",
+            linked_hub_item_id=None,
+        )
+        existing = FoundItem(item_id="hub-existing", name="Dana Cohen")
+        with (
+            patch.object(
+                exam_pipeline,
+                "fetch_exam_item",
+                new_callable=AsyncMock,
+                return_value=fields,
+            ),
+            patch.object(
+                exam_pipeline,
+                "resolve_existing_hub_item",
+                new_callable=AsyncMock,
+                return_value=existing,
+            ),
+            patch.object(
+                exam_pipeline,
+                "_try_get_exam_cv_file",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                exam_pipeline,
+                "get_main_hub_board_id",
+                return_value=HUB_BOARD_ID,
+            ),
+            patch.object(
+                exam_pipeline,
+                "_upsert_hub_candidate",
+                new_callable=AsyncMock,
+                return_value=("hub-existing", False),
+            ) as mock_upsert,
+            patch.object(
+                exam_pipeline,
+                "link_exam_and_hub",
+                new_callable=AsyncMock,
+            ) as mock_link,
+        ):
+            await process_exam_to_hub("exam-2", EXAM_BOARD_ID)
+
+            mock_upsert.assert_awaited_once()
+            upsert_kwargs = mock_upsert.await_args.kwargs
+            self.assertEqual(upsert_kwargs["existing_hub"], existing)
+            mock_link.assert_awaited_once_with(
+                exam_item_id="exam-2",
+                hub_item_id="hub-existing",
                 exam_board_id=EXAM_BOARD_ID,
                 hub_board_id=HUB_BOARD_ID,
             )

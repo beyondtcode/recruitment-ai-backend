@@ -17,13 +17,18 @@ from models.candidate import CandidateSchema
 from services.ai_service import analyze_cv_with_claude, close_async_client
 from services.monday_service import (
     CHANGE_MULTIPLE_COLUMN_VALUES_MUTATION,
+    FoundItem,
     ITEMS_BY_IDS_QUERY,
     ITEM_CV_FILE_SCOPED_QUERY,
+    _fetch_item_brief,
+    find_existing_item_by_email,
     get_main_hub_board_id,
     normalize_email,
     normalize_phone,
     post_graphql,
+    replace_file_on_item,
     resolve_file_column_id,
+    update_candidate_item,
     upsert_candidate_item,
 )
 from utils.file_parser import download_cv_from_url, extract_text_from_file
@@ -302,6 +307,79 @@ async def _try_get_exam_cv_file(
     return None
 
 
+async def resolve_existing_hub_item(
+    fields: ExamItemFields,
+    *,
+    hub_board_id: str,
+) -> FoundItem | None:
+    """Find an existing Main Hub row by exam email before creating a duplicate."""
+    email = normalize_email(fields.email or "")
+    if email:
+        match = await find_existing_item_by_email(email, board_id=hub_board_id)
+        if match is not None:
+            logger.info(
+                "Exam→hub: matched existing hub item %s by email %r",
+                match.item_id,
+                email,
+            )
+            return match
+
+    if fields.linked_hub_item_id:
+        linked = await _fetch_item_brief(
+            fields.linked_hub_item_id,
+            board_id=hub_board_id,
+        )
+        if linked is not None:
+            logger.info(
+                "Exam→hub: using previously linked hub item %s",
+                linked.item_id,
+            )
+            return linked
+
+    return None
+
+
+async def _upsert_hub_candidate(
+    candidate: CandidateSchema,
+    *,
+    hub_board_id: str,
+    existing_hub: FoundItem | None = None,
+    cv_file_path: str | Path | None = None,
+    raw_cv_text: str = "",
+) -> tuple[str, bool]:
+    """Update a resolved hub row or fall back to email/phone upsert."""
+    cv_path = str(cv_file_path) if cv_file_path else None
+
+    if existing_hub is not None:
+        item_id = await update_candidate_item(
+            existing_hub.item_id,
+            candidate,
+            existing_name=existing_hub.name,
+            raw_cv_text=raw_cv_text,
+            board_id=hub_board_id,
+        )
+        if cv_path:
+            file_column_id = await resolve_file_column_id(hub_board_id)
+            await replace_file_on_item(
+                item_id,
+                cv_path,
+                board_id=hub_board_id,
+                column_id=file_column_id,
+            )
+        logger.info(
+            "Exam→hub: updated existing hub item %s (email match)",
+            item_id,
+        )
+        return item_id, False
+
+    return await upsert_candidate_item(
+        candidate,
+        cv_file_path=cv_path,
+        raw_cv_text=raw_cv_text,
+        board_id=hub_board_id,
+    )
+
+
 async def link_exam_and_hub(
     *,
     exam_item_id: str,
@@ -350,6 +428,7 @@ async def _upsert_hub_from_cv(
     file_bytes: bytes,
     filename: str,
     hub_board_id: str,
+    existing_hub: FoundItem | None = None,
 ) -> tuple[str, bool]:
     cv_text = extract_text_from_file(file_bytes, filename)
     candidate = await analyze_cv_with_claude(cv_text)
@@ -374,11 +453,12 @@ async def _upsert_hub_from_cv(
     upload_path = TEMP_CV_DIR / f"{uuid4().hex}_exam_{Path(filename).name}"
     try:
         upload_path.write_bytes(file_bytes)
-        return await upsert_candidate_item(
+        return await _upsert_hub_candidate(
             candidate,
+            hub_board_id=hub_board_id,
+            existing_hub=existing_hub,
             cv_file_path=str(upload_path),
             raw_cv_text=cv_text,
-            board_id=hub_board_id,
         )
     finally:
         upload_path.unlink(missing_ok=True)
@@ -403,6 +483,7 @@ async def process_exam_to_hub(exam_item_id: str, board_id: str) -> None:
 
     fields = await fetch_exam_item(exam_item_id)
     hub_board_id = get_main_hub_board_id()
+    existing_hub = await resolve_existing_hub_item(fields, hub_board_id=hub_board_id)
 
     cv_file = await _try_get_exam_cv_file(exam_item_id, board_id)
     if cv_file is not None:
@@ -413,6 +494,7 @@ async def process_exam_to_hub(exam_item_id: str, board_id: str) -> None:
             file_bytes=file_bytes,
             filename=filename,
             hub_board_id=hub_board_id,
+            existing_hub=existing_hub,
         )
         logger.info(
             "%s hub item %s from exam CV on item %s",
@@ -421,18 +503,11 @@ async def process_exam_to_hub(exam_item_id: str, board_id: str) -> None:
             exam_item_id,
         )
     else:
-        if fields.linked_hub_item_id:
-            logger.info(
-                "Exam item %s already linked to hub %s; refreshing link and upserting fields",
-                exam_item_id,
-                fields.linked_hub_item_id,
-            )
         candidate = candidate_from_exam_fields(fields)
-        hub_item_id, created = await upsert_candidate_item(
+        hub_item_id, created = await _upsert_hub_candidate(
             candidate,
-            cv_file_path=None,
-            raw_cv_text="",
-            board_id=hub_board_id,
+            hub_board_id=hub_board_id,
+            existing_hub=existing_hub,
         )
         logger.info(
             "%s hub item %s from exam fields on item %s (email=%r phone=%r)",

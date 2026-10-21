@@ -31,4 +31,19 @@ DEFAULT_SEARCH_URLS: dict[str, str] = {
     ),
     "Jobnet": "https://www.jobnet.co.il/jobs?subprofid=819",
     "SQ Link": "https://www.sqlink.com/careers/",
+    # AI Builder / AI Automation searches (Track B leads)
+    "LinkedIn AI Builder": (
+        "https://www.linkedin.com/jobs/search?"
+        "keywords=AI%20Builder&location=Israel&f_TPR=r259200"
+    ),
+    "LinkedIn AI Automation": (
+        "https://www.linkedin.com/jobs/search?"
+        "keywords=AI%20Automation&location=Israel&f_TPR=r259200"
+    ),
+    "Drushim AI Builder": (
+        "https://www.drushim.co.il/jobs/search/AI%20Builder/?ssaen=3"
+    ),
+    "JobMaster AI Builder": (
+        "https://www.jobmaster.co.il/jobs/?q=AI+Builder"
+    ),
 }

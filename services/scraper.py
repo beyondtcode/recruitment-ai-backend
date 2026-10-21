@@ -36,7 +36,6 @@ EXCLUDE_KEYWORDS: tuple[str, ...] = (
     "DevOps",
     "Support",
     "תמיכה",
-    "Automation",
     "fashion",
     "textile",
     "apparel",
@@ -73,6 +72,17 @@ KEEP_KEYWORDS: tuple[str, ...] = (
     "פיתוח",
     "תוכנה",
     "בינה מלאכותית",
+    "builder",
+    "automation",
+)
+
+# "Automation" titles are kept only when they are AI-related
+# (e.g. "AI Automation Builder"); plain test/QA automation is dropped.
+_AUTOMATION_RE = re.compile(r"\bautomation\b|אוטומציה", re.IGNORECASE)
+_AI_CONTEXT_RE = re.compile(
+    r"\bai\b|\bllm\b|\bgenai\b|artificial intelligence|machine learning|"
+    r"agent|בינה מלאכותית",
+    re.IGNORECASE,
 )
 
 # Non-tech "product developer" (fashion/textile) — keep only if software context.
@@ -407,6 +417,8 @@ def filter_job_title(title: str) -> bool:
     if not cleaned:
         return False
     if is_excluded_title(cleaned):
+        return False
+    if _AUTOMATION_RE.search(cleaned) and not _AI_CONTEXT_RE.search(cleaned):
         return False
     if is_non_tech_product_developer(cleaned):
         return False

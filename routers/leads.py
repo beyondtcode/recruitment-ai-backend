@@ -92,6 +92,24 @@ async def weekly_file(x_leads_token: str | None = Header(default=None)) -> dict[
     return await lead_agent.weekly(_store())
 
 
+@router.get("/sheet-check")
+async def sheet_check(token: str | None = None) -> dict[str, Any]:
+    """Setup helper: confirms the server can reach the sheet. Pass ?token=LEADS_API_TOKEN."""
+    _check_token(token)
+    store = _store()
+    try:
+        info = store.ping() if hasattr(store, "ping") else {}
+        jobs = store.read(lead_agent.jobs_tab())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Sheet check failed: {exc}") from exc
+    return {
+        "ok": True,
+        "sheet": info.get("name", ""),
+        "jobs_tab_found": jobs is not None,
+        "job_rows": len(jobs.rows) if jobs else 0,
+    }
+
+
 @router.delete("/dedup")
 async def clear_lead_dedup() -> dict[str, int]:
     """Clear the SQLite seen-jobs tables so scrape runs treat all links as new."""

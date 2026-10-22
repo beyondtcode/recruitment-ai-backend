@@ -325,3 +325,64 @@ class AgentRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppsScriptStoreTests(unittest.TestCase):
+    """AppsScriptStore against a fake web app that mirrors scripts/leads_sheet_webapp.gs."""
+
+    def _transport(self, tabs: dict, token: str = "t0k"):
+        import json as _json
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":  # Apps Script answers POST with a redirect
+                body = _json.loads(request.content)
+                if body.get("token") != token:
+                    result = {"error": "unauthorized"}
+                else:
+                    a, tab = body["action"], body.get("tab")
+                    if a == "ping":
+                        result = {"ok": True, "name": "Leads"}
+                    elif a == "read":
+                        result = {"exists": tab in tabs, "values": tabs.get(tab, [])}
+                    elif a == "write":
+                        tabs[tab] = body["values"]
+                        result = {"ok": True}
+                    elif a == "append":
+                        tabs.setdefault(tab, [body["headers"]])
+                        tabs[tab][0] = body["headers"]
+                        tabs[tab].extend(body["rows"])
+                        result = {"ok": True}
+                    else:
+                        result = {"ok": True}
+                handler.last = result
+                return httpx.Response(302, headers={"Location": "https://script.googleusercontent.com/echo"})
+            return httpx.Response(200, json=handler.last)
+
+        return httpx.MockTransport(handler)
+
+    def test_round_trip(self) -> None:
+        from services.lead_sheet import AppsScriptStore, Table
+
+        tabs = {"Sheet1": [["Company Name", "Job Link"], ["Acme", "https://x"]]}
+        store = AppsScriptStore("https://script.google.com/macros/s/X/exec", "t0k", "SHEET",
+                                transport=self._transport(tabs))
+        self.assertEqual(store.ping()["name"], "Leads")
+        self.assertIsNone(store.read("Companies"))
+        table = store.read("Sheet1")
+        self.assertEqual(table.rows, [{"Company Name": "Acme", "Job Link": "https://x"}])
+        table.ensure_headers(["Found Date"])
+        table.rows[0]["Found Date"] = "25/10/2026"
+        store.write("Sheet1", table)
+        self.assertEqual(tabs["Sheet1"][1], ["Acme", "https://x", "25/10/2026"])
+        store.append("Archive", Table(headers=["A", "B"]), [{"A": "1", "B": "2"}])
+        self.assertEqual(tabs["Archive"], [["A", "B"], ["1", "2"]])
+        self.assertTrue(store.url.endswith("/SHEET/edit"))
+
+    def test_bad_token(self) -> None:
+        from services.lead_sheet import AppsScriptStore
+
+        store = AppsScriptStore("https://script.google.com/x", "wrong", "S", transport=self._transport({}))
+        with self.assertRaisesRegex(RuntimeError, "unauthorized"):
+            store.read("Sheet1")

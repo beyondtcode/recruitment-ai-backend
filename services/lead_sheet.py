@@ -1,5 +1,10 @@
 """Google Sheets access for the lead agent.
 
+Two backends:
+  - Apps Script web app (preferred, no Google Cloud needed): see
+    scripts/leads_sheet_webapp.gs; set LEADS_SHEET_WEBAPP_URL + LEADS_SHEET_WEBAPP_TOKEN.
+  - Google service account (gspread): GOOGLE_SERVICE_ACCOUNT_FILE.
+
 Env vars:
   GOOGLE_SERVICE_ACCOUNT_FILE — path to the service-account JSON key
                                 (in Docker: /app/data/google-sa.json)
@@ -269,13 +274,82 @@ class GoogleSheetStore:
         )
 
 
+class AppsScriptStore:
+    """Sheet access through the Apps Script web app in scripts/leads_sheet_webapp.gs.
+
+    Needs no Google Cloud project: the script runs as the sheet owner.
+    """
+
+    def __init__(
+        self, webapp_url: str, token: str, sheet_id: str, *, timeout: float = 120.0, transport=None
+    ) -> None:
+        import httpx
+
+        self._url = webapp_url
+        self._token = token
+        self._client = httpx.Client(timeout=timeout, follow_redirects=True, transport=transport)
+        self.url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+
+    def _call(self, action: str, **payload) -> dict:
+        response = self._client.post(
+            self._url, json={"token": self._token, "action": action, **payload}
+        )
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Apps Script web app did not return JSON — check the deployment "
+                "('Who has access: Anyone') and the URL"
+            ) from exc
+        if data.get("error"):
+            raise RuntimeError(f"Apps Script web app error: {data['error']}")
+        return data
+
+    def ping(self) -> dict:
+        return self._call("ping")
+
+    def read(self, tab: str) -> Table | None:
+        data = self._call("read", tab=tab)
+        if not data.get("exists"):
+            return None
+        return Table.from_values(data.get("values") or [])
+
+    def write(self, tab: str, table: Table, *, reset_colors: bool = False) -> None:
+        self._call("write", tab=tab, values=table.to_values(), reset_colors=reset_colors)
+
+    def append(self, tab: str, table: Table, rows: list[dict[str, str]]) -> None:
+        self._call(
+            "append",
+            tab=tab,
+            headers=list(table.headers),
+            rows=[[r.get(h, "") for h in table.headers] for r in rows],
+        )
+
+    def highlight_rows(self, tab: str, row_numbers: list[int], rgb: tuple[float, float, float]) -> None:
+        if not row_numbers:
+            return
+        color = "#" + "".join(f"{round(c * 255):02x}" for c in rgb)
+        self._call("highlight", tab=tab, rows=list(row_numbers), color=color)
+
+    def set_dropdown(self, tab: str, column: str, values: list[str]) -> None:
+        self._call("dropdown", tab=tab, column=column, list=list(values))
+
+
 def get_sheet_store() -> SheetStore:
+    """Apps Script web app when LEADS_SHEET_WEBAPP_URL is set, else a service account."""
+    sheet_id = (os.environ.get("LEADS_SHEET_ID") or DEFAULT_SHEET_ID).strip()
+    webapp = (os.environ.get("LEADS_SHEET_WEBAPP_URL") or "").strip()
+    if webapp:
+        token = (os.environ.get("LEADS_SHEET_WEBAPP_TOKEN") or "").strip()
+        if not token:
+            raise RuntimeError("LEADS_SHEET_WEBAPP_TOKEN is not set")
+        return AppsScriptStore(webapp, token, sheet_id)
     creds = (os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
     if not creds:
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_FILE is not set")
+        raise RuntimeError("Set LEADS_SHEET_WEBAPP_URL (Apps Script) or GOOGLE_SERVICE_ACCOUNT_FILE")
     if not os.path.exists(creds):
         raise RuntimeError(f"Service account file not found: {creds}")
-    sheet_id = (os.environ.get("LEADS_SHEET_ID") or DEFAULT_SHEET_ID).strip()
     return GoogleSheetStore(sheet_id, creds)
 
 

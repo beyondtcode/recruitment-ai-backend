@@ -558,9 +558,11 @@ Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יי
 
 ### Setup
 
-1. Google Cloud: create a service account, enable the Google Sheets API, download a JSON key, share the sheet with the service-account email as **Editor**. Put the key at `./data/google-sa.json` on the server and set `GOOGLE_SERVICE_ACCOUNT_FILE=/app/data/google-sa.json`.
+1. Sheet access (no Google Cloud needed): in the sheet, Extensions → Apps Script → paste `scripts/leads_sheet_webapp.gs`, set its `TOKEN`, Deploy → Web app (Execute as: Me, Who has access: Anyone). Set `LEADS_SHEET_WEBAPP_URL` and `LEADS_SHEET_WEBAPP_TOKEN`.
+   Alternative: a service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) — often blocked by the org policy `iam.disableServiceAccountKeyCreation`.
 2. Set `TAVILY_API_KEY` (and optionally `SERPER_API_KEY`), `LEADS_API_TOKEN`.
 3. `docker compose up -d --build recruitment-backend`.
+4. Check: `GET /api/leads/sheet-check?token=<LEADS_API_TOKEN>` → `{"ok": true, ...}`.
 
 ### Dedup reset
 

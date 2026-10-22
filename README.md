@@ -4,7 +4,7 @@ A Python backend that connects **Monday.com**, **Claude (Anthropic)**, and optio
 
 1. **CV pipeline** — When a candidate uploads a CV (via email or a Monday form), the server extracts structured profile data with AI and writes it back to Monday boards. Email CVs can be routed to active job boards by subject-line matching.
 2. **CRM meeting pipeline** — When a meeting is recorded (via NodeTaker / Monday Notetaker), the server creates meeting notes on a CRM board, links them to leads, and attaches a Workdoc with the full summary.
-3. **Lead scraping** — Scrapes Israeli job boards (including card snippets), enriches openings with an LLM (track, summary, contact; filters to 100+ companies), and returns Excel-column JSON via HTTP.
+3. **Lead scraping** — Scrapes Israeli job boards (including card snippets), filters blocked companies and hardware roles, classifies openings into 12 categories with an LLM, and returns sheet-ready JSON via HTTP.
 4. **CV Tailoring & Job Matcher** — For n8n: scrapes the same Israeli boards (30-day URL dedup), then scores a candidate against openings with Claude (Wide Funnel), returning threshold-passing matches with CV version pick and Hebrew cover pitch.
 
 All systems share Monday API helpers and run from the same FastAPI app in production.
@@ -304,7 +304,7 @@ If `N8N_INVOICE_WEBHOOK_URL` is unset, the batch logs a warning and skips. See `
 | `POST`   | `/nodetaker-webhook`              | NodeTaker webhook for meeting → CRM                                  |
 | `POST`   | `/general-meeting-rematch-webhook`| Rematch a General Meetings item to a lead by participant emails      |
 | `GET`    | `/api/leads/scrape`               | Scrape one job-board URL and return enriched leads                   |
-| `GET`    | `/api/leads/scrape-all`           | Scrape all supported boards (~3-day window) and combine results      |
+| `GET`    | `/api/leads/scrape-all`           | Run all lead searches (~3-day window), filter, classify, return new leads |
 | `DELETE` | `/api/leads/dedup`                | Clear SQLite seen-jobs table so scrape treats all links as new       |
 | `GET`    | `/api/v1/jobs/scrape-test`        | Manually scrape boards and preview newly seen matcher jobs           |
 | `POST`   | `/api/v1/analyze-match`           | Score one candidate against one job (`MatchAnalysis`)                |
@@ -510,27 +510,39 @@ crm_integration/contact_profile.py — update matched lead (AI profile, last con
 
 ## System 3: Lead scraping
 
-**Goal:** Discover companies hiring for software roles on Israeli job boards, classify them, and expose filtered opportunities over HTTP.
+**Goal:** Find open roles in 12 categories on Israeli job boards, drop blocked companies and hardware roles, and return clean, sheet-ready rows over HTTP (n8n appends them to the leads sheet).
 
 ### Step-by-step
 
 ```
-GET /api/leads/scrape or /scrape-all
+GET /api/leads/scrape-all   (n8n, every 2 days 08:00)
         ↓
-services/scraper.py — Playwright + BeautifulSoup listing scrape (+ card snippet)
+services/job_sources.py — LEAD_SEARCHES (board, label, url), ~3-day window
         ↓
-services/lead_dedup.py — skip already-seen job links (SQLite)
+services/scraper.py — Playwright + BeautifulSoup listing scrape (+ card snippet),
+                      lead title prefilter (services/lead_filters.passes_title_prefilter)
         ↓
-services/enrichment.py — LLM: company_size (filter), track, job_summary, contact_info
+services/lead_dedup.py — skip job links seen before (SQLite, data/seen_leads.db)
         ↓
-JSON list of LeadOpportunity (100+ employee companies, tech roles)
+services/lead_filters.py — blocked companies, hardware roles,
+                           cross-board duplicates (company + title fingerprint)
+        ↓
+services/enrichment.py — LLM: category (one of 12, or none → dropped) + job summary
+        ↓
+JSON list of LeadOpportunity
 ```
 
-Response JSON keys match Excel columns: **Company Name**, **Job Title**, **Job Summary**, **Job Link**, **Contact Info**, **Track**, **Publish Date**. `company_size` is used only to keep 100+ companies. Job Summary and Contact Info are filled from the listing-card snippet (contact defaults to `הגשה דרך הקישור במודעה` when none is found).
+Response keys match the sheet headers: **Company Name**, **Job Title**, **קטגוריה**, **ניסוח לפנייה**, **Job Summary**, **Job Link**, **Publish Date** (DD/MM/YYYY), **תאריך מציאה**, **מקור**.
 
-### Supported sources (`/scrape-all`)
+Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יישום Salesforce, יישום monday.com, AI Builder, AI Workflow Builder, AI Automation Specialist, AI Implementation Specialist, AI Agent Developer. Outreach phrasing per category is in `lead_filters._PHRASING`.
 
-LinkedIn, AllJobs, Drushim, JobMaster, Glassdoor, Jobnet, SQ Link — each with a ~3-day publish window where the site supports it. Failures on one board are logged and do not abort the others.
+Not collected: DevOps/SRE, data science, product, cyber, support, hardware (`hardware, chip design, firmware, קושחה, embedded, משובץ, driver, kernel, BSP` in title or snippet), and the 11 companies in `lead_filters.BLOCKED_COMPANIES` (SQLink is also no longer scraped).
+
+Jobs whose LLM call fails are **not** marked as seen, so the next run retries them. The dedup store lives in `./data` (mounted as a Docker volume) so it survives rebuilds.
+
+### Sources (`/scrape-all`)
+
+LinkedIn, AllJobs, Drushim, JobMaster, Glassdoor, Jobnet — 22 searches covering development, QA/automation, Salesforce/monday.com and AI Builder roles. Failures on one search are logged and do not abort the others. The CV matcher (System 4) keeps its own `DEFAULT_SEARCH_URLS`.
 
 ### Dedup reset
 

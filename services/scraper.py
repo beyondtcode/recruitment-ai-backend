@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -701,12 +701,19 @@ def parse_job_cards(html: str, config: BoardConfig) -> list[dict[str, str]]:
     return jobs
 
 
-def filter_jobs(jobs: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Apply text-based Software/AI keep + exclude-keyword filters."""
+def filter_jobs(
+    jobs: list[dict[str, str]],
+    title_filter: Callable[[str], bool] | None = None,
+) -> list[dict[str, str]]:
+    """Apply text-based Software/AI keep + exclude-keyword filters.
+
+    ``title_filter`` overrides the default matcher filter (used by the lead agent).
+    """
+    keep = title_filter or filter_job_title
     filtered: list[dict[str, str]] = []
     for job in jobs:
         title = job.get("job_title", "")
-        if filter_job_title(title):
+        if keep(title):
             filtered.append(job)
         else:
             logger.debug("Filtered out job title: %s", title)
@@ -923,6 +930,7 @@ async def scrape_jobs(
     config: BoardConfig | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     apply_lead_dedup: bool = True,
+    title_filter: Callable[[str], bool] | None = None,
 ) -> list[dict[str, str]]:
     """Scrape a job board and return filtered Software Development / AI listings.
 
@@ -1015,7 +1023,7 @@ async def scrape_jobs(
     titles = [j.get("job_title", "") for j in raw_jobs]
     logger.info("scrape_jobs: extracted %d titles: %s", len(titles), titles)
 
-    filtered = filter_jobs(raw_jobs)
+    filtered = filter_jobs(raw_jobs, title_filter)
     if apply_lead_dedup:
         new_jobs = filter_unseen_jobs(filtered)
         if new_jobs:

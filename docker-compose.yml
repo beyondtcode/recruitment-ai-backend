@@ -7,6 +7,9 @@ services:
       - .env
     expose:
       - "8000"
+    volumes:
+      # Persist SQLite dedup stores (seen_leads.db, jobs.db) across rebuilds.
+      - ./data:/app/data
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:latest

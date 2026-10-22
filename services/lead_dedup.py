@@ -34,6 +34,15 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS seen_fingerprints (
+            fingerprint TEXT PRIMARY KEY,
+            job_link TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -106,6 +115,68 @@ def mark_jobs_seen(jobs: list[dict[str, str]]) -> int:
     return inserted
 
 
+def filter_unseen_fingerprints(jobs: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop jobs whose ``fingerprint`` (company + title) was already seen.
+
+    Catches the same opening posted on several boards. Also dedupes within the
+    given batch (first occurrence wins). Jobs without a fingerprint pass through.
+    """
+    if not jobs:
+        return []
+    prints = sorted({(j.get("fingerprint") or "") for j in jobs} - {""})
+    seen: set[str] = set()
+    if prints:
+        with _lock:
+            conn = _connect()
+            try:
+                placeholders = ",".join("?" * len(prints))
+                rows = conn.execute(
+                    f"SELECT fingerprint FROM seen_fingerprints WHERE fingerprint IN ({placeholders})",
+                    prints,
+                ).fetchall()
+                seen = {row[0] for row in rows}
+            finally:
+                conn.close()
+
+    kept: list[dict[str, str]] = []
+    batch: set[str] = set()
+    for job in jobs:
+        fp = job.get("fingerprint") or ""
+        if fp and (fp in seen or fp in batch):
+            continue
+        if fp:
+            batch.add(fp)
+        kept.append(job)
+    skipped = len(jobs) - len(kept)
+    if skipped:
+        logger.info("lead_dedup: skipped %d cross-board duplicate(s)", skipped)
+    return kept
+
+
+def mark_fingerprints_seen(jobs: list[dict[str, str]]) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (j["fingerprint"], (j.get("job_link") or "").strip(), now)
+        for j in jobs
+        if j.get("fingerprint")
+    ]
+    if not rows:
+        return 0
+    with _lock:
+        conn = _connect()
+        try:
+            before = conn.total_changes
+            conn.executemany(
+                "INSERT OR IGNORE INTO seen_fingerprints (fingerprint, job_link, first_seen_at) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            return conn.total_changes - before
+        finally:
+            conn.close()
+
+
 def clear_seen_jobs() -> int:
     """Delete all rows from ``seen_jobs``. Returns number of rows removed."""
     with _lock:
@@ -113,6 +184,7 @@ def clear_seen_jobs() -> int:
         try:
             cur = conn.execute("DELETE FROM seen_jobs")
             deleted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+            conn.execute("DELETE FROM seen_fingerprints")
             conn.commit()
         finally:
             conn.close()

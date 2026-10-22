@@ -1,4 +1,4 @@
-"""LLM enrichment for Lead Scraping Agent (company size + track + summary).
+"""LLM enrichment for Lead Scraping Agent (category + summary).
 
 Env vars:
   ANTHROPIC_API_KEY / ANTHROPIC_MODEL — preferred provider (via core.config)
@@ -18,10 +18,10 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from core.config import settings
+from services.lead_filters import normalize_category, outreach_phrasing
 from services.scraper import (
     _clean_job_link,
     _normalize_job_title,
-    _normalize_publish_date,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,27 +31,34 @@ Provider = Literal["anthropic", "openai"]
 MAX_TOKENS = 512
 CONCURRENCY_LIMIT = 5
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_CONTACT_INFO = "הגשה דרך הקישור במודעה"
 
-SYSTEM_PROMPT = """You classify job postings for a recruitment agency that ONLY places
-Software Development and AI/ML engineers (not fashion, retail, textile, or industrial
-"product developer" roles).
+SYSTEM_PROMPT = """You classify Israeli job postings for a recruitment and outsourcing agency
+(Beyond Code) that places software developers, QA/automation testers, Salesforce /
+monday.com implementers and AI Builders.
 
-Given a company name, job title, and optional listing-card snippet text, return ONLY a JSON object with:
-- "company_size": exactly "100+" if the company likely has 100 or more employees, otherwise exactly "<100"
-- "track": "B" if the role is primarily AI / ML / LLM / Data Science; otherwise "A" (Software Development / Tech)
-- "is_tech_role": true only if this is a real software engineering, software development, or AI/ML/data role.
-  Set false for non-tech product roles (e.g. fashion/textile/apparel product developer at brands like
-  Golf, ADIKA, Castro), industrial/physical product design, merchandising, or similar.
-- "job_summary": a brief 1-sentence description of the role/requirements based on the snippet
-  (and title/company). Prefer concrete requirements from the snippet; do not invent details not
-  supported by the input. If the snippet is empty, summarize from the job title alone.
-- "contact_info": contact person name and/or CV/application email if clearly present in the snippet;
-  otherwise null (do not invent contacts).
+Given a company name, job title and an optional listing snippet, return ONLY a JSON object:
+- "category": exactly one of the values below, or null if the role fits none of them.
+    "Backend"        — backend / server-side developer (Python, Java, Node, .NET, Go developer)
+    "Frontend"       — frontend / UI developer (React, Angular, Vue)
+    "Full Stack"     — full stack developer
+    "QA"             — manual QA, QA engineer, software tester (בודק/ת תוכנה)
+    "פיתוח אוטומציה" — test automation developer/engineer, QA automation, SDET
+    "יישום Salesforce" — Salesforce developer / admin / consultant / implementer
+    "יישום monday.com" — monday.com implementation / expert / consultant / admin
+    "AI Builder"     — titled AI Builder
+    "AI Workflow Builder" — builds AI workflows (n8n/Make/Zapier + LLMs)
+    "AI Automation Specialist" — AI automation specialist / engineer
+    "AI Implementation Specialist" — AI implementation specialist / engineer
+    "AI Agent Developer" — AI agent developer/engineer, agentic AI developer
+  Generic "Software Engineer/Developer" with no clear side → "Full Stack" if both sides are
+  mentioned, otherwise "Backend".
+  Return null for: DevOps/SRE, data scientist, data engineer, ML research, product manager,
+  cyber/security, IT/support, hardware/embedded/firmware/chip, mobile-only roles that are not
+  web development, managers without hands-on development, and any non-tech role
+  (e.g. fashion "product developer", sales, marketing).
+- "job_summary": one short sentence describing the role/requirements from the snippet
+  (or the title alone if the snippet is empty). Do not invent details.
 
-Use your knowledge of well-known companies when possible. If unsure about size, prefer "<100".
-If unsure whether the role is tech, prefer is_tech_role=false for ambiguous "product developer" titles
-without clear software/engineering signals.
 Do not include markdown or extra keys."""
 
 USER_PROMPT_TEMPLATE = (
@@ -61,11 +68,6 @@ USER_PROMPT_TEMPLATE = (
     "Respond with JSON only."
 )
 
-_SIZE_PLUS_RE = re.compile(r"100\s*\+|>=?\s*100|100\s*or\s*more", re.IGNORECASE)
-_SIZE_UNDER_RE = re.compile(r"<\s*100|under\s*100|less\s*than\s*100", re.IGNORECASE)
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
-)
 
 _anthropic_client: AsyncAnthropic | None = None
 _openai_client: AsyncOpenAI | None = None
@@ -116,51 +118,6 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
-def _normalize_company_size(raw: Any) -> str | None:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    if text in ("100+", "<100"):
-        return text
-    if _SIZE_PLUS_RE.search(text):
-        return "100+"
-    if _SIZE_UNDER_RE.search(text):
-        return "<100"
-    # Numeric ranges like "51-200" / "201-500"
-    nums = [int(n) for n in re.findall(r"\d+", text)]
-    if nums:
-        return "100+" if max(nums) >= 100 else "<100"
-    return None
-
-
-def _normalize_track(raw: Any) -> Literal["A", "B"] | None:
-    if raw is None:
-        return None
-    text = str(raw).strip().upper()
-    if text in ("A", "B"):
-        return text  # type: ignore[return-value]
-    if any(token in text for token in ("AI", "ML", "LLM", "DATA SCIENCE", "DATA SCIENTIST")):
-        return "B"
-    if text:
-        return "A"
-    return None
-
-
-def _normalize_is_tech_role(raw: Any) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if raw is None:
-        return True  # backward-compatible if model omits the field
-    text = str(raw).strip().lower()
-    if text in ("true", "1", "yes", "y"):
-        return True
-    if text in ("false", "0", "no", "n"):
-        return False
-    return True
-
-
 def _normalize_job_summary(raw: Any, job_title: str) -> str:
     if raw is None:
         text = ""
@@ -174,38 +131,17 @@ def _normalize_job_summary(raw: Any, job_title: str) -> str:
     return "Software / tech role opening."
 
 
-def _email_from_snippet(snippet: str) -> str | None:
-    match = _EMAIL_RE.search(snippet or "")
-    return match.group(0) if match else None
-
-
-def _normalize_contact_info(raw: Any, snippet: str) -> str:
-    if raw is not None:
-        text = " ".join(str(raw).split()).strip()
-        if text and text.lower() not in ("null", "none", "n/a", "-"):
-            return text
-    email = _email_from_snippet(snippet)
-    if email:
-        return email
-    return DEFAULT_CONTACT_INFO
-
-
 def _normalize_classification(
     payload: dict[str, Any],
     *,
     job_title: str = "",
     snippet: str = "",
 ) -> dict[str, Any]:
-    company_size = _normalize_company_size(payload.get("company_size"))
-    track = _normalize_track(payload.get("track"))
-    if company_size is None or track is None:
+    if "category" not in payload:
         raise ValueError(f"Invalid classification payload: {payload!r}")
     return {
-        "company_size": company_size,
-        "track": track,
-        "is_tech_role": _normalize_is_tech_role(payload.get("is_tech_role")),
+        "category": normalize_category(payload.get("category")),
         "job_summary": _normalize_job_summary(payload.get("job_summary"), job_title),
-        "contact_info": _normalize_contact_info(payload.get("contact_info"), snippet),
     }
 
 
@@ -291,87 +227,75 @@ async def _enrich_one(
     job: dict[str, Any],
     provider: Provider,
     semaphore: asyncio.Semaphore,
-) -> dict[str, Any] | None:
+) -> tuple[str, dict[str, Any]]:
+    """Return (status, job) where status is "kept", "rejected" or "error"."""
     job_link = _clean_job_link(job.get("job_link") or "")
-    if not job_link:
-        logger.warning("enrich_jobs: skipping job with empty job_link: %r", job)
-        return None
-
     company_name = " ".join((job.get("company_name") or "").split()).strip() or "Unknown"
     job_title = _normalize_job_title(job.get("job_title") or "")
     snippet = (job.get("snippet") or "").strip()
-    publish_date = _normalize_publish_date(job.get("publish_date") or "")
-    if not job_title:
-        logger.warning("enrich_jobs: skipping job with empty title: %r", job)
-        return None
+    if not job_link or not job_title:
+        logger.warning("enrich_jobs: skipping job without link/title: %r", job)
+        return "rejected", job
 
     async with semaphore:
         try:
-            classification = await _classify_job(
-                provider, company_name, job_title, snippet
-            )
+            classification = await _classify_job(provider, company_name, job_title, snippet)
         except Exception:
             logger.exception(
-                "enrich_jobs: LLM failed for company=%r title=%r",
-                company_name,
-                job_title,
+                "enrich_jobs: LLM failed for company=%r title=%r", company_name, job_title
             )
-            return None
+            return "error", job
 
-    if not classification.get("is_tech_role", True):
+    category = classification["category"]
+    if category is None:
         logger.info(
-            "enrich_jobs: rejected non-tech role company=%r title=%r",
-            company_name,
-            job_title,
+            "enrich_jobs: no matching category company=%r title=%r", company_name, job_title
         )
-        return None
-
-    if classification["company_size"] != "100+":
-        logger.debug(
-            "enrich_jobs: filtered <100 company=%r title=%r",
-            company_name,
-            job_title,
-        )
-        return None
+        return "rejected", job
 
     enriched = dict(job)
     enriched["company_name"] = company_name
     enriched["job_title"] = job_title
     enriched["job_link"] = job_link
-    enriched["publish_date"] = publish_date
-    enriched["company_size"] = classification["company_size"]
-    enriched["track"] = classification["track"]
+    enriched["category"] = category
+    enriched["outreach_phrasing"] = outreach_phrasing(category)
     enriched["job_summary"] = classification["job_summary"]
-    enriched["contact_info"] = classification["contact_info"]
-    return enriched
+    return "kept", enriched
 
 
-async def enrich_jobs(jobs: list[dict]) -> list[dict]:
-    """Classify scraped jobs with an LLM and keep only companies estimated at 100+.
+async def classify_lead_jobs(jobs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Classify jobs into the 12 lead categories.
 
-    Returns dicts with original scrape fields plus ``company_size``, ``track``,
-    ``job_summary``, and ``contact_info``. Soft-fails per job so one LLM error
-    does not abort the batch.
+    Returns ``(kept, settled)``: ``kept`` are jobs with a category; ``settled``
+    are all jobs with a definitive answer (kept + rejected), safe to mark as seen.
+    Jobs whose LLM call failed are in neither list so the next run retries them.
     """
     if not jobs:
-        return []
+        return [], []
 
     provider = _resolve_provider()
     if provider is None:
         logger.error(
             "enrich_jobs: no LLM API key set (ANTHROPIC_API_KEY or OPENAI_API_KEY); returning []"
         )
-        return []
+        return [], []
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    results = await asyncio.gather(
-        *(_enrich_one(job, provider, semaphore) for job in jobs),
-    )
-    enriched = [row for row in results if row is not None]
+    results = await asyncio.gather(*(_enrich_one(job, provider, semaphore) for job in jobs))
+    kept = [j for status, j in results if status == "kept"]
+    settled = [j for status, j in results if status in ("kept", "rejected")]
     logger.info(
-        "enrich_jobs: %d in → %d kept (provider=%s)",
+        "enrich_jobs: %d in → %d kept, %d rejected, %d errors (provider=%s)",
         len(jobs),
-        len(enriched),
+        len(kept),
+        len(settled) - len(kept),
+        len(jobs) - len(settled),
         provider,
     )
-    return enriched
+    return kept, settled
+
+
+async def enrich_jobs(jobs: list[dict]) -> list[dict]:
+    """Backward-compatible wrapper: classified jobs only."""
+    kept, _ = await classify_lead_jobs(jobs)
+    return kept

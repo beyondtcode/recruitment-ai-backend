@@ -491,3 +491,43 @@ class TrackTests(unittest.TestCase):
         self.assertEqual(weekly["new_companies"], 2)
         tracks = {r["Outreach Track"] for r in store.read("Weekly").rows}
         self.assertEqual(tracks, {"פיתוח", "מערכות"})
+
+
+class ContactRefreshTests(unittest.TestCase):
+    def test_refresh_after_60_days_on_new_job(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        companies = [
+            ["Company Name", "Outreach Track", "Company Size", "Company Type", "Last Enriched",
+             "Contact Name", "Contact Title", "Contact LinkedIn", "Contact Found", "Outreach Status"],
+            ["OldCo", "פיתוח", "51-200", "מוצר", "01/10/2026", "Gone Guy", "CTO",
+             "https://il.linkedin.com/in/gone", "01/07/2026", "לא נשלח"],
+            ["ManualCo", "פיתוח", "51-200", "מוצר", "01/10/2026", "Typed By Hand", "VP R&D",
+             "", "", "לא נשלח"],
+        ]
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]], "Companies": companies})
+
+        async def scrape():
+            return [
+                {"company_name": "OldCo", "job_title": "Backend Developer", "job_link": "https://li/o",
+                 "source": "LinkedIn"},
+                {"company_name": "ManualCo", "job_title": "Backend Developer", "job_link": "https://li/m",
+                 "source": "LinkedIn"},
+            ], []
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"primary": {"name": "New Cto", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/new"}}
+
+        provider = FakeProvider({"": [SearchResult("New Cto - CTO", "https://il.linkedin.com/in/new", "")]})
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}), \
+                mock.patch("services.enrichment._classify_job", classify), \
+                mock.patch.object(cc, "complete_json", fake_llm):
+            asyncio.run(lead_agent.run(store, BudgetedSearch([provider], 60), scrape=scrape,
+                                       check=mock.AsyncMock(return_value={}), today=TODAY))
+        tmp.cleanup()
+        rows = {r["Company Name"]: r for r in store.read("Companies").rows}
+        self.assertEqual(rows["OldCo"]["Contact Name"], "New Cto")
+        self.assertEqual(rows["OldCo"]["Contact Found"], "25/10/2026")
+        self.assertEqual(rows["ManualCo"]["Contact Name"], "Typed By Hand")  # manual entry untouched

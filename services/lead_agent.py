@@ -14,6 +14,7 @@ Env vars:
   LEADS_MAX_CONTACT_ENRICH (default 40)  — contact lookups per run
   LEADS_ENRICH_REFRESH_DAYS (default 90) — re-check size/type after N days
   LEADS_MAX_LINK_CHECKS (default 200)    — job links checked for "closed" per run
+  LEADS_CONTACT_REFRESH_DAYS (default 60) — re-check a contact when a new job appears after N days
 """
 
 from __future__ import annotations
@@ -494,15 +495,27 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         row["Target"] = target
 
     # 4. Contacts for target rows without one; the profile follows the track.
+    # Contacts the agent found more than CONTACT_REFRESH_DAYS ago are re-checked
+    # when the company posts a new job (people change roles / leave). Contacts
+    # typed in by hand have no "Contact Found" date and are never replaced.
+    refresh_after = timedelta(days=_env_int("LEADS_CONTACT_REFRESH_DAYS", 60))
     need_contact = []
+    refreshing: set[str] = set()
     for rk, row in company_rows.items():
         if row.get("Target") != YES or rk not in by_row:
             continue
         contact = row.get("Contact Name", "").strip()
         if contact == "":
             need_contact.append(rk)
-        elif contact == NOT_FOUND and _may_retry(attempts, rk, "contact", today):
-            need_contact.append(rk)
+        elif contact == NOT_FOUND:
+            if _may_retry(attempts, rk, "contact", today):
+                need_contact.append(rk)
+        else:
+            found_on = parse_date(row.get("Contact Found", ""))
+            last_job = parse_date(row.get("Last Job Found", ""))
+            if found_on and last_job and last_job > found_on and today - found_on >= refresh_after:
+                need_contact.append(rk)
+                refreshing.add(rk)
     need_contact.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
     need_contact = need_contact[: _env_int("LEADS_MAX_CONTACT_ENRICH", 40)]
     contacts_found = 0
@@ -524,11 +537,14 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             contacts_searched -= 1
             return
         if primary is None:
+            if rk in refreshing:
+                return  # keep the existing contact; try again on the next new job
             row["Contact Name"] = NOT_FOUND
             n = attempts.get((rk, "contact"), (0, today))[0]
             attempt_updates[(rk, "contact")] = (n + 1, today)
             return
         contacts_found += 1
+        row["Contact Found"] = today_s
         row["Contact Name"], row["Contact Title"], row["Contact LinkedIn"] = (
             primary.name, primary.title, primary.linkedin_url,
         )

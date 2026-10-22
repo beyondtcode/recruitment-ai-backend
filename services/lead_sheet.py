@@ -74,6 +74,7 @@ COMPANY_HEADERS: list[str] = [
     "Alt Contact Name",
     "Alt Contact Title",
     "Alt Contact LinkedIn",
+    "Contact Found",
     "Outreach Status",
     "Status Updated",
     "Last Job Found",

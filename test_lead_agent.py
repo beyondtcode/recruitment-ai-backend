@@ -406,7 +406,8 @@ class LinkCheckCapTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db"),
                                           "LEADS_MAX_LINK_CHECKS": "2"}):
-            summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
+            with mock.patch.object(ce, "complete_json", mock.AsyncMock(return_value={})):
+                summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
         tmp.cleanup()
         self.assertEqual(checked[0], "https://x/never")
         self.assertEqual(len(checked), 2)
@@ -430,3 +431,63 @@ class OldDateTests(unittest.TestCase):
             asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
         tmp.cleanup()
         self.assertEqual(store.read("Sheet1").rows[0]["Publish Date"], "04/08/2026")
+
+
+class TrackTests(unittest.TestCase):
+    """A company with development and Salesforce roles gets two outreach rows."""
+
+    def test_dev_and_systems_tracks(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+
+        async def scrape():
+            return [
+                {"company_name": "MidCo", "job_title": "Backend Developer", "job_link": "https://li/1",
+                 "source": "LinkedIn", "company_link": "https://il.linkedin.com/company/midco"},
+                {"company_name": "MidCo", "job_title": "Salesforce Admin", "job_link": "https://li/2",
+                 "source": "LinkedIn", "company_link": "https://il.linkedin.com/company/midco"},
+            ], []
+
+        async def check(urls):
+            return {}
+
+        cats = {"Backend Developer": "Backend", "Salesforce Admin": "יישום Salesforce"}
+
+        async def classify(provider, company, title, snippet):
+            return {"category": cats[title], "job_summary": "s"}
+
+        async def fake_page(url):
+            return ce.LinkedInPage(size="51-200", industry="Software", description="SaaS")
+
+        async def fake_llm(system, user, max_tokens=0):
+            if "profile Israeli employers" in system:
+                return {"size": "51-200", "company_type": "product"}
+            if "VP Operations" in system:
+                return {"primary": {"name": "Ops", "title": "VP Operations", "linkedin_url": "https://il.linkedin.com/in/ops"}}
+            return {"primary": {"name": "Cto", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/cto"}}
+
+        provider = FakeProvider({"": [SearchResult("Ops - VP Operations - MidCo", "https://il.linkedin.com/in/ops", ""),
+                                      SearchResult("Cto - CTO - MidCo", "https://il.linkedin.com/in/cto", "")]})
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}), \
+                mock.patch("services.enrichment._classify_job", classify), \
+                mock.patch.object(ce, "fetch_linkedin_company", fake_page), \
+                mock.patch.object(ce, "complete_json", fake_llm), \
+                mock.patch.object(cc, "complete_json", fake_llm):
+            summary = asyncio.run(lead_agent.run(store, BudgetedSearch([provider], 60), scrape=scrape,
+                                                 check=check, today=TODAY))
+            weekly = asyncio.run(lead_agent.weekly(store, today=TODAY))
+        tmp.cleanup()
+
+        self.assertEqual(summary["companies"], 1)
+        rows = {r["Outreach Track"]: r for r in store.read("Companies").rows}
+        self.assertEqual(set(rows), {"פיתוח", "מערכות"})
+        self.assertEqual(rows["פיתוח"]["Contact Title"], "CTO")
+        self.assertEqual(rows["מערכות"]["Contact Title"], "VP Operations")
+        self.assertEqual(rows["מערכות"]["Company Size"], "51-200")  # shared, enriched once
+        jobs = {r["Job Title"]: r for r in store.read("Sheet1").rows}
+        self.assertEqual(jobs["Backend Developer"]["Contact Name"], "Cto")       # mirrored per job
+        self.assertEqual(jobs["Salesforce Admin"]["Contact Name"], "Ops")
+        self.assertEqual(jobs["Salesforce Admin"]["Outreach Status"], "לא נשלח")
+        self.assertEqual(weekly["new_companies"], 2)
+        tracks = {r["Outreach Track"] for r in store.read("Weekly").rows}
+        self.assertEqual(tracks, {"פיתוח", "מערכות"})

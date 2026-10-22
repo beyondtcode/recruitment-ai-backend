@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 from services.company_enrichment import (
+    SYSTEMS_CATEGORIES,
     UNKNOWN,
     YES,
     NO,
@@ -94,6 +95,43 @@ def _key(name: str) -> str:
     return normalize_company(name) or (name or "").strip().casefold()
 
 
+# A company gets one row per outreach track: development roles go to the
+# CTO / VP R&D, Salesforce / monday.com roles to whoever owns those systems.
+TRACK_DEV = "פיתוח"
+TRACK_SYSTEMS = "מערכות"
+
+
+def track_for(category: str) -> str:
+    return TRACK_SYSTEMS if (category or "").strip() in SYSTEMS_CATEGORIES else TRACK_DEV
+
+
+def _row_key(company_name: str, track: str) -> str:
+    return f"{_key(company_name)}|{track or TRACK_DEV}"
+
+
+def _company_row_key(row: dict[str, str]) -> str:
+    return _row_key(row.get("Company Name", ""), row.get("Outreach Track") or TRACK_DEV)
+
+
+def _job_row_key(row: dict[str, str]) -> str:
+    return _row_key(row.get("Company Name", ""), track_for(row.get("Category", "")))
+
+
+# Copied from Companies into every job row (read-only there; edit in Companies).
+MIRRORED_COLUMNS: tuple[str, ...] = (
+    "Company Size",
+    "Company Type",
+    "Target",
+    "Contact Name",
+    "Contact Title",
+    "Contact LinkedIn",
+    "Alt Contact Name",
+    "Alt Contact Title",
+    "Alt Contact LinkedIn",
+    "Outreach Status",
+)
+
+
 # ---------------------------------------------------------------------------
 # Status-change tracking (fills "Status Updated" when someone edits the status)
 # ---------------------------------------------------------------------------
@@ -111,6 +149,7 @@ def _status_db() -> sqlite3.Connection:
 
 
 def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
+    """Rows are Companies rows; keyed by company + outreach track."""
     conn = _status_db()
     try:
         known = {
@@ -118,7 +157,7 @@ def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
             for k, s, u in conn.execute("SELECT company_key, status, status_updated FROM company_status")
         }
         for row in rows:
-            key = _key(row.get("Company Name", ""))
+            key = _company_row_key(row)
             status = (row.get("Outreach Status") or "").strip()
             if not status:
                 status = NOT_SENT
@@ -136,7 +175,7 @@ def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
             "ON CONFLICT(company_key) DO UPDATE SET status=excluded.status, "
             "status_updated=excluded.status_updated",
             [
-                (_key(r.get("Company Name", "")), r.get("Outreach Status", ""), r.get("Status Updated", ""))
+                (_company_row_key(r), r.get("Outreach Status", ""), r.get("Status Updated", ""))
                 for r in rows
             ],
         )
@@ -283,7 +322,10 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     jobs.ensure_headers(JOB_HEADERS)
     companies = store.read(TAB_COMPANIES) or Table(headers=[])
     companies.ensure_headers(COMPANY_HEADERS)
-    company_rows = {_key(r.get("Company Name", "")): r for r in companies.rows}
+    company_rows: dict[str, dict[str, str]] = {}
+    for r in companies.rows:
+        r["Outreach Track"] = r.get("Outreach Track") or TRACK_DEV
+        company_rows[_company_row_key(r)] = r
 
     # 0. Older rows used YYYY-MM-DD; normalize every date column to DD/MM/YYYY.
     for row in jobs.rows:
@@ -314,7 +356,7 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     for row in kept:
         status = statuses.get(row.get("Job Link", "").strip(), "unknown")
         if status == "closed":
-            company = company_rows.get(_key(row.get("Company Name", "")), {})
+            company = company_rows.get(_job_row_key(row), {})
             archived.append(
                 {**row, "Closed Date": today_s, "Outreach Status": company.get("Outreach Status", "")}
             )
@@ -334,121 +376,146 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         new_rows.append(row)
     jobs.rows = open_rows + new_rows
 
-    # 3. Companies.
-    by_company: dict[str, list[dict[str, str]]] = {}
+    # 3. Companies: one row per company + outreach track.
+    by_row: dict[str, list[dict[str, str]]] = {}
     for row in jobs.rows:
         name = (row.get("Company Name") or "").strip()
         if name and name.casefold() != "unknown":
-            by_company.setdefault(_key(name), []).append(row)
+            by_row.setdefault(_job_row_key(row), []).append(row)
 
-    for key, company_jobs in by_company.items():
-        row = company_rows.get(key)
+    for rk, row_jobs in by_row.items():
+        row = company_rows.get(rk)
         if row is None:
             row = {h: "" for h in companies.headers}
-            row["Company Name"] = company_jobs[0]["Company Name"].strip()
+            row["Company Name"] = row_jobs[0]["Company Name"].strip()
+            row["Outreach Track"] = track_for(row_jobs[0].get("Category", ""))
             row["Outreach Status"] = NOT_SENT
-            company_rows[key] = row
-        latest = _latest_job(company_jobs)
-        row["Open Jobs"] = str(len(company_jobs))
+            # Share company facts already known from the company's other track.
+            sibling = next(
+                (r for k, r in company_rows.items() if k.split("|")[0] == rk.split("|")[0]), None
+            )
+            if sibling is not None:
+                for col in ("Company Size", "Company Type", "Company LinkedIn", "Last Enriched"):
+                    row[col] = sibling.get(col, "")
+            company_rows[rk] = row
+        latest = _latest_job(row_jobs)
+        row["Open Jobs"] = str(len(row_jobs))
         row["Latest Job"] = latest.get("Job Title", "")
         row["Latest Job Link"] = latest.get("Job Link", "")
         row["Category"] = latest.get("Category", "")
         row["Outreach Phrasing"] = latest.get("Outreach Phrasing", "")
-        found = [d for d in (parse_date(j.get("Found Date", "")) for j in company_jobs) if d]
+        found = [d for d in (parse_date(j.get("Found Date", "")) for j in row_jobs) if d]
         if found:
             row["Last Job Found"] = format_ddmmyyyy(max(found))
-    for key, row in company_rows.items():
-        if key not in by_company:
+    for rk, row in company_rows.items():
+        if rk not in by_row:
             row["Open Jobs"] = "0"
 
-    # 3b. Size / type enrichment.
+    # Company-level groups (size / type are shared by a company's tracks).
+    rows_by_company: dict[str, list[str]] = {}
+    for rk in company_rows:
+        rows_by_company.setdefault(rk.split("|")[0], []).append(rk)
+    active_companies = {rk.split("|")[0] for rk in by_row}
+
+    def company_last_found(ck: str) -> date:
+        dates = [parse_date(company_rows[rk].get("Last Job Found", "")) for rk in rows_by_company[ck]]
+        return max((d for d in dates if d), default=date.min)
+
+    # 3b. Size / type enrichment (once per company).
     attempts = _load_attempts()
     attempt_updates: dict[tuple[str, str], tuple[int, date]] = {}
     refresh = timedelta(days=_env_int("LEADS_ENRICH_REFRESH_DAYS", 90))
     to_enrich = []
-    for key, row in company_rows.items():
-        if key not in by_company or key in do_not_contact:
+    for ck in active_companies:
+        if ck in do_not_contact:
             continue
+        row = company_rows[rows_by_company[ck][0]]
         enriched_on = parse_date(row.get("Last Enriched", ""))
         unknown = row.get("Company Size", "") in ("", UNKNOWN) or row.get("Company Type", "") in ("", UNKNOWN)
         if enriched_on is None:
-            to_enrich.append(key)
+            to_enrich.append(ck)
         elif unknown:
-            if _may_retry(attempts, key, "company", today):
-                to_enrich.append(key)
+            if _may_retry(attempts, ck, "company", today):
+                to_enrich.append(ck)
         elif today - enriched_on >= refresh:
-            to_enrich.append(key)
+            to_enrich.append(ck)
     # Newest companies first, capped per run.
-    to_enrich.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
+    to_enrich.sort(key=company_last_found, reverse=True)
     to_enrich = to_enrich[: _env_int("LEADS_MAX_COMPANY_ENRICH", 80)]
     # Company lookups may use at most half of the run's search budget, so
     # contacts for target companies always get searches too.
     company_search_cap = (search.budget // 2) if search is not None and hasattr(search, "budget") else 0
     skipped_for_budget = 0
 
-    def company_link_for(key: str) -> str:
-        row = company_rows[key]
-        if row.get("Company LinkedIn"):
-            return row["Company LinkedIn"]
-        for j in by_company.get(key, []):
+    def company_jobs(ck: str) -> list[dict[str, str]]:
+        return [j for rk in rows_by_company[ck] for j in by_row.get(rk, [])]
+
+    def company_link_for(ck: str) -> str:
+        for rk in rows_by_company[ck]:
+            if company_rows[rk].get("Company LinkedIn"):
+                return company_rows[rk]["Company LinkedIn"]
+        for j in company_jobs(ck):
             if j.get("Company LinkedIn"):
                 return j["Company LinkedIn"]
         return ""
 
-    async def enrich_one(key: str) -> None:
+    async def enrich_one(ck: str) -> None:
         nonlocal skipped_for_budget
-        row = company_rows[key]
-        titles = [j.get("Job Title", "") for j in by_company[key]]
-        link = company_link_for(key)
+        name = company_rows[rows_by_company[ck][0]]["Company Name"]
+        titles = [j.get("Job Title", "") for j in company_jobs(ck)]
+        link = company_link_for(ck)
         use_search = search
         if search is not None and getattr(search, "used", 0) >= company_search_cap:
             if not link:
                 skipped_for_budget += 1
                 return  # no free source and no budget left for companies: try next run
             use_search = None
-        info = await enrich_company(row["Company Name"], titles, use_search, link)
-        row["Company Size"] = info.size
-        row["Company Type"] = info.company_type
-        if info.linkedin_url:
-            row["Company LinkedIn"] = info.linkedin_url
-        row["Last Enriched"] = today_s
+        info = await enrich_company(name, titles, use_search, link)
+        for rk in rows_by_company[ck]:
+            row = company_rows[rk]
+            row["Company Size"] = info.size
+            row["Company Type"] = info.company_type
+            if info.linkedin_url:
+                row["Company LinkedIn"] = info.linkedin_url
+            row["Last Enriched"] = today_s
         if info.size == UNKNOWN or info.company_type == UNKNOWN:
-            n = attempts.get((key, "company"), (0, today))[0]
-            attempt_updates[(key, "company")] = (n + 1, today)
+            n = attempts.get((ck, "company"), (0, today))[0]
+            attempt_updates[(ck, "company")] = (n + 1, today)
 
     await _gather_limited([lambda k=k: enrich_one(k) for k in to_enrich], ENRICH_CONCURRENCY)
 
-    # 3c. Target audience.
-    reasons: dict[str, str] = {}
-    for key, row in company_rows.items():
+    # 3c. Target audience (per track).
+    for rk, row in company_rows.items():
         info = CompanyInfo(size=row.get("Company Size") or UNKNOWN, company_type=row.get("Company Type") or UNKNOWN)
-        categories = {j.get("Category", "") for j in by_company.get(key, [])}
-        target, reason = compute_target(info, categories, do_not_contact=key in do_not_contact)
+        categories = {j.get("Category", "") for j in by_row.get(rk, [])}
+        if not categories and row.get("Outreach Track") == TRACK_SYSTEMS:
+            categories = set(SYSTEMS_CATEGORIES)
+        target, _reason = compute_target(info, categories, do_not_contact=rk.split("|")[0] in do_not_contact)
         row["Target"] = target
-        reasons[key] = reason
 
-    # 4. Contacts for target companies without one.
+    # 4. Contacts for target rows without one; the profile follows the track.
     need_contact = []
-    for key, row in company_rows.items():
-        if row.get("Target") != YES or key not in by_company:
+    for rk, row in company_rows.items():
+        if row.get("Target") != YES or rk not in by_row:
             continue
         contact = row.get("Contact Name", "").strip()
         if contact == "":
-            need_contact.append(key)
-        elif contact == NOT_FOUND and _may_retry(attempts, key, "contact", today):
-            need_contact.append(key)
+            need_contact.append(rk)
+        elif contact == NOT_FOUND and _may_retry(attempts, rk, "contact", today):
+            need_contact.append(rk)
     need_contact.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
     need_contact = need_contact[: _env_int("LEADS_MAX_CONTACT_ENRICH", 40)]
     contacts_found = 0
     contacts_searched = 0
 
-    async def contact_one(key: str) -> None:
+    async def contact_one(rk: str) -> None:
         nonlocal contacts_found, contacts_searched
         if getattr(search, "remaining", 1) <= 0:
             return  # budget used up: stays empty / "לא נמצא", retried next run
         contacts_searched += 1
-        row = company_rows[key]
-        profile = choose_profile(reasons.get(key, ""), row.get("Category", ""))
+        row = company_rows[rk]
+        reason = "systems" if row.get("Outreach Track") == TRACK_SYSTEMS else ""
+        profile = choose_profile(reason, row.get("Category", ""))
         try:
             primary, alternate = await find_contacts(
                 row["Company Name"], profile, row.get("Category", ""), search
@@ -458,8 +525,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             return
         if primary is None:
             row["Contact Name"] = NOT_FOUND
-            n = attempts.get((key, "contact"), (0, today))[0]
-            attempt_updates[(key, "contact")] = (n + 1, today)
+            n = attempts.get((rk, "contact"), (0, today))[0]
+            attempt_updates[(rk, "contact")] = (n + 1, today)
             return
         contacts_found += 1
         row["Contact Name"], row["Contact Title"], row["Contact LinkedIn"] = (
@@ -489,6 +556,13 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     )
     companies.rows = rows
 
+    # Mirror company facts / contacts into each job row (read-only copy).
+    for job in jobs.rows:
+        company = company_rows.get(_job_row_key(job))
+        if company is not None:
+            for col in MIRRORED_COLUMNS:
+                job[col] = company.get(col, "")
+
     store.write(jobs_tab(), jobs)
     store.write(TAB_COMPANIES, companies)
     store.set_dropdown(TAB_COMPANIES, "Outreach Status", OUTREACH_STATUSES)
@@ -503,8 +577,10 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "archived_jobs": len(archived),
             "removed_blocked_jobs": removed_blocked,
             "open_jobs": len(jobs.rows),
-            "companies": len(rows),
-            "target_companies": sum(1 for r in rows if r.get("Target") == YES),
+            "companies": len({rk.split("|")[0] for rk in company_rows}),
+            "target_companies": len(
+                {rk.split("|")[0] for rk, r in company_rows.items() if r.get("Target") == YES}
+            ),
             "companies_enriched": len(to_enrich),
             "companies_waiting_for_budget": skipped_for_budget,
             "contacts_searched": contacts_searched,
@@ -545,15 +621,15 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
     jobs = store.read(jobs_tab()) or Table(headers=list(JOB_HEADERS))
     do_not_contact = load_do_not_contact(store)
 
-    by_company: dict[str, list[dict[str, str]]] = {}
+    by_row: dict[str, list[dict[str, str]]] = {}
     for row in jobs.rows:
-        by_company.setdefault(_key(row.get("Company Name", "")), []).append(row)
+        by_row.setdefault(_job_row_key(row), []).append(row)
 
     new_rows: list[dict[str, str]] = []
     returning_rows: list[dict[str, str]] = []
     for company in companies.rows:
         key = _key(company.get("Company Name", ""))
-        company_jobs = by_company.get(key, [])
+        company_jobs = by_row.get(_company_row_key(company), [])
         contact = (company.get("Contact Name") or "").strip()
         if company.get("Target") != YES or key in do_not_contact or not company_jobs:
             continue
@@ -586,6 +662,7 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
             {
                 "Company Name": company.get("Company Name", ""),
                 "Company Size": company.get("Company Size", ""),
+                "Outreach Track": company.get("Outreach Track", "") or TRACK_DEV,
                 "Latest Job": latest.get("Job Title", ""),
                 "Latest Job Link": latest.get("Job Link", ""),
                 "Other Jobs": "; ".join(t for t in others if t),

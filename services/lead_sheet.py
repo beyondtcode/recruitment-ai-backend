@@ -44,10 +44,22 @@ JOB_HEADERS: list[str] = [
     "Last Checked",
     "Source",
     "Company LinkedIn",
+    # Copied from Companies by the agent (read-only here):
+    "Company Size",
+    "Company Type",
+    "Target",
+    "Contact Name",
+    "Contact Title",
+    "Contact LinkedIn",
+    "Alt Contact Name",
+    "Alt Contact Title",
+    "Alt Contact LinkedIn",
+    "Outreach Status",
 ]
 
 COMPANY_HEADERS: list[str] = [
     "Company Name",
+    "Outreach Track",
     "Company Size",
     "Company Type",
     "Target",
@@ -69,12 +81,13 @@ COMPANY_HEADERS: list[str] = [
     "Last Enriched",
 ]
 
-ARCHIVE_HEADERS: list[str] = JOB_HEADERS + ["Closed Date", "Outreach Status"]
+ARCHIVE_HEADERS: list[str] = JOB_HEADERS[:10] + ["Closed Date", "Outreach Status"]
 BLOCKED_HEADERS: list[str] = ["Company", "Name Variants"]
 DO_NOT_CONTACT_HEADERS: list[str] = ["Company Name", "Reason"]
 WEEKLY_HEADERS: list[str] = [
     "Company Name",
     "Company Size",
+    "Outreach Track",
     "Latest Job",
     "Latest Job Link",
     "Other Jobs",

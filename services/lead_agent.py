@@ -131,6 +131,7 @@ MIRRORED_COLUMNS: tuple[str, ...] = (
     "Alt Contact Title",
     "Alt Contact LinkedIn",
     "Outreach Status",
+    "Status Updated",
 )
 
 

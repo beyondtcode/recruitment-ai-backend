@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -159,7 +160,14 @@ async def scrape_all_raw() -> tuple[list[dict], list[str]]:
     """
     combined: list[dict] = []
     failed: list[str] = []
-    for i, (board, label, url) in enumerate(LEAD_SEARCHES):
+    searches = list(LEAD_SEARCHES)
+    try:
+        limit = int(os.environ.get("LEADS_SEARCH_LIMIT") or 0)
+    except ValueError:
+        limit = 0
+    if limit > 0:  # short test runs
+        searches = searches[:limit]
+    for i, (board, label, url) in enumerate(searches):
         if i:
             # Be gentle with the boards (LinkedIn rate-limits bursts of guest searches).
             await asyncio.sleep(SEARCH_PAUSE_SECONDS)

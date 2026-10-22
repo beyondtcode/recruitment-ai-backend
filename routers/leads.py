@@ -44,13 +44,13 @@ class LeadOpportunity(BaseModel):
 
     company_name: str = Field(serialization_alias="Company Name")
     job_title: str = Field(serialization_alias="Job Title")
-    category: str = Field(serialization_alias="קטגוריה")
-    outreach_phrasing: str = Field(serialization_alias="ניסוח לפנייה")
+    category: str = Field(serialization_alias="Category")
+    outreach_phrasing: str = Field(serialization_alias="Outreach Phrasing")
     job_summary: str = Field(serialization_alias="Job Summary")
     job_link: str = Field(serialization_alias="Job Link")
     publish_date: str = Field(serialization_alias="Publish Date")
-    found_date: str = Field(serialization_alias="תאריך מציאה")
-    source: str = Field(serialization_alias="מקור")
+    found_date: str = Field(serialization_alias="Found Date")
+    source: str = Field(serialization_alias="Source")
 
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])

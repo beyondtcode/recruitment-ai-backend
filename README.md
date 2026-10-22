@@ -532,7 +532,7 @@ services/enrichment.py — LLM: category (one of 12, or none → dropped) + job 
 JSON list of LeadOpportunity
 ```
 
-Response keys match the sheet headers: **Company Name**, **Job Title**, **קטגוריה**, **ניסוח לפנייה**, **Job Summary**, **Job Link**, **Publish Date** (DD/MM/YYYY), **תאריך מציאה**, **מקור**.
+Response keys match the sheet headers: **Company Name**, **Job Title**, **Category**, **Outreach Phrasing**, **Job Summary**, **Job Link**, **Publish Date** (DD/MM/YYYY), **Found Date**, **Source**.
 
 Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יישום Salesforce, יישום monday.com, AI Builder, AI Workflow Builder, AI Automation Specialist, AI Implementation Specialist, AI Agent Developer. Outreach phrasing per category is in `lead_filters._PHRASING`.
 

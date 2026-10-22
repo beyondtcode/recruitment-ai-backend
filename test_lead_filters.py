@@ -182,8 +182,8 @@ class PipelineTests(unittest.TestCase):
             row = leads1[0].model_dump(by_alias=True)
             self.assertEqual(
                 list(row),
-                ["Company Name", "Job Title", "קטגוריה", "ניסוח לפנייה", "Job Summary",
-                 "Job Link", "Publish Date", "תאריך מציאה", "מקור"],
+                ["Company Name", "Job Title", "Category", "Outreach Phrasing", "Job Summary",
+                 "Job Link", "Publish Date", "Found Date", "Source"],
             )
             wix = next(l for l in leads1 if l.company_name == "Wix")
             self.assertEqual(wix.publish_date, "20/10/2026")

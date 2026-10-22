@@ -412,3 +412,21 @@ class LinkCheckCapTests(unittest.TestCase):
         self.assertEqual(len(checked), 2)
         self.assertEqual(summary["links_not_checked_yet"], 2)
         self.assertEqual(len(store.read("Sheet1").rows), 4)  # unchecked rows are kept
+
+
+class OldDateTests(unittest.TestCase):
+    def test_iso_dates_normalized(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link", "Publish Date"],
+                                        ["Unknown", "Dev", "https://x/1", "2026-08-04"]]})
+
+        async def scrape():
+            return [], []
+
+        async def check(urls):
+            return {u: "unknown" for u in urls}
+
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
+        tmp.cleanup()
+        self.assertEqual(store.read("Sheet1").rows[0]["Publish Date"], "04/08/2026")

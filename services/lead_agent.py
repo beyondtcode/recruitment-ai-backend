@@ -285,6 +285,15 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     companies.ensure_headers(COMPANY_HEADERS)
     company_rows = {_key(r.get("Company Name", "")): r for r in companies.rows}
 
+    # 0. Older rows used YYYY-MM-DD; normalize every date column to DD/MM/YYYY.
+    for row in jobs.rows:
+        for col in ("Publish Date", "Found Date", "Last Checked"):
+            value = (row.get(col) or "").strip()
+            if value and "/" not in value:
+                d = parse_date(value)
+                if d:
+                    row[col] = format_ddmmyyyy(d)
+
     # 1. Blocked companies out, closed jobs to Archive.
     kept: list[dict[str, str]] = []
     removed_blocked = 0

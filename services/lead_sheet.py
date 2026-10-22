@@ -28,6 +28,7 @@ DEFAULT_SHEET_ID = "128NxMS1CpBCkfwEkQJEYns1aXANy-FSo9_vyjquyXTk"
 
 TAB_COMPANIES = "Companies"
 TAB_ARCHIVE = "Archive"
+TAB_COMPANIES_ARCHIVE = "Companies Archive"
 TAB_BLOCKED = "Blocked Companies"
 TAB_DO_NOT_CONTACT = "Do Not Contact"
 TAB_WEEKLY = "Weekly"
@@ -44,18 +45,10 @@ JOB_HEADERS: list[str] = [
     "Last Checked",
     "Source",
     "Company LinkedIn",
-]
-
-COMPANY_HEADERS: list[str] = [
-    "Company Name",
+    # Copied from Companies by the agent (read-only here):
     "Company Size",
     "Company Type",
     "Target",
-    "Open Jobs",
-    "Latest Job",
-    "Latest Job Link",
-    "Category",
-    "Outreach Phrasing",
     "Contact Name",
     "Contact Title",
     "Contact LinkedIn",
@@ -63,18 +56,41 @@ COMPANY_HEADERS: list[str] = [
     "Alt Contact Title",
     "Alt Contact LinkedIn",
     "Outreach Status",
-    "Status Updated",
+]
+
+# Important columns first, technical ones at the end.
+COMPANY_HEADERS: list[str] = [
+    "Company Name",
+    "Target",
+    "Outreach Status",
+    "Contact Name",
+    "Contact Title",
+    "Contact LinkedIn",
+    "Alt Contact Name",
+    "Alt Contact Title",
+    "Alt Contact LinkedIn",
+    "Latest Job",
+    "Latest Job Link",
+    "Category",
+    "Outreach Phrasing",
+    "Open Jobs",
+    "Outreach Track",
+    "Company Size",
+    "Company Type",
     "Last Job Found",
+    "Status Updated",
+    "Contact Found",
     "Company LinkedIn",
     "Last Enriched",
 ]
 
-ARCHIVE_HEADERS: list[str] = JOB_HEADERS + ["Closed Date", "Outreach Status"]
+ARCHIVE_HEADERS: list[str] = JOB_HEADERS[:10] + ["Closed Date", "Outreach Status"]
 BLOCKED_HEADERS: list[str] = ["Company", "Name Variants"]
 DO_NOT_CONTACT_HEADERS: list[str] = ["Company Name", "Reason"]
 WEEKLY_HEADERS: list[str] = [
     "Company Name",
     "Company Size",
+    "Outreach Track",
     "Latest Job",
     "Latest Job Link",
     "Other Jobs",
@@ -113,6 +129,11 @@ class Table:
                 continue
             rows.append({h: (str(raw[i]) if i < len(raw) else "") for i, h in enumerate(headers) if h})
         return cls(headers=headers, rows=rows)
+
+    def canonical_headers(self, wanted: list[str]) -> None:
+        """Put ``wanted`` first in that order; keep any other (hand-added) columns after."""
+        extra = [h for h in self.headers if h and h not in wanted]
+        self.headers = list(wanted) + extra
 
     def ensure_headers(self, wanted: list[str]) -> None:
         for h in wanted:

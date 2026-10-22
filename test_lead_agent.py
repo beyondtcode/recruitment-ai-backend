@@ -531,3 +531,42 @@ class ContactRefreshTests(unittest.TestCase):
         self.assertEqual(rows["OldCo"]["Contact Name"], "New Cto")
         self.assertEqual(rows["OldCo"]["Contact Found"], "25/10/2026")
         self.assertEqual(rows["ManualCo"]["Contact Name"], "Typed By Hand")  # manual entry untouched
+
+
+class CompaniesArchiveTests(unittest.TestCase):
+    def test_archive_and_return(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({
+            "Sheet1": [["Company Name", "Job Title", "Job Link", "Category"],
+                       ["Gone", "Backend Developer", "https://x/gone", "Backend"],
+                       ["Alive", "Backend Developer", "https://x/alive", "Backend"]],
+            "Companies": [["Company Name", "Outreach Status", "Company Size", "Company Type", "Last Enriched"],
+                          ["Gone", "פולואפ נשלח", "51-200", "מוצר", "20/10/2026"],
+                          ["Alive", "לא נשלח", "51-200", "מוצר", "20/10/2026"]],
+        })
+        new: list[dict] = []
+
+        async def scrape():
+            return [dict(j) for j in new], []
+
+        async def check(urls):
+            return {u: ("closed" if "gone" in u else "open") for u in urls}
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        env = {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}
+        with mock.patch.dict(os.environ, env), mock.patch("services.enrichment._classify_job", classify):
+            asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
+            self.assertEqual([r["Company Name"] for r in store.read("Companies").rows], ["Alive"])
+            archived = store.read("Companies Archive").rows
+            self.assertEqual((archived[0]["Company Name"], archived[0]["Outreach Status"]), ("Gone", "פולואפ נשלח"))
+            self.assertEqual(store.read("Companies").headers[:3], ["Company Name", "Target", "Outreach Status"])
+
+            new.append({"company_name": "Gone", "job_title": "QA Engineer", "job_link": "https://x/back",
+                        "source": "LinkedIn"})
+            asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=date(2026, 10, 27)))
+        tmp.cleanup()
+        back = {r["Company Name"]: r for r in store.read("Companies").rows}
+        self.assertEqual(back["Gone"]["Outreach Status"], "פולואפ נשלח")  # history kept
+        self.assertEqual(store.read("Companies Archive").rows, [])

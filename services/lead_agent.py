@@ -56,6 +56,7 @@ from services.lead_sheet import (
     TAB_ARCHIVE,
     TAB_BLOCKED,
     TAB_COMPANIES,
+    TAB_COMPANIES_ARCHIVE,
     TAB_DO_NOT_CONTACT,
     TAB_WEEKLY,
     WEEKLY_HEADERS,
@@ -322,9 +323,16 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     jobs = store.read(jobs_tab()) or Table(headers=[])
     jobs.ensure_headers(JOB_HEADERS)
     companies = store.read(TAB_COMPANIES) or Table(headers=[])
-    companies.ensure_headers(COMPANY_HEADERS)
+    companies.canonical_headers(COMPANY_HEADERS)
+    companies_archive = store.read(TAB_COMPANIES_ARCHIVE) or Table(headers=[])
+    companies_archive.canonical_headers(COMPANY_HEADERS)
+    for h in companies_archive.headers:
+        if h not in companies.headers:
+            companies.headers.append(h)
     company_rows: dict[str, dict[str, str]] = {}
-    for r in companies.rows:
+    # Archived companies are loaded too, so a company that posts again comes
+    # back with its previous outreach status and contacts.
+    for r in companies_archive.rows + companies.rows:
         r["Outreach Track"] = r.get("Outreach Track") or TRACK_DEV
         company_rows[_company_row_key(r)] = r
 
@@ -560,7 +568,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         await _gather_limited([lambda k=k: contact_one(k) for k in need_contact], ENRICH_CONCURRENCY)
     _save_attempts(attempt_updates)
 
-    # 5. Status tracking, ordering, write back.
+    # 5. Status tracking, ordering, write back. Companies without open jobs
+    #    move to the Companies Archive tab (and come back when they post again).
     rows = list(company_rows.values())
     _apply_status_tracking(rows, today_s)
     order = {YES: 0, UNKNOWN: 1, NO: 2}
@@ -570,7 +579,9 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             -(parse_date(r.get("Last Job Found", "")) or date.min).toordinal(),
         )
     )
-    companies.rows = rows
+    companies.rows = [r for r in rows if _company_row_key(r) in by_row]
+    companies_archive.headers = list(companies.headers)
+    companies_archive.rows = [r for r in rows if _company_row_key(r) not in by_row]
 
     # Mirror company facts / contacts into each job row (read-only copy).
     for job in jobs.rows:
@@ -582,6 +593,9 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
     store.write(jobs_tab(), jobs)
     store.write(TAB_COMPANIES, companies)
     store.set_dropdown(TAB_COMPANIES, "Outreach Status", OUTREACH_STATUSES)
+    if companies_archive.rows or store.read(TAB_COMPANIES_ARCHIVE) is not None:
+        store.write(TAB_COMPANIES_ARCHIVE, companies_archive)
+        store.set_dropdown(TAB_COMPANIES_ARCHIVE, "Outreach Status", OUTREACH_STATUSES)
     if archived:
         archive = store.read(TAB_ARCHIVE) or Table(headers=[])
         archive.ensure_headers(ARCHIVE_HEADERS)
@@ -593,7 +607,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "archived_jobs": len(archived),
             "removed_blocked_jobs": removed_blocked,
             "open_jobs": len(jobs.rows),
-            "companies": len({rk.split("|")[0] for rk in company_rows}),
+            "companies": len({_key(r.get("Company Name", "")) for r in companies.rows}),
+            "companies_archived": len(companies_archive.rows),
             "target_companies": len(
                 {rk.split("|")[0] for rk, r in company_rows.items() if r.get("Target") == YES}
             ),

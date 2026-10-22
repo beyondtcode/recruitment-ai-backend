@@ -13,6 +13,7 @@ Env vars:
   LEADS_MAX_COMPANY_ENRICH (default 80)  — company lookups per run
   LEADS_MAX_CONTACT_ENRICH (default 40)  — contact lookups per run
   LEADS_ENRICH_REFRESH_DAYS (default 90) — re-check size/type after N days
+  LEADS_MAX_LINK_CHECKS (default 200)    — job links checked for "closed" per run
 """
 
 from __future__ import annotations
@@ -293,7 +294,11 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         else:
             kept.append(row)
 
-    links = [r["Job Link"].strip() for r in kept if r.get("Job Link", "").strip().startswith("http")]
+    # Check the jobs that were checked longest ago first (never-checked first),
+    # capped per run so a big backlog is worked through over several runs.
+    checkable = [r for r in kept if r.get("Job Link", "").strip().startswith("http")]
+    checkable.sort(key=lambda r: parse_date(r.get("Last Checked", "")) or date.min)
+    links = [r["Job Link"].strip() for r in checkable[: _env_int("LEADS_MAX_LINK_CHECKS", 200)]]
     statuses = await check(links) if links else {}
     open_rows: list[dict[str, str]] = []
     archived: list[dict[str, str]] = []
@@ -498,6 +503,7 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "searches_used": getattr(search, "used", 0) if search is not None else 0,
             "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,
+            "links_not_checked_yet": max(len(checkable) - len(links), 0),
             "link_checks": {
                 s: sum(1 for v in statuses.values() if v == s) for s in ("open", "closed", "unknown")
             },

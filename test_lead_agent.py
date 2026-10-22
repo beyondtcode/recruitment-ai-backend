@@ -570,3 +570,11 @@ class CompaniesArchiveTests(unittest.TestCase):
         back = {r["Company Name"]: r for r in store.read("Companies").rows}
         self.assertEqual(back["Gone"]["Outreach Status"], "פולואפ נשלח")  # history kept
         self.assertEqual(store.read("Companies Archive").rows, [])
+
+
+class ForeignProfileTests(unittest.TestCase):
+    def test_foreign_subdomains_dropped(self) -> None:
+        self.assertTrue(cc._foreign_profile("https://pk.linkedin.com/in/hammad"))
+        self.assertTrue(cc._foreign_profile("https://in.linkedin.com/in/x"))
+        self.assertFalse(cc._foreign_profile("https://il.linkedin.com/in/hanan"))
+        self.assertFalse(cc._foreign_profile("https://www.linkedin.com/in/hanan"))

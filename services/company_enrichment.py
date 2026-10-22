@@ -211,28 +211,66 @@ _linkedin_lock = asyncio.Lock()
 LINKEDIN_PAUSE_SECONDS = 1.5
 
 
+def _fetch_company_playwright_sync(url: str, timeout_ms: int = 30000) -> str:
+    """Render the public company page in headless Chromium (LinkedIn answers
+    plain HTTP clients with 403 but usually serves the guest page to a browser)."""
+    from services.scraper import BROWSER_USER_AGENT, _import_playwright_sync
+
+    sync_playwright = _import_playwright_sync()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        try:
+            context = browser.new_context(user_agent=BROWSER_USER_AGENT, locale="en-US")
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
+            page = context.new_page()
+            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(2000)
+            if response is not None and response.status >= 400:
+                logger.info("company_enrichment: browser got %s for %s", response.status, url)
+                return ""
+            if "authwall" in page.url or "/login" in page.url:
+                logger.info("company_enrichment: LinkedIn auth wall for %s", url)
+                return ""
+            return page.content()
+        finally:
+            browser.close()
+
+
 async def fetch_linkedin_company(url: str) -> LinkedInPage | None:
     """Fetch the public company page. None when LinkedIn blocks or the page is empty.
 
-    Requests are serialized with a short pause to avoid LinkedIn rate limits.
+    Tries a plain HTTP request first, then a headless browser. Requests are
+    serialized with a short pause to avoid LinkedIn rate limits.
     """
     if "linkedin.com/company/" not in (url or ""):
         return None
     async with _linkedin_lock:
         try:
-            async with httpx.AsyncClient(
-                headers=_PAGE_HEADERS, timeout=20.0, follow_redirects=True
-            ) as client:
-                response = await client.get(url)
-        except Exception:
-            logger.debug("company_enrichment: fetch failed for %s", url, exc_info=True)
-            return None
+            html = ""
+            try:
+                async with httpx.AsyncClient(
+                    headers=_PAGE_HEADERS, timeout=20.0, follow_redirects=True
+                ) as client:
+                    response = await client.get(url)
+                if response.status_code == 200 and "authwall" not in str(response.url):
+                    html = response.text
+            except Exception:
+                logger.debug("company_enrichment: http fetch failed for %s", url, exc_info=True)
+            page = parse_linkedin_company_page(html) if html else None
+            if page is None or page.size == UNKNOWN:
+                try:
+                    html = await asyncio.to_thread(_fetch_company_playwright_sync, url)
+                except Exception:
+                    logger.info("company_enrichment: browser fetch failed for %s", url, exc_info=True)
+                    html = ""
+                page = parse_linkedin_company_page(html) if html else page
+            if page is None:
+                logger.info("company_enrichment: LinkedIn page not readable %s", url)
+            return page
         finally:
             await asyncio.sleep(LINKEDIN_PAUSE_SECONDS)
-    if response.status_code != 200 or "authwall" in str(response.url):
-        logger.info("company_enrichment: LinkedIn page not readable (%s) %s", response.status_code, url)
-        return None
-    return parse_linkedin_company_page(response.text)
 
 
 async def enrich_company(

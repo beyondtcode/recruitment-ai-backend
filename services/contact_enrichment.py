@@ -63,6 +63,15 @@ class Contact:
     linkedin_url: str
 
 
+_COUNTRY_SUBDOMAIN_RE = re.compile(r"^https?://([a-z]{2})\.linkedin\.com/", re.IGNORECASE)
+
+
+def _foreign_profile(link: str) -> bool:
+    """True for profiles on another country's LinkedIn subdomain (il / www are kept)."""
+    m = _COUNTRY_SUBDOMAIN_RE.match(link or "")
+    return bool(m) and m.group(1).lower() != "il"
+
+
 def choose_profile(target_reason: str, latest_category: str) -> str:
     if target_reason == "systems":
         return "systems"
@@ -80,6 +89,9 @@ Rules:
   (a linkedin.com/in/ profile URL). Never invent people or URLs.
 - The person must CURRENTLY work at the given company (the result title/snippet shows the
   company as their current employer). Skip former employees and other companies.
+- The company hires in Israel. Beware of different companies with a similar name in other
+  countries: when the result does not clearly match this company (name, industry, Israel),
+  skip it. When in doubt, return null rather than a wrong person.
 - Never pick recruiters, talent acquisition, HR, HRBP or people/HR roles.
 - Priority order (primary = best available, alternate = next best, a different person):
   {priority}
@@ -109,6 +121,7 @@ async def find_contacts(
     profile: str,
     domain: str,
     search: SearchClient | None,
+    company_hint: str = "",
 ) -> tuple[Contact | None, Contact | None]:
     """Return (primary, alternate).
 
@@ -126,7 +139,7 @@ async def find_contacts(
         if i == len(clauses) - 1 and i >= 2 and len(results) >= 2:
             break
         try:
-            batch = await search.search(f'"{company_name}" {clause}', num=10, domain="linkedin.com")
+            batch = await search.search(f'"{company_name}" {clause} Israel', num=10, domain="linkedin.com")
         except BudgetExceeded:
             if not results:
                 raise  # nothing searched for this company: caller retries next run
@@ -136,6 +149,8 @@ async def find_contacts(
             continue
         for r in batch:
             link = r.link.split("?")[0].rstrip("/")
+            if _foreign_profile(link):
+                continue  # e.g. pk.linkedin.com — usually a similarly named company abroad
             if "linkedin.com/in/" in link and link not in seen:
                 seen.add(link)
                 results.append(SearchResult(title=r.title, link=link, snippet=r.snippet))
@@ -144,8 +159,9 @@ async def find_contacts(
         return None, None
 
     system = _SYSTEM_PROMPT.replace("{priority}", priority.format(domain=domain or "software"))
+    hint = f"Company LinkedIn page: {company_hint}\n" if company_hint else ""
     user = (
-        f"Company: {company_name}\n\nSearch results:\n"
+        f"Company: {company_name}\n{hint}\nSearch results:\n"
         f"{format_results(results, limit=25)}\n\nRespond with JSON only."
     )
     try:

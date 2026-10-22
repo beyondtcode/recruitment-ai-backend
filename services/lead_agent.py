@@ -539,7 +539,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         profile = choose_profile(reason, row.get("Category", ""))
         try:
             primary, alternate = await find_contacts(
-                row["Company Name"], profile, row.get("Category", ""), search
+                row["Company Name"], profile, row.get("Category", ""), search,
+                company_hint=row.get("Company LinkedIn", ""),
             )
         except BudgetExceeded:
             contacts_searched -= 1

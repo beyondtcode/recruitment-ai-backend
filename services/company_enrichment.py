@@ -7,12 +7,16 @@ knowledge and marks low confidence as unknown.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 
+import httpx
+from bs4 import BeautifulSoup
+
 from services.enrichment import complete_json
-from services.search_client import SearchClient, format_results
+from services.search_client import BudgetExceeded, SearchClient, format_results
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +144,8 @@ def compute_target(
 
 
 _SYSTEM_PROMPT = """You profile Israeli employers for a B2B outreach campaign.
-Given a company name, a few of its job titles, and web search results (usually its LinkedIn
-company page), return ONLY a JSON object:
+Given a company name, a few of its job titles, and data from its LinkedIn company page or web
+search results, return ONLY a JSON object:
 - "linkedin_url": the company's LinkedIn company page URL from the results, or null
 - "size": the LinkedIn employee-count bucket, exactly one of
   "1-10","11-50","51-200","201-500","501-1000","1001-5000","5001-10000","10001+", or null.
@@ -161,38 +165,126 @@ Be careful: the result must be about this exact company, not a similarly named o
 Do not include markdown or extra keys."""
 
 
+@dataclass
+class LinkedInPage:
+    size: str = UNKNOWN
+    industry: str = ""
+    description: str = ""
+
+
+_PAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def parse_linkedin_company_page(html: str) -> LinkedInPage | None:
+    """Read size / industry / description from a public LinkedIn company page."""
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    def field(test_id: str) -> str:
+        el = soup.select_one(f'[data-test-id="{test_id}"] dd') or soup.select_one(
+            f'[data-test-id="{test_id}"]'
+        )
+        return " ".join(el.get_text(" ", strip=True).split()) if el else ""
+
+    size_text = field("about-us__size")
+    industry = field("about-us__industry")
+    description = field("about-us__description")
+    if not description:
+        meta = soup.find("meta", attrs={"name": "description"}) or soup.find(
+            "meta", attrs={"property": "og:description"}
+        )
+        description = (meta.get("content") or "").strip() if meta else ""
+    size = size_from_snippets(size_text) if size_text else UNKNOWN
+    if size == UNKNOWN:
+        size = size_from_snippets(soup.get_text(" ", strip=True)[:20000])
+    if size == UNKNOWN and not industry and not description:
+        return None
+    return LinkedInPage(size=size, industry=industry, description=description[:800])
+
+
+_linkedin_lock = asyncio.Lock()
+LINKEDIN_PAUSE_SECONDS = 1.5
+
+
+async def fetch_linkedin_company(url: str) -> LinkedInPage | None:
+    """Fetch the public company page. None when LinkedIn blocks or the page is empty.
+
+    Requests are serialized with a short pause to avoid LinkedIn rate limits.
+    """
+    if "linkedin.com/company/" not in (url or ""):
+        return None
+    async with _linkedin_lock:
+        try:
+            async with httpx.AsyncClient(
+                headers=_PAGE_HEADERS, timeout=20.0, follow_redirects=True
+            ) as client:
+                response = await client.get(url)
+        except Exception:
+            logger.debug("company_enrichment: fetch failed for %s", url, exc_info=True)
+            return None
+        finally:
+            await asyncio.sleep(LINKEDIN_PAUSE_SECONDS)
+    if response.status_code != 200 or "authwall" in str(response.url):
+        logger.info("company_enrichment: LinkedIn page not readable (%s) %s", response.status_code, url)
+        return None
+    return parse_linkedin_company_page(response.text)
+
+
 async def enrich_company(
     company_name: str,
     job_titles: list[str],
     search: SearchClient | None,
+    company_link: str = "",
 ) -> CompanyInfo:
-    """Find size / type for one company. Never raises; returns UNKNOWN on failure."""
-    results_text = "(web search not configured — use your own knowledge only)"
-    snippet_size = UNKNOWN
-    if search is not None:
+    """Find size / type for one company. Never raises; returns UNKNOWN on failure.
+
+    Order: public LinkedIn company page (free) → web search (counts against the
+    run budget) → LLM knowledge only.
+    """
+    evidence = ""
+    page_size = UNKNOWN
+    linkedin_url = company_link if "linkedin.com/company/" in (company_link or "") else ""
+
+    page = await fetch_linkedin_company(linkedin_url) if linkedin_url else None
+    if page is not None:
+        page_size = page.size
+        evidence = (
+            f"LinkedIn company page ({linkedin_url}):\n"
+            f"  Company size: {page.size}\n  Industry: {page.industry or '?'}\n"
+            f"  About: {page.description or '?'}"
+        )
+    elif search is not None:
         try:
-            results = await search.search(f'"{company_name}" site:linkedin.com/company', num=8)
+            results = await search.search(
+                f'"{company_name}" company size employees', num=6, domain="linkedin.com"
+            )
+            evidence = "Web search results:\n" + format_results(results)
+            page_size = size_from_snippets(" ".join(r.snippet for r in results))
+        except BudgetExceeded:
+            evidence = ""
         except Exception:
             logger.warning("company_enrichment: search failed for %r", company_name, exc_info=True)
-            results = []
-        results_text = format_results(results)
-        snippet_size = size_from_snippets(" ".join(r.snippet for r in results))
+    if not evidence:
+        evidence = "(no web data available — use your own knowledge only; return null when unsure)"
 
     user = (
         f"Company: {company_name}\n"
         f"Job titles: {', '.join(job_titles[:5]) or '(none)'}\n\n"
-        f"Search results:\n{results_text}\n\nRespond with JSON only."
+        f"{evidence}\n\nRespond with JSON only."
     )
     try:
         data = await complete_json(_SYSTEM_PROMPT, user, max_tokens=300)
     except Exception:
         logger.warning("company_enrichment: LLM failed for %r", company_name, exc_info=True)
-        return CompanyInfo(size=snippet_size)
+        return CompanyInfo(size=page_size, linkedin_url=linkedin_url)
 
-    size = normalize_size(data.get("size"))
-    if size == UNKNOWN:
-        size = snippet_size
-    url = str(data.get("linkedin_url") or "").strip()
+    size = page_size if page_size != UNKNOWN else normalize_size(data.get("size"))
+    url = linkedin_url or str(data.get("linkedin_url") or "").strip()
     if "linkedin.com/company" not in url:
         url = ""
     return CompanyInfo(size=size, company_type=normalize_type(data.get("company_type")), linkedin_url=url)

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from services.enrichment import complete_json
 from services.lead_filters import AI_CATEGORIES
-from services.search_client import SearchClient, SearchResult, format_results
+from services.search_client import BudgetExceeded, SearchClient, SearchResult, format_results
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +110,27 @@ async def find_contacts(
     domain: str,
     search: SearchClient | None,
 ) -> tuple[Contact | None, Contact | None]:
-    """Return (primary, alternate). Never raises."""
+    """Return (primary, alternate).
+
+    Raises ``BudgetExceeded`` only when the run's search budget ran out before
+    anything was searched for this company. Other errors are swallowed.
+    """
     if search is None:
         return None, None
     priority, clauses = PROFILES.get(profile, PROFILES["dev"])
     results: list[SearchResult] = []
     seen: set[str] = set()
-    for clause in clauses:
+    for i, clause in enumerate(clauses):
+        # The last clause is a fallback (e.g. CEO/Founder): skip it when the
+        # earlier searches already found at least two people.
+        if i == len(clauses) - 1 and i >= 2 and len(results) >= 2:
+            break
         try:
-            batch = await search.search(f'site:linkedin.com/in "{company_name}" {clause}', num=10)
+            batch = await search.search(f'"{company_name}" {clause}', num=10, domain="linkedin.com")
+        except BudgetExceeded:
+            if not results:
+                raise  # nothing searched for this company: caller retries next run
+            break
         except Exception:
             logger.warning("contact_enrichment: search failed for %r", company_name, exc_info=True)
             continue

@@ -16,7 +16,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from services import lead_agent
 from services.lead_dedup import clear_seen_jobs
@@ -68,18 +68,27 @@ def _store():
         raise HTTPException(status_code=503, detail=f"Leads sheet unavailable: {exc}") from exc
 
 
+def _check_token(token: str | None) -> None:
+    """Optional shared secret: when LEADS_API_TOKEN is set, require X-Leads-Token."""
+    expected = (os.environ.get("LEADS_API_TOKEN") or "").strip()
+    if expected and (token or "").strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Leads-Token")
+
+
 @router.api_route("/run", methods=["GET", "POST"])
-async def run_agent() -> dict[str, Any]:
+async def run_agent(x_leads_token: str | None = Header(default=None)) -> dict[str, Any]:
     """Full every-2-days run. Writes the sheet and returns a summary for Slack."""
+    _check_token(x_leads_token)
     search = get_search_client()
     if search is None:
-        logger.warning("leads/run: SERPER_API_KEY not set — company data from the LLM only, no contacts")
+        logger.warning("leads/run: no TAVILY_API_KEY or SERPER_API_KEY — company data from LinkedIn pages / the LLM only, no contacts")
     return await lead_agent.run(_store(), search)
 
 
 @router.api_route("/weekly", methods=["GET", "POST"])
-async def weekly_file() -> dict[str, Any]:
+async def weekly_file(x_leads_token: str | None = Header(default=None)) -> dict[str, Any]:
     """Rebuild the Weekly campaign tab and return counts for the Slack message."""
+    _check_token(x_leads_token)
     return await lead_agent.weekly(_store())
 
 

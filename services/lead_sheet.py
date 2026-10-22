@@ -38,6 +38,7 @@ JOB_HEADERS: list[str] = [
     "Found Date",
     "Last Checked",
     "Source",
+    "Company LinkedIn",
 ]
 
 COMPANY_HEADERS: list[str] = [

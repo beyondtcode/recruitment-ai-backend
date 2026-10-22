@@ -183,7 +183,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(
                 list(row),
                 ["Company Name", "Job Title", "Category", "Outreach Phrasing", "Job Summary",
-                 "Job Link", "Publish Date", "Found Date", "Source"],
+                 "Job Link", "Publish Date", "Found Date", "Source", "Company LinkedIn"],
             )
             wix = next(l for l in leads1 if l.company_name == "Wix")
             self.assertEqual(wix.publish_date, "20/10/2026")

@@ -19,7 +19,7 @@ All systems share Monday API helpers and run from the same FastAPI app in produc
 - [API endpoints](#api-endpoints)
 - [System 1: CV pipeline](#system-1-cv-pipeline)
 - [System 2: CRM meeting pipeline](#system-2-crm-meeting-pipeline)
-- [System 3: Lead scraping](#system-3-lead-scraping)
+- [System 3: Lead agent](#system-3-lead-agent)
 - [System 4: CV Tailoring & Job Matcher](#system-4-cv-tailoring--job-matcher)
 - [Project structure (file by file)](#project-structure-file-by-file)
 - [Tests](#tests)
@@ -508,41 +508,59 @@ crm_integration/contact_profile.py — update matched lead (AI profile, last con
 
 ---
 
-## System 3: Lead scraping
+## System 3: Lead agent
 
-**Goal:** Find open roles in 12 categories on Israeli job boards, drop blocked companies and hardware roles, and return clean, sheet-ready rows over HTTP (n8n appends them to the leads sheet).
+**Goal:** Find product companies (50–200 employees) that are hiring in 12 role categories, attach a decision-maker contact, and prepare a weekly outreach file — all in the leads Google Sheet.
 
-### Step-by-step
+### Endpoints (called by n8n)
+
+| Endpoint | When | What |
+| --- | --- | --- |
+| `POST /api/leads/run` | every 2 days 08:00 | archive closed jobs → collect new jobs → enrich companies → find contacts → write the sheet. Returns a JSON summary for Slack. |
+| `POST /api/leads/weekly` | Sundays 08:00 | rebuild the **Weekly** tab. Returns `{total_companies, new_companies, returning_companies, sheet_url}`. |
+| `GET /api/leads/scrape-all` | legacy | collection only, returns rows (no sheet access). |
+
+When `LEADS_API_TOKEN` is set, `/run` and `/weekly` require the header `X-Leads-Token`. Runs are serialized (one at a time).
+
+### Sheet tabs
+
+| Tab | Owner | Content |
+| --- | --- | --- |
+| `Sheet1` (jobs, `LEADS_JOBS_TAB`) | agent | one row per open job: Company Name, Job Title, Category, Outreach Phrasing, Job Summary, Job Link, Publish Date, Found Date, Last Checked, Source, Company LinkedIn |
+| `Companies` | agent + people | one row per company: size, type, Target (כן/לא/לא ידוע), latest job, contact + alternate, **Outreach Status** (dropdown, edited by people, never overwritten), Status Updated (stamped automatically when the status changes) |
+| `Archive` | agent | closed jobs with Closed Date and the company's outreach status |
+| `Blocked Companies` | people | `Company`, `Name Variants` (comma-separated). Seeded with the 11 spec companies. Jobs of a newly added company are removed on the next run. |
+| `Do Not Contact` | people | `Company Name`, `Reason`. Never targeted, never in the weekly file. |
+| `Weekly` | agent | campaign file: new companies on top; companies already contacted that posted a new job below, highlighted. |
+
+Columns are matched by header name, so people can reorder or add columns.
+
+### Run steps
 
 ```
-GET /api/leads/scrape-all   (n8n, every 2 days 08:00)
-        ↓
-services/job_sources.py — LEAD_SEARCHES (board, label, url), ~3-day window
-        ↓
-services/scraper.py — Playwright + BeautifulSoup listing scrape (+ card snippet),
-                      lead title prefilter (services/lead_filters.passes_title_prefilter)
-        ↓
-services/lead_dedup.py — skip job links seen before (SQLite, data/seen_leads.db)
-        ↓
-services/lead_filters.py — blocked companies, hardware roles,
-                           cross-board duplicates (company + title fingerprint)
-        ↓
-services/enrichment.py — LLM: category (one of 12, or none → dropped) + job summary
-        ↓
-JSON list of LeadOpportunity
+services/lead_agent.run
+  1. remove jobs of blocked companies; services/job_status.check_jobs → closed (404/410 or
+     "no longer accepting applications") → Archive; open → Last Checked = today
+  2. services/lead_pipeline: LEAD_SEARCHES → title prefilter → seen links → blocklist,
+     hardware, cross-board duplicates → LLM category + summary
+  3. Companies: services/company_enrichment — public LinkedIn company page (free, link from the
+     LinkedIn job card) → web search → LLM; Target via compute_target()
+  4. services/contact_enrichment — LinkedIn profile search + LLM pick, by profile:
+     dev (CTO/VP R&D → Director/R&D manager → CEO/founder), ai (CTO → COO → CEO),
+     systems for Salesforce/monday.com (VP Ops/RevOps → COO/CIO). Never HR/recruiters.
 ```
 
-Response keys match the sheet headers: **Company Name**, **Job Title**, **Category**, **Outreach Phrasing**, **Job Summary**, **Job Link**, **Publish Date** (DD/MM/YYYY), **Found Date**, **Source**.
+Target rules: product company with 51–200 employees → כן. Salesforce / monday.com roles → כן at any company with 51+ employees (any type). Staffing / outsourcing companies and Do Not Contact → לא. Unknown size → לא ידוע (retried).
 
-Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יישום Salesforce, יישום monday.com, AI Builder, AI Workflow Builder, AI Automation Specialist, AI Implementation Specialist, AI Agent Developer. Outreach phrasing per category is in `lead_filters._PHRASING`.
+Cost controls: web search (Tavily, Serper as fallback) is capped per run (`LEADS_MAX_SEARCHES_PER_RUN`, default 60; company lookups may use at most half). Company data is refreshed every 90 days. Lookups that found nothing are retried after 7 days, at most 3 times. The run summary reports `searches_used`.
 
-Not collected: DevOps/SRE, data science, product, cyber, support, hardware (`hardware, chip design, firmware, קושחה, embedded, משובץ, driver, kernel, BSP` in title or snippet), and the 11 companies in `lead_filters.BLOCKED_COMPANIES` (SQLink is also no longer scraped).
+Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יישום Salesforce, יישום monday.com, AI Builder, AI Workflow Builder, AI Automation Specialist, AI Implementation Specialist, AI Agent Developer. Not collected: DevOps/SRE, data science, product, cyber, support, hardware, and blocked companies. SQLink is not scraped.
 
-Jobs whose LLM call fails are **not** marked as seen, so the next run retries them. The dedup store lives in `./data` (mounted as a Docker volume) so it survives rebuilds.
+### Setup
 
-### Sources (`/scrape-all`)
-
-LinkedIn, AllJobs, Drushim, JobMaster, Glassdoor, Jobnet — 22 searches covering development, QA/automation, Salesforce/monday.com and AI Builder roles. Failures on one search are logged and do not abort the others. The CV matcher (System 4) keeps its own `DEFAULT_SEARCH_URLS`.
+1. Google Cloud: create a service account, enable the Google Sheets API, download a JSON key, share the sheet with the service-account email as **Editor**. Put the key at `./data/google-sa.json` on the server and set `GOOGLE_SERVICE_ACCOUNT_FILE=/app/data/google-sa.json`.
+2. Set `TAVILY_API_KEY` (and optionally `SERPER_API_KEY`), `LEADS_API_TOKEN`.
+3. `docker compose up -d --build recruitment-backend`.
 
 ### Dedup reset
 

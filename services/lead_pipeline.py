@@ -47,6 +47,7 @@ class LeadOpportunity(BaseModel):
     publish_date: str = Field(serialization_alias="Publish Date")
     found_date: str = Field(serialization_alias="Found Date")
     source: str = Field(serialization_alias="Source")
+    company_link: str = Field(default="", serialization_alias="Company LinkedIn")
 
 
 def _to_lead(job: dict, found_date: str) -> LeadOpportunity | None:
@@ -61,6 +62,7 @@ def _to_lead(job: dict, found_date: str) -> LeadOpportunity | None:
             publish_date=to_ddmmyyyy(job.get("publish_date") or ""),
             found_date=found_date,
             source=source_display(job.get("source") or ""),
+            company_link=job.get("company_link") or "",
         )
     except (ValidationError, KeyError, TypeError) as exc:
         logger.warning("Skipping invalid enriched job %r: %s", job, exc)

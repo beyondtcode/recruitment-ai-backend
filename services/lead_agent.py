@@ -60,7 +60,7 @@ from services.lead_sheet import (
     Table,
     jobs_tab,
 )
-from services.search_client import SearchClient
+from services.search_client import BudgetExceeded, SearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,61 @@ def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Retry limits for lookups that found nothing ("לא ידוע" / "לא נמצא")
+# ---------------------------------------------------------------------------
+
+MAX_ATTEMPTS = 3
+RETRY_AFTER_DAYS = 7
+
+
+def _attempts_db() -> sqlite3.Connection:
+    conn = _status_db()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS enrich_attempts ("
+        "company_key TEXT NOT NULL, kind TEXT NOT NULL, attempts INTEGER NOT NULL, "
+        "last_attempt TEXT NOT NULL, PRIMARY KEY (company_key, kind))"
+    )
+    return conn
+
+
+def _load_attempts() -> dict[tuple[str, str], tuple[int, date]]:
+    conn = _attempts_db()
+    try:
+        return {
+            (k, kind): (n, date.fromisoformat(last))
+            for k, kind, n, last in conn.execute(
+                "SELECT company_key, kind, attempts, last_attempt FROM enrich_attempts"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _save_attempts(updates: dict[tuple[str, str], tuple[int, date]]) -> None:
+    if not updates:
+        return
+    conn = _attempts_db()
+    try:
+        conn.executemany(
+            "INSERT INTO enrich_attempts (company_key, kind, attempts, last_attempt) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(company_key, kind) DO UPDATE SET attempts=excluded.attempts, "
+            "last_attempt=excluded.last_attempt",
+            [(k, kind, n, d.isoformat()) for (k, kind), (n, d) in updates.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _may_retry(attempts: dict, key: str, kind: str, today: date) -> bool:
+    record = attempts.get((key, kind))
+    if record is None:
+        return True
+    n, last = record
+    return n < MAX_ATTEMPTS and (today - last).days >= RETRY_AFTER_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +348,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             row["Open Jobs"] = "0"
 
     # 3b. Size / type enrichment.
+    attempts = _load_attempts()
+    attempt_updates: dict[tuple[str, str], tuple[int, date]] = {}
     refresh = timedelta(days=_env_int("LEADS_ENRICH_REFRESH_DAYS", 90))
     to_enrich = []
     for key, row in company_rows.items():
@@ -300,21 +357,50 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             continue
         enriched_on = parse_date(row.get("Last Enriched", ""))
         unknown = row.get("Company Size", "") in ("", UNKNOWN) or row.get("Company Type", "") in ("", UNKNOWN)
-        if unknown or enriched_on is None or today - enriched_on >= refresh:
+        if enriched_on is None:
+            to_enrich.append(key)
+        elif unknown:
+            if _may_retry(attempts, key, "company", today):
+                to_enrich.append(key)
+        elif today - enriched_on >= refresh:
             to_enrich.append(key)
     # Newest companies first, capped per run.
     to_enrich.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
     to_enrich = to_enrich[: _env_int("LEADS_MAX_COMPANY_ENRICH", 80)]
+    # Company lookups may use at most half of the run's search budget, so
+    # contacts for target companies always get searches too.
+    company_search_cap = (search.budget // 2) if search is not None and hasattr(search, "budget") else 0
+    skipped_for_budget = 0
+
+    def company_link_for(key: str) -> str:
+        row = company_rows[key]
+        if row.get("Company LinkedIn"):
+            return row["Company LinkedIn"]
+        for j in by_company.get(key, []):
+            if j.get("Company LinkedIn"):
+                return j["Company LinkedIn"]
+        return ""
 
     async def enrich_one(key: str) -> None:
+        nonlocal skipped_for_budget
         row = company_rows[key]
         titles = [j.get("Job Title", "") for j in by_company[key]]
-        info = await enrich_company(row["Company Name"], titles, search)
+        link = company_link_for(key)
+        use_search = search
+        if search is not None and getattr(search, "used", 0) >= company_search_cap:
+            if not link:
+                skipped_for_budget += 1
+                return  # no free source and no budget left for companies: try next run
+            use_search = None
+        info = await enrich_company(row["Company Name"], titles, use_search, link)
         row["Company Size"] = info.size
         row["Company Type"] = info.company_type
         if info.linkedin_url:
             row["Company LinkedIn"] = info.linkedin_url
         row["Last Enriched"] = today_s
+        if info.size == UNKNOWN or info.company_type == UNKNOWN:
+            n = attempts.get((key, "company"), (0, today))[0]
+            attempt_updates[(key, "company")] = (n + 1, today)
 
     await _gather_limited([lambda k=k: enrich_one(k) for k in to_enrich], ENRICH_CONCURRENCY)
 
@@ -328,23 +414,38 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         reasons[key] = reason
 
     # 4. Contacts for target companies without one.
-    need_contact = [
-        key
-        for key, row in company_rows.items()
-        if row.get("Target") == YES
-        and key in by_company
-        and row.get("Contact Name", "").strip() in ("", NOT_FOUND)
-    ]
+    need_contact = []
+    for key, row in company_rows.items():
+        if row.get("Target") != YES or key not in by_company:
+            continue
+        contact = row.get("Contact Name", "").strip()
+        if contact == "":
+            need_contact.append(key)
+        elif contact == NOT_FOUND and _may_retry(attempts, key, "contact", today):
+            need_contact.append(key)
+    need_contact.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
     need_contact = need_contact[: _env_int("LEADS_MAX_CONTACT_ENRICH", 40)]
     contacts_found = 0
+    contacts_searched = 0
 
     async def contact_one(key: str) -> None:
-        nonlocal contacts_found
+        nonlocal contacts_found, contacts_searched
+        if getattr(search, "remaining", 1) <= 0:
+            return  # budget used up: stays empty / "לא נמצא", retried next run
+        contacts_searched += 1
         row = company_rows[key]
         profile = choose_profile(reasons.get(key, ""), row.get("Category", ""))
-        primary, alternate = await find_contacts(row["Company Name"], profile, row.get("Category", ""), search)
+        try:
+            primary, alternate = await find_contacts(
+                row["Company Name"], profile, row.get("Category", ""), search
+            )
+        except BudgetExceeded:
+            contacts_searched -= 1
+            return
         if primary is None:
             row["Contact Name"] = NOT_FOUND
+            n = attempts.get((key, "contact"), (0, today))[0]
+            attempt_updates[(key, "contact")] = (n + 1, today)
             return
         contacts_found += 1
         row["Contact Name"], row["Contact Title"], row["Contact LinkedIn"] = (
@@ -358,7 +459,9 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             row["Alt Contact Name"] = NOT_FOUND
 
     if search is not None:
+        # The search client hard-caps the budget; extra lookups just get no results.
         await _gather_limited([lambda k=k: contact_one(k) for k in need_contact], ENRICH_CONCURRENCY)
+    _save_attempts(attempt_updates)
 
     # 5. Status tracking, ordering, write back.
     rows = list(company_rows.values())
@@ -389,8 +492,11 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "companies": len(rows),
             "target_companies": sum(1 for r in rows if r.get("Target") == YES),
             "companies_enriched": len(to_enrich),
-            "contacts_searched": len(need_contact) if search is not None else 0,
+            "companies_waiting_for_budget": skipped_for_budget,
+            "contacts_searched": contacts_searched,
             "contacts_found": contacts_found,
+            "searches_used": getattr(search, "used", 0) if search is not None else 0,
+            "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,
             "link_checks": {
                 s: sum(1 for v in statuses.values() if v == s) for s in ("open", "closed", "unknown")

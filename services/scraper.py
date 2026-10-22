@@ -695,10 +695,22 @@ def parse_job_cards(html: str, config: BoardConfig) -> list[dict[str, str]]:
                 ),
                 "source": config.source,
                 "snippet": _extract_snippet(card, config, title, company),
+                "company_link": _extract_company_link(card),
             }
         )
 
     return jobs
+
+
+def _extract_company_link(card: Any) -> str:
+    """LinkedIn cards link the employer's company page; other boards return ""."""
+    if not hasattr(card, "find_all"):
+        return ""
+    for anchor in card.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if "linkedin.com/company/" in href:
+            return _clean_job_link(href).rstrip("/")
+    return ""
 
 
 def filter_jobs(

@@ -257,14 +257,9 @@ function setupTab_(ss, tab, headers) {
   }
   sh.setConditionalFormatRules(rules);
 
-  // Warning (not a block) when someone edits columns the agent rewrites.
+  // No protection: remove any left over from an earlier setup.
   sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
-  const protection = sh.protect().setDescription('נכתב על ידי הסוכן').setWarningOnly(true);
-  if (editable.length) {
-    protection.setUnprotectedRanges(editable.map(function (h) {
-      return sh.getRange(2, headers.indexOf(h) + 1, sh.getMaxRows() - 1, 1);
-    }));
-  }
+  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { p.remove(); });
   if (TAB_COLORS[tab]) sh.setTabColor(TAB_COLORS[tab]);
 }
 

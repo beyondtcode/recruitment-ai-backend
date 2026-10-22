@@ -386,3 +386,29 @@ class AppsScriptStoreTests(unittest.TestCase):
         store = AppsScriptStore("https://script.google.com/x", "wrong", "S", transport=self._transport({}))
         with self.assertRaisesRegex(RuntimeError, "unauthorized"):
             store.read("Sheet1")
+
+
+class LinkCheckCapTests(unittest.TestCase):
+    def test_oldest_first_and_capped(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        rows = [["Company Name", "Job Title", "Job Link", "Last Checked"]]
+        rows += [[f"C{i}", "Dev", f"https://x/{i}", "20/10/2026"] for i in range(3)]
+        rows += [["New", "Dev", "https://x/never", ""]]
+        store = MemoryStore({"Sheet1": rows})
+        checked: list[str] = []
+
+        async def scrape():
+            return [], []
+
+        async def check(urls):
+            checked.extend(urls)
+            return {u: "open" for u in urls}
+
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db"),
+                                          "LEADS_MAX_LINK_CHECKS": "2"}):
+            summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=TODAY))
+        tmp.cleanup()
+        self.assertEqual(checked[0], "https://x/never")
+        self.assertEqual(len(checked), 2)
+        self.assertEqual(summary["links_not_checked_yet"], 2)
+        self.assertEqual(len(store.read("Sheet1").rows), 4)  # unchecked rows are kept

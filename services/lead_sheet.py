@@ -46,6 +46,7 @@ JOB_HEADERS: list[str] = [
     "Contact Title",
     "Contact LinkedIn",
     "Outreach Status",
+    "Status Updated",
     # Job details
     "Job Link",
     "Publish Date",

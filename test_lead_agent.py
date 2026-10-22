@@ -578,3 +578,10 @@ class ForeignProfileTests(unittest.TestCase):
         self.assertTrue(cc._foreign_profile("https://in.linkedin.com/in/x"))
         self.assertFalse(cc._foreign_profile("https://il.linkedin.com/in/hanan"))
         self.assertFalse(cc._foreign_profile("https://www.linkedin.com/in/hanan"))
+
+
+class StatusMirrorTests(unittest.TestCase):
+    def test_status_updated_in_jobs(self) -> None:
+        from services.lead_sheet import JOB_HEADERS
+        self.assertIn("Status Updated", JOB_HEADERS)
+        self.assertIn("Status Updated", lead_agent.MIRRORED_COLUMNS)

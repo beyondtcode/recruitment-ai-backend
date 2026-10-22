@@ -146,7 +146,7 @@ const JOBS_TAB = 'Jobs';
 const HEADERS = {
   'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
   'Companies': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
-  'Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
+  'Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
   'Do Not Contact': ["Company Name", "Reason"],
   'Blocked Companies': ["Company", "Name Variants"],
   'Archive': ["Company Name", "Job Title", "Category", "Job Link", "Publish Date", "Found Date", "Last Checked", "Closed Date", "Outreach Status", "Source", "Job Summary"],
@@ -257,14 +257,9 @@ function setupTab_(ss, tab, headers) {
   }
   sh.setConditionalFormatRules(rules);
 
-  // Warning (not a block) when someone edits columns the agent rewrites.
+  // No protection: remove any left over from an earlier setup.
   sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
-  const protection = sh.protect().setDescription('נכתב על ידי הסוכן').setWarningOnly(true);
-  if (editable.length) {
-    protection.setUnprotectedRanges(editable.map(function (h) {
-      return sh.getRange(2, headers.indexOf(h) + 1, sh.getMaxRows() - 1, 1);
-    }));
-  }
+  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { p.remove(); });
   if (TAB_COLORS[tab]) sh.setTabColor(TAB_COLORS[tab]);
 }
 

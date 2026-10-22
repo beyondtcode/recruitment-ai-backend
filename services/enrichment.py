@@ -154,6 +154,40 @@ def _user_prompt(company_name: str, job_title: str, snippet: str) -> str:
     )
 
 
+async def complete_json(system: str, user: str, *, max_tokens: int = MAX_TOKENS) -> dict[str, Any]:
+    """Run one LLM call with the configured provider and parse a JSON object reply."""
+    provider = _resolve_provider()
+    if provider is None:
+        raise RuntimeError("No LLM API key set (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+    if provider == "anthropic":
+        response = await _get_anthropic_client().messages.create(
+            model=settings.anthropic_model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = "\n".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        )
+    else:
+        model = os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+        response = await _get_openai_client().chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = response.choices[0].message.content if response.choices else ""
+    if not text:
+        raise ValueError("LLM response had no text content")
+    return _extract_json_object(text)
+
+
 async def _classify_with_anthropic(
     company_name: str,
     job_title: str,

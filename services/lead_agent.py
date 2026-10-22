@@ -233,6 +233,18 @@ def _save_attempts(updates: dict[tuple[str, str], tuple[int, date]]) -> None:
         conn.close()
 
 
+def reset_state() -> dict[str, int]:
+    """Forget status history and retry counters (used when starting a new sheet)."""
+    conn = _attempts_db()
+    try:
+        a = conn.execute("DELETE FROM enrich_attempts").rowcount
+        b = conn.execute("DELETE FROM company_status").rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return {"retry_counters": max(a, 0), "status_history": max(b, 0)}
+
+
 def _may_retry(attempts: dict, key: str, kind: str, today: date) -> bool:
     record = attempts.get((key, kind))
     if record is None:

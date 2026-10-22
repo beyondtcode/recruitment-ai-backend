@@ -4,6 +4,8 @@
  *
  * Setup (in the leads Google Sheet):
  *   1. Extensions → Apps Script → paste this file (replace everything).
+ *      For a new, empty sheet: choose "setupSheet" in the function list → Run
+ *      (creates and formats all tabs; see the bottom of this file).
  *   2. Replace PASTE_TOKEN_HERE below with the same value as
  *      LEADS_SHEET_WEBAPP_TOKEN in the server's .env.
  *   3. Deploy → New deployment → type "Web app"
@@ -131,4 +133,177 @@ function dropdown_(ss, tab, column, list) {
   sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   const rule = SpreadsheetApp.newDataValidation().requireValueInList(list, true).setAllowInvalid(true).build();
   sh.getRange(2, col + 1, sh.getMaxRows() - 1, 1).setDataValidation(rule);
+}
+
+
+/* ===========================================================================
+ * One-time setup for a NEW, empty sheet.
+ * In the Apps Script editor choose "setupSheet" in the function list → Run.
+ * Safe to run again: existing tabs keep their data; only formatting is reapplied.
+ * ======================================================================== */
+
+const JOBS_TAB = 'Jobs';
+const HEADERS = {
+  'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
+  'Companies': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
+  'Do Not Contact': ["Company Name", "Reason"],
+  'Blocked Companies': ["Company", "Name Variants"],
+  'Archive': ["Company Name", "Job Title", "Category", "Job Link", "Publish Date", "Found Date", "Last Checked", "Closed Date", "Outreach Status", "Source", "Job Summary"],
+  'Companies Archive': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"]
+};
+const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
+const TAB_COLORS = {
+  'Weekly': '#34a853', 'Companies': '#4285f4', 'Jobs': '#7baaf7', 'Do Not Contact': '#fb8c00',
+  'Blocked Companies': '#fb8c00', 'Archive': '#9e9e9e', 'Companies Archive': '#9e9e9e', 'מדריך': '#8e24aa'
+};
+const STATUSES = ["לא נשלח", "בקשת חברות נשלחה", "הודעה ראשונה נשלחה", "פולואפ נשלח", "ענה: חיובי", "ענה: שלילי", "לא רלוונטי"];
+const BLOCKED_SEED = [["מטריקס", "Matrix, Matrix IT, מטריקס"], ["NVIDIA", "NVIDIA, NVIDIA AI, Nvidia, אנבידיה, אינבידיה"], ["ONE", "ONE Technologies, One1, וואן טכנולוגיות"], ["SQLink", "SQLink, SQLink Group, אס.קיו.לינק, SQ Link"], ["התעשייה האווירית", "IAI, IAI - Israel Aerospace Industries, Israel Aerospace Industries, התעשייה האווירית, תעשייה אווירית"], ["אלעד מערכות", "Elad Software, Elad Software Systems, Elad Systems, אלעד מערכות"], ["קבוצת יעל", "Yael Group, Yael Software, קבוצת יעל"], ["Commit", "Commit, Commit Software, קומיט"], ["בינת", "Bynet, Bynet Data Communications, בינת, בינת סמך"], ["Intel", "Intel, Intel Corporation, אינטל"], ["Comblack", "Comblack, ComBlack, קומבלק"]];
+// Columns people may edit (yellow header). Everything else is written by the agent.
+const EDITABLE = {
+  'Companies': ['Outreach Status', 'Status Updated', 'Contact Name', 'Contact Title', 'Contact LinkedIn',
+                'Alt Contact Name', 'Alt Contact Title', 'Alt Contact LinkedIn'],
+  'Companies Archive': ['Outreach Status', 'Status Updated'],
+  'Do Not Contact': ['Company Name', 'Reason'],
+  'Blocked Companies': ['Company', 'Name Variants']
+};
+const WIDTHS = {
+  'Company Name': 190, 'Job Title': 250, 'Latest Job': 230, 'Job Summary': 320, 'Other Jobs': 260,
+  'Category': 150, 'Target': 75, 'Outreach Status': 165, 'Outreach Track': 95, 'Outreach Phrasing': 170,
+  'Contact Name': 150, 'Contact Title': 190, 'Alt Contact Name': 150, 'Alt Contact Title': 190,
+  'Contact': 230, 'Alt Contact': 230, 'Previous Outreach': 190, 'Name Variants': 420, 'Reason': 300,
+  'Company Size': 95, 'Company Type': 120, 'Open Jobs': 75, 'Source': 85
+};
+const NOTES = {
+  'Target': 'כן = בקהל היעד (חברת מוצר 50–200 עובדים; Salesforce/monday: כל חברה מ־50 עובדים). לא ידוע = הסוכן ינסה שוב.',
+  'Outreach Status': 'מעדכנים כאן בלבד (בלשונית Companies). הסוכן לא דורס ערך שעודכן ידנית.',
+  'Status Updated': 'מתמלא אוטומטית כשהסטטוס משתנה. אפשר לתקן ידנית.',
+  'Contact Name': 'אפשר להקליד איש קשר ידנית — הסוכן לא יחליף אותו.',
+  'Outreach Track': 'פיתוח = CTO / VP R&D. מערכות = משרות Salesforce / monday.com (VP Operations / RevOps / COO / CIO).',
+  'Outreach Phrasing': 'המילים שנכנסות להודעה במקום [תחום].',
+  'Company Size': 'טווח עובדים כפי שמופיע בלינקדאין.',
+  'Found Date': 'התאריך שבו הסוכן מצא את המשרה.',
+  'Publish Date': 'התאריך שבו החברה פרסמה את המשרה.',
+  'Last Checked': 'הפעם האחרונה שהסוכן וידא שהמשרה עדיין פתוחה.',
+  'Contact Found': 'מתי הסוכן מצא את איש הקשר. אחרי 60 יום ומשרה חדשה — נבדק מחדש.',
+  'Name Variants': 'כל השמות של החברה, מופרדים בפסיק (עברית ואנגלית).'
+};
+
+function setupSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  Object.keys(HEADERS).forEach(function (tab) { setupTab_(ss, tab, HEADERS[tab]); });
+  setupGuide_(ss);
+  // Remove the default empty first tab ("Sheet1" / "גיליון1").
+  ss.getSheets().forEach(function (sh) {
+    if (TAB_ORDER.indexOf(sh.getName()) < 0 && sh.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(sh);
+  });
+  TAB_ORDER.forEach(function (name, i) {
+    const sh = ss.getSheetByName(name);
+    if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); }
+  });
+  ss.setActiveSheet(ss.getSheetByName('Weekly'));
+  SpreadsheetApp.getUi().alert('הגיליון מוכן ✔');
+}
+
+function setupTab_(ss, tab, headers) {
+  const sh = sheet_(ss, tab, true);
+  const width = headers.length;
+  if (sh.getMaxColumns() < width) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
+  if (sh.getMaxColumns() > width) sh.deleteColumns(width + 1, sh.getMaxColumns() - width);
+  if (sh.getLastRow() === 0) sh.getRange(1, 1, 1, width).setValues([headers]);
+  if (tab === 'Blocked Companies' && sh.getLastRow() < 2) {
+    sh.getRange(2, 1, BLOCKED_SEED.length, 2).setValues(BLOCKED_SEED);
+  }
+
+  const all = sh.getRange(1, 1, sh.getMaxRows(), width);
+  all.setFontFamily('Arial').setFontSize(10).setVerticalAlignment('middle')
+     .setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP).setNumberFormat('@');
+  const head = sh.getRange(1, 1, 1, width);
+  head.setFontWeight('bold').setFontColor('#ffffff').setBackground('#1f3864');
+  sh.setRowHeight(1, 30);
+  sh.setFrozenRows(1);
+  sh.setFrozenColumns(1);
+
+  const editable = EDITABLE[tab] || [];
+  headers.forEach(function (h, i) {
+    const cell = sh.getRange(1, i + 1);
+    sh.setColumnWidth(i + 1, WIDTHS[h] || (/Link|LinkedIn/.test(h) ? 110 : (/Date|Checked|Updated|Found|Enriched/.test(h) ? 100 : 130)));
+    if (editable.indexOf(h) >= 0) cell.setBackground('#ffe599').setFontColor('#1f1f1f');
+    if (NOTES[h]) cell.setNote(NOTES[h]);
+  });
+
+  // Colors for Target and Outreach Status.
+  const rules = [];
+  const tCol = headers.indexOf('Target');
+  if (tCol >= 0) {
+    const r = sh.getRange(2, tCol + 1, sh.getMaxRows() - 1, 1);
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('כן').setBackground('#d9ead3').setFontColor('#274e13').setBold(true).setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('לא ידוע').setBackground('#fff2cc').setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('לא').setFontColor('#999999').setRanges([r]).build());
+  }
+  const sCol = headers.indexOf('Outreach Status');
+  if (sCol >= 0) {
+    const r = sh.getRange(2, sCol + 1, sh.getMaxRows() - 1, 1);
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ענה: חיובי').setBackground('#b6d7a8').setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ענה: שלילי').setBackground('#f4cccc').setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('לא רלוונטי').setFontColor('#999999').setRanges([r]).build());
+    ['בקשת חברות נשלחה', 'הודעה ראשונה נשלחה', 'פולואפ נשלח'].forEach(function (v) {
+      rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(v).setBackground('#cfe2f3').setRanges([r]).build());
+    });
+    if (tab === 'Companies' || tab === 'Companies Archive') {
+      const rule = SpreadsheetApp.newDataValidation().requireValueInList(STATUSES, true).setAllowInvalid(true).build();
+      r.setDataValidation(rule);
+    }
+  }
+  sh.setConditionalFormatRules(rules);
+
+  // Warning (not a block) when someone edits columns the agent rewrites.
+  sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
+  const protection = sh.protect().setDescription('נכתב על ידי הסוכן').setWarningOnly(true);
+  if (editable.length) {
+    protection.setUnprotectedRanges(editable.map(function (h) {
+      return sh.getRange(2, headers.indexOf(h) + 1, sh.getMaxRows() - 1, 1);
+    }));
+  }
+  if (TAB_COLORS[tab]) sh.setTabColor(TAB_COLORS[tab]);
+}
+
+function setupGuide_(ss) {
+  const sh = sheet_(ss, 'מדריך', true);
+  sh.clear();
+  sh.setRightToLeft(true);
+  const rows = [
+    ['סוכן הלידים – מדריך', '', ''],
+    ['', '', ''],
+    ['לשונית', 'מה יש בה', 'מי עורך'],
+    ['Weekly', 'רשימת הפנייה של השבוע: שורה לכל חברה (ולכל מסלול). חברות חדשות למעלה; חברות שכבר פנו אליהן ופרסמו משרה חדשה – למטה, בצבע.', 'נבנית מחדש בכל יום ראשון ב־8:00. לא עורכים כאן.'],
+    ['Companies', 'כל חברה שמגייסת עכשיו: גודל, סוג, האם בקהל היעד, איש קשר + חלופי, סטטוס פנייה. חברה עם משרות פיתוח וגם Salesforce/monday מופיעה פעמיים (מסלול פיתוח ומסלול מערכות).', 'מעדכנים את סטטוס הפנייה כאן. אפשר להקליד איש קשר ידנית – הסוכן לא יחליף אותו. עמודות עם כותרת צהובה = מותר לערוך.'],
+    ['Jobs', 'כל משרה פתוחה, עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
+    ['Do Not Contact', 'חברות שלא פונים אליהן (כבר בשיחה, בקמפיין אחר וכו׳).', 'מוסיפים שם חברה ומשפט סיבה.'],
+    ['Blocked Companies', 'חברות שלא אוספים מהן משרות בכלל, עם כל וריאציות השם.', 'מוסיפים שורה. בריצה הבאה המשרות שלהן נמחקות.'],
+    ['Archive', 'משרות שנסגרו, עם תאריך הסגירה.', 'לקריאה בלבד.'],
+    ['Companies Archive', 'חברות שאין להן כרגע משרות פתוחות, עם ההיסטוריה שלהן. חוזרות ל־Companies כשהן מפרסמות משרה חדשה.', 'לקריאה בלבד.'],
+    ['', '', ''],
+    ['סטטוס פנייה', 'משמעות', ''],
+    ['לא נשלח', 'עוד לא פנו (ברירת מחדל לחברה חדשה)', ''],
+    ['בקשת חברות נשלחה', 'נשלחה בקשת חברות בלינקדאין', ''],
+    ['הודעה ראשונה נשלחה', 'נשלחה הודעה אחרי שהבקשה אושרה', ''],
+    ['פולואפ נשלח', 'נשלחה הודעת המשך', ''],
+    ['ענה: חיובי', 'יש עניין', ''],
+    ['ענה: שלילי', 'אין עניין', ''],
+    ['לא רלוונטי', 'לא לפנות שוב', ''],
+    ['', '', ''],
+    ['Target', 'כן = בקהל היעד · לא = מחוץ לקהל היעד · לא ידוע = עוד לא נמצא מידע, הסוכן ינסה שוב', ''],
+    ['לוח זמנים', 'הסוכן רץ כל יומיים ב־8:00. הקובץ השבועי נבנה בכל יום ראשון ב־8:00 ונשלחת הודעה בסלאק.', ''],
+    ['איש קשר חלופי', 'פונים אליו רק אם הראשון לא אישר את בקשת החברות תוך שבוע.', ''],
+    ['לפני פנייה', 'כדאי להציץ בפרופיל הלינקדאין ולוודא שזה האדם הנכון בחברה הנכונה.', '']
+  ];
+  sh.getRange(1, 1, rows.length, 3).setValues(rows);
+  sh.getRange(1, 1, rows.length, 3).setFontFamily('Arial').setFontSize(10).setWrap(true).setVerticalAlignment('top');
+  sh.getRange('A1').setFontSize(16).setFontWeight('bold');
+  [3, 12].forEach(function (r) { sh.getRange(r, 1, 1, 3).setFontWeight('bold').setFontColor('#ffffff').setBackground('#1f3864'); });
+  sh.getRange('A4:A10').setFontWeight('bold');
+  sh.getRange('A21:A24').setFontWeight('bold');
+  sh.setColumnWidth(1, 170); sh.setColumnWidth(2, 520); sh.setColumnWidth(3, 380);
+  sh.setTabColor(TAB_COLORS['מדריך']);
 }

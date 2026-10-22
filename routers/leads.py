@@ -111,7 +111,21 @@ async def sheet_check(token: str | None = None) -> dict[str, Any]:
 
 
 @router.delete("/dedup")
-async def clear_lead_dedup() -> dict[str, int]:
+async def clear_lead_dedup(x_leads_token: str | None = Header(default=None)) -> dict[str, int]:
     """Clear the SQLite seen-jobs tables so scrape runs treat all links as new."""
+    _check_token(x_leads_token)
     deleted = clear_seen_jobs()
     return {"deleted": deleted}
+
+
+@router.post("/reset")
+async def reset_agent(x_leads_token: str | None = Header(default=None)) -> dict[str, Any]:
+    """Start over with a new, empty sheet: forget seen jobs, status history and retries.
+
+    Does not touch the sheet itself.
+    """
+    _check_token(x_leads_token)
+    async with lead_agent._agent_lock:
+        seen = clear_seen_jobs()
+        state = lead_agent.reset_state()
+    return {"seen_jobs_cleared": seen, **state}

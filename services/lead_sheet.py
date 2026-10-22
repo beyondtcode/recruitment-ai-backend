@@ -33,29 +33,33 @@ TAB_BLOCKED = "Blocked Companies"
 TAB_DO_NOT_CONTACT = "Do Not Contact"
 TAB_WEEKLY = "Weekly"
 
+# Column order of the jobs tab in a new sheet (setupSheet in the Apps Script
+# creates the same order). In an existing sheet the agent keeps whatever order
+# the sheet has and appends missing columns at the end.
 JOB_HEADERS: list[str] = [
     "Company Name",
     "Job Title",
     "Category",
-    "Outreach Phrasing",
-    "Job Summary",
-    "Job Link",
-    "Publish Date",
-    "Found Date",
-    "Last Checked",
-    "Source",
-    "Company LinkedIn",
     # Copied from Companies by the agent (read-only here):
-    "Company Size",
-    "Company Type",
     "Target",
     "Contact Name",
     "Contact Title",
     "Contact LinkedIn",
+    "Outreach Status",
+    # Job details
+    "Job Link",
+    "Publish Date",
+    "Found Date",
+    "Company Size",
+    "Company Type",
     "Alt Contact Name",
     "Alt Contact Title",
     "Alt Contact LinkedIn",
-    "Outreach Status",
+    "Outreach Phrasing",
+    "Job Summary",
+    "Source",
+    "Last Checked",
+    "Company LinkedIn",
 ]
 
 # Important columns first, technical ones at the end.
@@ -84,7 +88,19 @@ COMPANY_HEADERS: list[str] = [
     "Last Enriched",
 ]
 
-ARCHIVE_HEADERS: list[str] = JOB_HEADERS[:10] + ["Closed Date", "Outreach Status"]
+ARCHIVE_HEADERS: list[str] = [
+    "Company Name",
+    "Job Title",
+    "Category",
+    "Job Link",
+    "Publish Date",
+    "Found Date",
+    "Last Checked",
+    "Closed Date",
+    "Outreach Status",
+    "Source",
+    "Job Summary",
+]
 BLOCKED_HEADERS: list[str] = ["Company", "Name Variants"]
 DO_NOT_CONTACT_HEADERS: list[str] = ["Company Name", "Reason"]
 WEEKLY_HEADERS: list[str] = [
@@ -376,3 +392,6 @@ def get_sheet_store() -> SheetStore:
 
 def jobs_tab() -> str:
     return (os.environ.get("LEADS_JOBS_TAB") or "Sheet1").strip()
+
+
+GUIDE_TAB = "מדריך"

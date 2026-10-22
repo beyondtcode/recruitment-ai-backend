@@ -127,6 +127,8 @@ function dropdown_(ss, tab, column, list) {
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0];
   const col = headers.indexOf(column);
   if (col < 0 || sh.getMaxRows() < 2) return;
+  // Columns may have moved since last time: drop old dropdowns first.
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
   const rule = SpreadsheetApp.newDataValidation().requireValueInList(list, true).setAllowInvalid(true).build();
   sh.getRange(2, col + 1, sh.getMaxRows() - 1, 1).setDataValidation(rule);
 }

@@ -111,27 +111,39 @@ def _variant_pattern(variant: str) -> str:
     return rf"(?<![\w]){escaped}(?![\w])"
 
 
-_BLOCKLIST_RE = re.compile(
-    "|".join(
-        _variant_pattern(v) for variants in BLOCKED_COMPANIES.values() for v in variants
-    ),
-    re.IGNORECASE,
-)
+class Blocklist:
+    """Company-name matcher built from {canonical name: name variants}."""
+
+    def __init__(self, entries: dict[str, tuple[str, ...] | list[str]]) -> None:
+        self._entries: list[tuple[str, re.Pattern[str]]] = []
+        for canonical, variants in entries.items():
+            # Variants are authoritative (e.g. "ONE" alone would block "One Zero");
+            # the canonical name is used only when no variants are given.
+            names = [v for v in variants if v and v.strip()] or [canonical]
+            if not names:
+                continue
+            pattern = re.compile("|".join(_variant_pattern(v) for v in names), re.IGNORECASE)
+            self._entries.append((canonical, pattern))
+
+    def match(self, company_name: str) -> str | None:
+        name = " ".join((company_name or "").split())
+        if not name:
+            return None
+        for canonical, pattern in self._entries:
+            if pattern.search(name):
+                return canonical
+        return None
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
 
-def blocked_company(company_name: str) -> str | None:
+DEFAULT_BLOCKLIST = Blocklist(BLOCKED_COMPANIES)
+
+
+def blocked_company(company_name: str, blocklist: Blocklist | None = None) -> str | None:
     """Return the blocklist entry that matches ``company_name``, if any."""
-    name = " ".join((company_name or "").split())
-    if not name:
-        return None
-    match = _BLOCKLIST_RE.search(name)
-    if not match:
-        return None
-    hit = match.group(0).casefold()
-    for canonical, variants in BLOCKED_COMPANIES.items():
-        if any(re.fullmatch(_variant_pattern(v), hit, re.IGNORECASE) for v in variants):
-            return canonical
-    return match.group(0)
+    return (blocklist or DEFAULT_BLOCKLIST).match(company_name)
 
 
 # ---------------------------------------------------------------------------

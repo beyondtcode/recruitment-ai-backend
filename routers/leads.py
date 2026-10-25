@@ -119,13 +119,18 @@ async def clear_lead_dedup(x_leads_token: str | None = Header(default=None)) -> 
 
 
 @router.post("/reset")
-async def reset_agent(x_leads_token: str | None = Header(default=None)) -> dict[str, Any]:
-    """Start over with a new, empty sheet: forget seen jobs, status history and retries.
+async def reset_agent(
+    clear_sheet: bool = False, x_leads_token: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """Start over: forget seen jobs, status history and retries.
 
-    Does not touch the sheet itself.
+    With ``?clear_sheet=true`` also empties Jobs, Companies, Weekly and the
+    archives (headers, formatting, Blocked Companies and Do Not Contact stay).
     """
     _check_token(x_leads_token)
+    store = _store() if clear_sheet else None
     async with lead_agent._agent_lock:
         seen = clear_seen_jobs()
         state = lead_agent.reset_state()
-    return {"seen_jobs_cleared": seen, **state}
+        cleared = lead_agent.clear_sheet(store) if store is not None else []
+    return {"seen_jobs_cleared": seen, **state, "tabs_cleared": cleared}

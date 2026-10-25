@@ -121,6 +121,14 @@ async def run_lead_pipeline(
     fresh = filter_unseen_jobs(list(by_link.values()))
 
     candidates, dropped, stats = _apply_lead_rules(fresh, blocklist)
+    # Optional cap for small test runs. Jobs over the cap are not marked seen,
+    # so a later (uncapped) run still picks them up.
+    try:
+        max_new = int(os.environ.get("LEADS_MAX_NEW_JOBS") or 0)
+    except ValueError:
+        max_new = 0
+    if max_new > 0 and len(candidates) > max_new:
+        candidates = candidates[:max_new]
     kept, settled = await classify_lead_jobs(candidates)
 
     # Only mark what got a definitive answer; LLM errors are retried next run.

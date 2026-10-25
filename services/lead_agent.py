@@ -234,6 +234,23 @@ def _save_attempts(updates: dict[tuple[str, str], tuple[int, date]]) -> None:
         conn.close()
 
 
+def clear_sheet(store: SheetStore) -> list[str]:
+    """Empty the data tabs (headers and formatting stay). Settings tabs are kept."""
+    cleared = []
+    for tab, headers in (
+        (jobs_tab(), JOB_HEADERS),
+        (TAB_COMPANIES, COMPANY_HEADERS),
+        (TAB_COMPANIES_ARCHIVE, COMPANY_HEADERS),
+        (TAB_ARCHIVE, ARCHIVE_HEADERS),
+        (TAB_WEEKLY, WEEKLY_HEADERS),
+    ):
+        existing = store.read(tab)
+        table = Table(headers=list(existing.headers) if existing and existing.headers else list(headers))
+        store.write(tab, table, reset_colors=(tab == TAB_WEEKLY))
+        cleared.append(tab)
+    return cleared
+
+
 def reset_state() -> dict[str, int]:
     """Forget status history and retry counters (used when starting a new sheet)."""
     conn = _attempts_db()

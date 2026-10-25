@@ -296,15 +296,17 @@ async def enrich_company(
             f"  Company size: {page.size}\n  Industry: {page.industry or '?'}\n"
             f"  About: {page.description or '?'}"
         )
-    elif search is not None:
+    # No page, or the page did not show the size → also try a web search.
+    if (page is None or page_size == UNKNOWN) and search is not None:
         try:
             results = await search.search(
                 f'"{company_name}" company size employees', num=6, domain="linkedin.com"
             )
-            evidence = "Web search results:\n" + format_results(results)
-            page_size = size_from_snippets(" ".join(r.snippet for r in results))
+            evidence = (evidence + "\n\n" if evidence else "") + "Web search results:\n" + format_results(results)
+            if page_size == UNKNOWN:
+                page_size = size_from_snippets(" ".join(r.snippet for r in results))
         except BudgetExceeded:
-            evidence = ""
+            pass
         except Exception:
             logger.warning("company_enrichment: search failed for %r", company_name, exc_info=True)
     if not evidence:

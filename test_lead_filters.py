@@ -330,6 +330,23 @@ class IsraeliBoardParsingTests(unittest.TestCase):
         self.assertEqual(job["job_link"], "https://www.jobnet.co.il/jobs?positionid=13227516")
         self.assertEqual(job["publish_date"], "2026-10-25")
 
+    def test_drushim(self) -> None:
+        html = ('<article class="job-card-module-scss-module__nFMPJW__card job-card-module-scss-module__nFMPJW__search" '
+                'data-nagish="job-card-item" data-node-item="449"><a href="/job/38820442/3f939a77/"></a>'
+                '<div class="job-card-header-module-scss-module__JxqRYa__box"><div class="job-card-header-module-scss-module__JxqRYa__titleGroup">'
+                '<h3 class="job-card-header-module-scss-module__JxqRYa__title">Software Engineer</h3>'
+                '<span class="job-card-header-module-scss-module__JxqRYa__companyName">Comm-IT</span></div></div>'
+                '<div class="job-card-module-scss-module__nFMPJW__body"><div class="job-card-meta-module-scss-module__DkSa0a__box">'
+                '<div class="job-card-meta-module-scss-module__DkSa0a__row"><span>באר יעקב</span></div>'
+                '<div class="job-card-meta-module-scss-module__DkSa0a__row"><span>לפני 9 שעות</span></div></div>'
+                '<p class="job-card-module-scss-module__nFMPJW__description">C# and C++ server-side development</p>'
+                '<a href="/job/38820442/3f939a77/">פרטים</a></div></article>')
+        [job] = self.parse("https://www.drushim.co.il/jobs/search/Software%20Developer/?ssaen=3", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("Software Engineer", "Comm-IT"))
+        self.assertEqual(job["job_link"], "https://www.drushim.co.il/job/38820442/3f939a77/")
+        self.assertIn("C#", job["snippet"])
+        self.assertNotEqual(job["publish_date"], "")
+
     def test_linkedin_tracking_still_stripped(self) -> None:
         from services import scraper
         self.assertEqual(scraper._clean_job_link("https://il.linkedin.com/jobs/view/x-123?refId=a&trackingId=b"),

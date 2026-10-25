@@ -218,7 +218,8 @@ class BudgetedSearch:
         return _FreeOnly(self)
 
     async def search(
-        self, query: str, *, num: int = 10, domain: str | None = None, allow_paid: bool = True
+        self, query: str, *, num: int = 10, domain: str | None = None, allow_paid: bool = True,
+        paid_cap: int | None = None,
     ) -> list[SearchResult]:
         last_exc: Exception | None = None
         for provider in self._free:
@@ -233,6 +234,11 @@ class BudgetedSearch:
                 continue
             if results:
                 return results
+        # paid_cap: this step may only use paid calls while the run total is
+        # below it (checked right before the paid call, so concurrent lookups
+        # cannot overshoot it).
+        if paid_cap is not None and self.used >= paid_cap:
+            allow_paid = False
         if not self._paid or not allow_paid:
             if last_exc is not None:
                 raise RuntimeError(f"free search failed: {last_exc}")
@@ -250,6 +256,20 @@ class BudgetedSearch:
                 if self.used >= self.budget:
                     break
         raise RuntimeError(f"all search providers failed: {last_exc}")
+
+
+    def limited(self, paid_cap: int) -> "_Limited":
+        """A view that uses paid providers only while the run's paid total is below ``paid_cap``."""
+        return _Limited(self, paid_cap)
+
+
+class _Limited:
+    def __init__(self, parent: BudgetedSearch, paid_cap: int) -> None:
+        self._parent = parent
+        self._cap = paid_cap
+
+    async def search(self, query: str, *, num: int = 10, domain: str | None = None) -> list[SearchResult]:
+        return await self._parent.search(query, num=num, domain=domain, paid_cap=self._cap)
 
 
 class _FreeOnly:

@@ -83,6 +83,25 @@ class FakeProvider:
 
 
 class SearchBudgetTests(unittest.TestCase):
+    def test_limited_view_caps_concurrent_paid_calls(self) -> None:
+        class SlowFree(FakeProvider):
+            name, free = "ddg", True
+
+            async def search(self, query, *, num=10, domain=None):
+                await asyncio.sleep(0.01)  # every lookup passes the free step together
+                return []
+
+        paid = FakeProvider({"": [SearchResult("t", "l", "s")]})
+        search = BudgetedSearch([SlowFree(), paid], budget=10)
+        view = search.limited(5)
+
+        async def many():
+            return await asyncio.gather(*(view.search(f"q{i}") for i in range(12)))
+
+        asyncio.run(many())
+        self.assertEqual(search.used, 5)  # the other 5 stay for contacts
+        self.assertEqual(len(asyncio.run(search.search("contact"))), 1)
+
     def test_budget_and_fallback(self) -> None:
         primary, backup = FakeProvider(fail=True), FakeProvider({"x": [SearchResult("t", "l", "s")]})
         backup.name = "backup"

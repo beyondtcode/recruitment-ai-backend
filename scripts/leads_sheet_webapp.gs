@@ -101,6 +101,37 @@ function write_(ss, tab, values, resetColors) {
   range.setNumberFormat('@');
   range.setValues(rows);
   sh.getRange(1, 1, 1, width).setFontWeight('bold');
+  applyLinks_(sh, rows);
+}
+
+// Show names/titles as clickable links instead of separate URL columns.
+// key = column that is displayed, value = (usually hidden) column with the URL.
+const LINKS = {
+  'Job Title': 'Job Link',
+  'Latest Job': 'Latest Job Link',
+  'Contact Name': 'Contact LinkedIn',
+  'Alt Contact Name': 'Alt Contact LinkedIn',
+  'Contact': 'Contact LinkedIn',
+  'Alt Contact': 'Alt Contact LinkedIn',
+  'Company Name': 'Company LinkedIn'
+};
+
+function applyLinks_(sh, rows) {
+  if (rows.length < 2) return;
+  const headers = rows[0];
+  Object.keys(LINKS).forEach(function (textCol) {
+    const t = headers.indexOf(textCol);
+    const u = headers.indexOf(LINKS[textCol]);
+    if (t < 0 || u < 0) return;
+    const rich = rows.slice(1).map(function (r) {
+      const text = r[t] || '';
+      const url = r[u] || '';
+      const b = SpreadsheetApp.newRichTextValue().setText(text);
+      if (text && /^https?:\/\//.test(url)) b.setLinkUrl(url);
+      return [b.build()];
+    });
+    sh.getRange(2, t + 1, rich.length, 1).setRichTextValues(rich);
+  });
 }
 
 function append_(ss, tab, headers, rows) {
@@ -174,6 +205,22 @@ const WIDTHS = {
   'Contact': 230, 'Alt Contact': 230, 'Previous Outreach': 190, 'Name Variants': 420, 'Reason': 300,
   'Company Size': 95, 'Company Type': 120, 'Open Jobs': 75, 'Source': 85
 };
+// Technical columns: kept (the agent needs them) but hidden to keep the view short.
+// Unhide any time: select the columns around the arrows in the header → right-click → Unhide.
+const HIDDEN_COLUMNS = {
+  'Weekly': ['Outreach Track', 'Latest Job Link', 'Contact LinkedIn', 'Alt Contact LinkedIn'],
+  'Companies': ['Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
+                'Outreach Track', 'Company Type', 'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched'],
+  'Companies Archive': ['Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
+                        'Outreach Track', 'Company Type', 'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched'],
+  'Jobs': ['Contact LinkedIn', 'Job Link', 'Company Size', 'Company Type', 'Alt Contact Name', 'Alt Contact Title',
+           'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source', 'Last Checked', 'Company LinkedIn',
+           'Status Updated'],
+  'Archive': ['Job Link', 'Source', 'Job Summary', 'Last Checked']
+};
+// Tabs you rarely need: hidden (open them from the ☰ "All sheets" button, bottom-left).
+const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
+
 const NOTES = {
   'Target': 'כן = בקהל היעד (חברת מוצר 50–200 עובדים; Salesforce/monday: כל חברה מ־50 עובדים). לא ידוע = הסוכן ינסה שוב.',
   'Outreach Status': 'מעדכנים כאן בלבד (בלשונית Companies). הסוכן לא דורס ערך שעודכן ידנית.',
@@ -202,6 +249,10 @@ function setupSheet() {
     if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); }
   });
   ss.setActiveSheet(ss.getSheetByName('Weekly'));
+  HIDDEN_TABS.forEach(function (name) {
+    const sh = ss.getSheetByName(name);
+    if (sh) sh.hideSheet();
+  });
   SpreadsheetApp.getUi().alert('הגיליון מוכן ✔');
 }
 
@@ -257,6 +308,14 @@ function setupTab_(ss, tab, headers) {
   }
   sh.setConditionalFormatRules(rules);
 
+  // Hide technical columns (by the header names actually in the sheet).
+  const actual = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getDisplayValues()[0];
+  sh.showColumns(1, sh.getMaxColumns());
+  (HIDDEN_COLUMNS[tab] || []).forEach(function (h) {
+    const i = actual.indexOf(h);
+    if (i >= 0) sh.hideColumns(i + 1);
+  });
+
   // No protection: remove any left over from an earlier setup.
   sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
   sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { p.remove(); });
@@ -291,7 +350,9 @@ function setupGuide_(ss) {
     ['Target', 'כן = בקהל היעד · לא = מחוץ לקהל היעד · לא ידוע = עוד לא נמצא מידע, הסוכן ינסה שוב', ''],
     ['לוח זמנים', 'הסוכן רץ כל יומיים ב־8:00. הקובץ השבועי נבנה בכל יום ראשון ב־8:00 ונשלחת הודעה בסלאק.', ''],
     ['איש קשר חלופי', 'פונים אליו רק אם הראשון לא אישר את בקשת החברות תוך שבוע.', ''],
-    ['לפני פנייה', 'כדאי להציץ בפרופיל הלינקדאין ולוודא שזה האדם הנכון בחברה הנכונה.', '']
+    ['לפני פנייה', 'כדאי להציץ בפרופיל הלינקדאין ולוודא שזה האדם הנכון בחברה הנכונה.', ''],
+    ['קישורים', 'שם המשרה, שם איש הקשר ושם החברה הם קישורים – לחיצה פותחת את המודעה / הפרופיל בלינקדאין.', ''],
+    ['מוסתר', 'עמודות טכניות ולשוניות שכמעט לא צריך (ארכיון, חברות חסומות, המדריך הזה) מוסתרות. פותחים לשונית מוסתרת דרך ☰ בפינה השמאלית התחתונה.', '']
   ];
   sh.getRange(1, 1, rows.length, 3).setValues(rows);
   sh.getRange(1, 1, rows.length, 3).setFontFamily('Arial').setFontSize(10).setWrap(true).setVerticalAlignment('top');

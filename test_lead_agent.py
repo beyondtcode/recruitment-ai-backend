@@ -637,3 +637,39 @@ class TitleCleanupTests(unittest.TestCase):
         self.assertEqual(cc.clean_title("VP R&D @ Adaptive6"), "VP R&D")
         self.assertEqual(cc.clean_title("Owner & CTO at PayPlus LTD"), "Owner & CTO")
         self.assertEqual(cc.clean_title("CTO"), "CTO")
+
+
+class OtherTabsTests(unittest.TestCase):
+    def test_non_target_moves_to_other_tabs_and_back(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+        sizes = {"BigCo": "10001+", "SmallCo": "51-200"}
+
+        async def scrape():
+            return [{"company_name": n, "job_title": "Backend Developer", "job_link": f"https://li/{n}",
+                     "source": "LinkedIn"} for n in sizes], []
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            name = "BigCo" if "BigCo" in user else "SmallCo"
+            return {"size": sizes[name], "company_type": "product"}
+
+        env = {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}
+        with mock.patch.dict(os.environ, env), mock.patch("services.enrichment._classify_job", classify), \
+                mock.patch.object(ce, "complete_json", fake_llm):
+            summary = asyncio.run(lead_agent.run(store, None, scrape=scrape,
+                                                 check=mock.AsyncMock(return_value={}), today=TODAY))
+            self.assertEqual([r["Company Name"] for r in store.read("Sheet1").rows], ["SmallCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Other Jobs").rows], ["BigCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Companies").rows], ["SmallCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])
+            self.assertEqual((summary["open_jobs"], summary["other_jobs"]), (2, 1))
+
+            # Second run: nothing lost, BigCo not re-enriched, still in Other.
+            asyncio.run(lead_agent.run(store, None, scrape=scrape,
+                                       check=mock.AsyncMock(return_value={}), today=date(2026, 10, 27)))
+        tmp.cleanup()
+        self.assertEqual(len(store.read("Sheet1").rows) + len(store.read("Other Jobs").rows), 2)
+        self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])

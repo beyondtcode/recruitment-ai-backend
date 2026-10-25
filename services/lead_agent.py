@@ -520,7 +520,9 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         titles = [j.get("Job Title", "") for j in company_jobs(ck)]
         link = company_link_for(ck)
         use_search = search
-        if search is not None and getattr(search, "used", 0) >= company_search_cap:
+        if search is not None and getattr(search, "used", 0) >= company_search_cap and getattr(search, "has_free", False):
+            use_search = search.free_only()  # paid share for companies is spent: free search only
+        elif search is not None and getattr(search, "used", 0) >= company_search_cap:
             if not link:
                 skipped_for_budget += 1
                 return  # no free source and no budget left for companies: try next run
@@ -579,7 +581,7 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
 
     async def contact_one(rk: str) -> None:
         nonlocal contacts_found, contacts_searched
-        if getattr(search, "remaining", 1) <= 0:
+        if getattr(search, "remaining", 1) <= 0 and not getattr(search, "has_free", False):
             return  # budget used up: stays empty / "לא נמצא", retried next run
         contacts_searched += 1
         row = company_rows[rk]

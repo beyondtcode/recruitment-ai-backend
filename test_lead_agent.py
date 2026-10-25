@@ -686,3 +686,78 @@ class FitReasonTests(unittest.TestCase):
         self.assertEqual(f(ce.CompanyInfo("51-200", "השמה"), {"Backend"}), "חברת השמה / מיקור חוץ")
         self.assertEqual(f(ce.CompanyInfo(), {"Backend"}), "חסר מידע על גודל")
         self.assertEqual(f(ce.CompanyInfo("51-200", "מוצר"), {"Backend"}, do_not_contact=True), "ברשימת לא לפנות")
+
+
+class FreeSearchTests(unittest.TestCase):
+    DDG_HTML = """<html><head><title>q at DuckDuckGo</title></head><body>
+    <div class="result results_links web-result"><h2 class="result__title">
+      <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fil.linkedin.com%2Fin%2Fdana&amp;rut=x">Dana Levi - CTO - Acme | LinkedIn</a></h2>
+      <a class="result__snippet" href="#">CTO at Acme · Tel Aviv</a></div>
+    <div class="result"><a class="result__a" href="https://duckduckgo.com/y.js?ad=1">Ad</a></div>
+    </body></html>"""
+
+    def test_parse_ddg(self) -> None:
+        from services.search_client import parse_ddg_html
+        r = parse_ddg_html(self.DDG_HTML)
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0].link, "https://il.linkedin.com/in/dana")
+        self.assertIn("CTO", r[0].title)
+
+    def test_ddg_captcha_detected(self) -> None:
+        from services.search_client import SearchBlocked, parse_ddg_html
+        with self.assertRaises(SearchBlocked):
+            parse_ddg_html('<html><body><div class="anomaly-modal__modal">robot?</div></body></html>')
+
+    def _providers(self, free_results=None, free_error=None):
+        class Free:
+            name, free, blocked = "duckduckgo", True, False
+
+            async def search(self, q, num=10, domain=None):
+                if free_error:
+                    raise free_error
+                return free_results or []
+
+        paid = FakeProvider({"": [SearchResult("paid", "https://il.linkedin.com/in/p", "")]})
+        paid.name = "tavily"
+        return Free(), paid
+
+    def test_free_first_paid_not_used(self) -> None:
+        free, paid = self._providers(free_results=[SearchResult("f", "https://il.linkedin.com/in/f", "")])
+        s = BudgetedSearch([free, paid], budget=5)
+        self.assertEqual(asyncio.run(s.search("x"))[0].title, "f")
+        self.assertEqual(s.used, 0)
+        self.assertEqual(paid.queries, [])
+
+    def test_paid_when_free_empty_or_blocked(self) -> None:
+        from services.search_client import SearchBlocked
+        for free, paid in (self._providers(free_results=[]), self._providers(free_error=SearchBlocked("x"))):
+            s = BudgetedSearch([free, paid], budget=5)
+            self.assertEqual(asyncio.run(s.search("x"))[0].title, "paid")
+            self.assertEqual(s.used, 1)
+
+    def test_free_only_view_never_pays(self) -> None:
+        free, paid = self._providers(free_results=[])
+        s = BudgetedSearch([free, paid], budget=5)
+        self.assertEqual(asyncio.run(s.free_only().search("x")), [])
+        self.assertEqual(s.used, 0)
+
+
+class ContactFallbackTests(unittest.TestCase):
+    def test_second_pass_with_short_name(self) -> None:
+        provider = FakeProvider({
+            # Only the loose query (short name, no quotes) finds the CTO.
+            "PayPlus CTO": [SearchResult("Hanan A. - CTO - PayPlus", "https://il.linkedin.com/in/hanan", "PayPlus")],
+        })
+        calls = []
+
+        async def fake_llm(system, user, max_tokens=0):
+            calls.append(user)
+            if "il.linkedin.com/in/hanan" in user:
+                return {"primary": {"name": "Hanan A.", "title": "CTO at PayPlus", "linkedin_url": "https://il.linkedin.com/in/hanan"}}
+            return {"primary": None}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, _ = asyncio.run(cc.find_contacts("PayPlus - The Future of Payments", "dev", "Backend",
+                                                     BudgetedSearch([provider], 20)))
+        self.assertEqual((primary.name, primary.title), ("Hanan A.", "CTO"))
+        self.assertTrue(any(q.startswith("PayPlus CTO") for q in provider.queries))

@@ -228,6 +228,10 @@ class LinkedInPaginationTests(unittest.TestCase):
         with mock.patch.object(scraper.time, "sleep", lambda s: None):
             extra = scraper._linkedin_more_pages(Ctx, url, card * 60)
             small = scraper._linkedin_more_pages(Ctx, url, card * 5)
+            token = scraper.LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
+            first_only = scraper._linkedin_more_pages(Ctx, url, card * 60)
+            scraper.LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
+        self.assertEqual(first_only, "")  # watch list: first page only
         self.assertEqual(extra.count("base-search-card__title"), 20)
         self.assertEqual([c.split("start=")[1] for c in calls], ["60", "70", "70", "80"])
         self.assertTrue(calls[0].startswith(scraper.LINKEDIN_MORE_API + "?location=Israel&f_TPR=r259200"))

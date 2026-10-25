@@ -114,7 +114,18 @@ def belongs_to(job: dict, company: WatchCompany) -> bool:
 async def scrape_watch_list(watch: WatchList) -> tuple[list[dict], list[str]]:
     """Open jobs of every watch-list company. Returns (jobs, companies with none found)."""
     from services.lead_pipeline import scrape_one
+    from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE
 
+    # A company-name search also matches unrelated jobs further down; the
+    # company's own jobs rank at the top, so the first page is enough.
+    token = LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
+    try:
+        return await _scrape(watch, scrape_one)
+    finally:
+        LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
+
+
+async def _scrape(watch: WatchList, scrape_one) -> tuple[list[dict], list[str]]:
     jobs: list[dict] = []
     empty: list[str] = []
     for i, company in enumerate(watch.companies):

@@ -67,7 +67,11 @@ function reply_(obj) {
 
 function sheet_(ss, tab, create) {
   let sh = ss.getSheetByName(tab);
-  if (!sh && create) sh = ss.insertSheet(tab);
+  if (!sh && create) {
+    sh = ss.insertSheet(tab);
+    // Tabs that are normally hidden stay hidden when the agent creates them.
+    if (typeof HIDDEN_TABS !== 'undefined' && HIDDEN_TABS.indexOf(tab) >= 0) sh.hideSheet();
+  }
   return sh;
 }
 
@@ -229,6 +233,9 @@ const HIDDEN_COLUMNS = {
                  'Alt Contact Title', 'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source',
                  'Last Checked', 'Company LinkedIn', 'Status Updated']
 };
+// Tab names used by earlier versions of this script; setupSheet deletes them.
+const LEGACY_TABS = ['Other Companies', 'Other Jobs', 'Non-Target Companies', 'Non-Target Jobs',
+                     'Not a Fit - Companies', 'Not a Fit - Jobs', 'Sheet1', 'גיליון1'];
 // Tabs you rarely need: hidden (open them from the ☰ "All sheets" button, bottom-left).
 const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
 
@@ -252,9 +259,11 @@ function setupSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   Object.keys(HEADERS).forEach(function (tab) { setupTab_(ss, tab, HEADERS[tab]); });
   setupGuide_(ss);
-  // Remove the default empty first tab ("Sheet1" / "גיליון1").
+  // Remove tabs from earlier versions and the default empty first tab.
   ss.getSheets().forEach(function (sh) {
-    if (TAB_ORDER.indexOf(sh.getName()) < 0 && sh.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(sh);
+    const name = sh.getName();
+    if (TAB_ORDER.indexOf(name) >= 0 || ss.getSheets().length <= 1) return;
+    if (LEGACY_TABS.indexOf(name) >= 0 || sh.getLastRow() <= 1) ss.deleteSheet(sh);
   });
   TAB_ORDER.forEach(function (name, i) {
     const sh = ss.getSheetByName(name);

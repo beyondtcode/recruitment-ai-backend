@@ -1,9 +1,9 @@
 """Watch list: specific companies whose open jobs are collected on every run.
 
 The list lives in the sheet's "Watch List" tab (Company Name, Company LinkedIn,
-Note) and is seeded with WATCH_SEED the first time. Watch-list companies count
-as a fit regardless of size/type (they were picked by hand), unless they are in
-Do Not Contact or Blocked Companies.
+Note) and is seeded with WATCH_SEED the first time. The list only widens the
+search: jobs found this way go through the same checks as any other job
+(blocklist, category, company size and type, Do Not Contact).
 """
 
 from __future__ import annotations

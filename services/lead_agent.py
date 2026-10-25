@@ -584,10 +584,6 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         dnc = rk.split("|")[0] in do_not_contact
         target, _reason = compute_target(info, categories, do_not_contact=dnc)
         fit = fit_reason(info, categories, do_not_contact=dnc)
-        links = [row.get("Company LinkedIn", "")] + [j.get("Company LinkedIn", "") for j in by_row.get(rk, [])]
-        if not dnc and any(watch.matches(row.get("Company Name", ""), link) for link in links):
-            # Hand-picked companies count as a fit whatever their size / type.
-            target, fit = YES, "מתאימה (רשימת מעקב)"
         row["Target"] = target
         row["Fit"] = fit
 

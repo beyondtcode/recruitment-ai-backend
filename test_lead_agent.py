@@ -786,7 +786,7 @@ class WatchListTests(unittest.TestCase):
         self.assertTrue(wl.belongs_to({"company_link": "https://il.linkedin.com/company/cyera"}, cyera))
         self.assertFalse(wl.belongs_to({"company_link": "https://il.linkedin.com/company/other", "company_name": "Cyera"}, cyera))
 
-    def test_watch_company_is_fit_despite_size(self) -> None:
+    def test_watch_company_gets_normal_fit_check(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         store = MemoryStore({
             "Sheet1": [["Company Name", "Job Title", "Job Link"]],
@@ -815,8 +815,11 @@ class WatchListTests(unittest.TestCase):
             summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, scrape_watch=scrape_watch,
                                                  check=mock.AsyncMock(return_value={}), today=TODAY))
         tmp.cleanup()
-        row = store.read("Companies").rows[0]
-        self.assertEqual((row["Company Name"], row["Fit"], row["Target"]), ("Cyera", "מתאימה (רשימת מעקב)", "כן"))
+        self.assertEqual(store.read("Companies").rows, [])
+        row = store.read("Doesn't Fit - Companies").rows[0]
+        self.assertEqual(row["Company Name"], "Cyera")
+        self.assertTrue(row["Fit"].startswith("גדולה מדי"), row["Fit"])
+        self.assertNotEqual(row["Target"], "כן")
         self.assertEqual(summary["watch_list_jobs_found"], 1)
 
     def test_watch_list_seeded(self) -> None:

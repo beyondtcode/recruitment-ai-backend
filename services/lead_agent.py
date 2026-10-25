@@ -59,6 +59,7 @@ from services.lead_sheet import (
     TAB_COMPANIES,
     TAB_COMPANIES_ARCHIVE,
     TAB_DO_NOT_CONTACT,
+    TAB_WATCH,
     TAB_OTHER_COMPANIES,
     TAB_OTHER_JOBS,
     TAB_WEEKLY,
@@ -68,6 +69,13 @@ from services.lead_sheet import (
     jobs_tab,
 )
 from services.search_client import BudgetExceeded, SearchClient
+from services.watch_list import (
+    WATCH_HEADERS,
+    WATCH_SEED,
+    WatchCompany,
+    WatchList,
+    scrape_watch_list,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +312,21 @@ def load_blocklist(store: SheetStore) -> Blocklist:
     return Blocklist(entries)
 
 
+def load_watch_list(store: SheetStore) -> WatchList:
+    table = store.read(TAB_WATCH)
+    if table is None:
+        table = Table(headers=list(WATCH_HEADERS))
+        table.rows = [{"Company Name": n, "Company LinkedIn": u, "Note": note} for n, u, note in WATCH_SEED]
+        store.write(TAB_WATCH, table)
+        logger.info("lead_agent: seeded %s with %d companies", TAB_WATCH, len(table.rows))
+    companies = [
+        WatchCompany(r.get("Company Name", "").strip(), r.get("Company LinkedIn", "").strip(), r.get("Note", ""))
+        for r in table.rows
+        if r.get("Company Name", "").strip()
+    ]
+    return WatchList(companies)
+
+
 def load_do_not_contact(store: SheetStore) -> set[str]:
     table = store.read(TAB_DO_NOT_CONTACT)
     if table is None:
@@ -345,13 +368,18 @@ async def run(
     *,
     scrape: Callable[[], Awaitable[tuple[list[dict], list[str]]]] = scrape_all_raw,
     check: Callable[[list[str]], Awaitable[dict[str, str]]] = check_jobs,
+    scrape_watch: Callable[[WatchList], Awaitable[tuple[list[dict], list[str]]]] | None = None,
     today: date | None = None,
 ) -> dict[str, Any]:
     async with _agent_lock:
-        return await _run(store, search, scrape=scrape, check=check, today=today or today_israel())
+        return await _run(
+            store, search, scrape=scrape, check=check,
+            scrape_watch=scrape_watch or (lambda w: scrape_watch_list(w)),
+            today=today or today_israel(),
+        )
 
 
-async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
+async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> dict[str, Any]:
     today_s = format_ddmmyyyy(today)
     summary: dict[str, Any] = {"sheet_url": store.url, "search_enabled": search is not None}
 
@@ -422,6 +450,12 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
 
     # 2. New jobs.
     raw, empty_searches = await scrape()
+    watch = load_watch_list(store)
+    watch_raw: list[dict] = []
+    watch_without_jobs: list[str] = []
+    if len(watch):
+        watch_raw, watch_without_jobs = await scrape_watch(watch)
+        raw = raw + watch_raw
     known_links = {r.get("Job Link", "").strip() for r in jobs.rows}
     leads = await run_lead_pipeline(raw, blocklist=blocklist, known_links=known_links)
     new_rows = []
@@ -549,8 +583,13 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             categories = set(SYSTEMS_CATEGORIES)
         dnc = rk.split("|")[0] in do_not_contact
         target, _reason = compute_target(info, categories, do_not_contact=dnc)
+        fit = fit_reason(info, categories, do_not_contact=dnc)
+        links = [row.get("Company LinkedIn", "")] + [j.get("Company LinkedIn", "") for j in by_row.get(rk, [])]
+        if not dnc and any(watch.matches(row.get("Company Name", ""), link) for link in links):
+            # Hand-picked companies count as a fit whatever their size / type.
+            target, fit = YES, "מתאימה (רשימת מעקב)"
         row["Target"] = target
-        row["Fit"] = fit_reason(info, categories, do_not_contact=dnc)
+        row["Fit"] = fit
 
     # 4. Contacts for target rows without one; the profile follows the track.
     # Contacts the agent found more than CONTACT_REFRESH_DAYS ago are re-checked
@@ -686,6 +725,8 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "searches_used": getattr(search, "used", 0) if search is not None else 0,
             "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,
+            "watch_list_jobs_found": len(watch_raw),
+            "watch_list_without_jobs": watch_without_jobs,
             "links_not_checked_yet": max(len(checkable) - len(links), 0),
             "link_checks": {
                 s: sum(1 for v in statuses.values() if v == s) for s in ("open", "closed", "unknown")

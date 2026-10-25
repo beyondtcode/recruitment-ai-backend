@@ -18,6 +18,14 @@ from services import lead_agent  # noqa: E402
 from services.lead_sheet import MemoryStore  # noqa: E402
 from services.search_client import BudgetedSearch, BudgetExceeded, SearchResult  # noqa: E402
 
+
+async def _no_watch_scrape(watch):
+    return [], []
+
+
+# Tests never hit LinkedIn for the watch list unless they pass their own scraper.
+lead_agent.scrape_watch_list = _no_watch_scrape
+
 TODAY = date(2026, 10, 25)  # a Sunday
 
 
@@ -761,3 +769,62 @@ class ContactFallbackTests(unittest.TestCase):
                                                      BudgetedSearch([provider], 20)))
         self.assertEqual((primary.name, primary.title), ("Hanan A.", "CTO"))
         self.assertTrue(any(q.startswith("PayPlus CTO") for q in provider.queries))
+
+
+class WatchListTests(unittest.TestCase):
+    def test_matching_and_ownership(self) -> None:
+        from services import watch_list as wl
+        cyera = wl.WatchCompany("Cyera", "https://www.linkedin.com/company/cyera/")
+        alice = wl.WatchCompany("Alice (Formerly ActiveFence)", "https://www.linkedin.com/company/alice-io/")
+        w = wl.WatchList([cyera, alice])
+        self.assertTrue(w.matches("Cyera Ltd"))
+        self.assertTrue(w.matches("Some Name", "https://il.linkedin.com/company/alice-io"))
+        self.assertTrue(w.matches("Alice"))
+        self.assertFalse(w.matches("Cyberark"))
+        self.assertEqual(alice.search_name, "Alice")
+        self.assertIn("%22Alice%22", wl.search_url(alice))
+        self.assertTrue(wl.belongs_to({"company_link": "https://il.linkedin.com/company/cyera"}, cyera))
+        self.assertFalse(wl.belongs_to({"company_link": "https://il.linkedin.com/company/other", "company_name": "Cyera"}, cyera))
+
+    def test_watch_company_is_fit_despite_size(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({
+            "Sheet1": [["Company Name", "Job Title", "Job Link"]],
+            "Watch List": [["Company Name", "Company LinkedIn", "Note"],
+                           ["Cyera", "https://www.linkedin.com/company/cyera/", "$400M"]],
+        })
+
+        async def scrape():
+            return [], []
+
+        async def scrape_watch(watch):
+            self.assertEqual(len(watch), 1)
+            return [{"company_name": "Cyera", "job_title": "Backend Developer", "job_link": "https://li/c1",
+                     "source": "LinkedIn", "company_link": "https://il.linkedin.com/company/cyera"}], []
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"size": "1001-5000", "company_type": "product"}
+
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}), \
+                mock.patch("services.enrichment._classify_job", classify), \
+                mock.patch.object(ce, "fetch_linkedin_company", mock.AsyncMock(return_value=None)), \
+                mock.patch.object(ce, "complete_json", fake_llm):
+            summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, scrape_watch=scrape_watch,
+                                                 check=mock.AsyncMock(return_value={}), today=TODAY))
+        tmp.cleanup()
+        row = store.read("Companies").rows[0]
+        self.assertEqual((row["Company Name"], row["Fit"], row["Target"]), ("Cyera", "מתאימה (רשימת מעקב)", "כן"))
+        self.assertEqual(summary["watch_list_jobs_found"], 1)
+
+    def test_watch_list_seeded(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            asyncio.run(lead_agent.run(store, None, scrape=mock.AsyncMock(return_value=([], [])),
+                                       scrape_watch=mock.AsyncMock(return_value=([], [])),
+                                       check=mock.AsyncMock(return_value={}), today=TODAY))
+        tmp.cleanup()
+        self.assertEqual(len(store.read("Watch List").rows), 24)

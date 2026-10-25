@@ -179,6 +179,7 @@ function dropdown_(ss, tab, column, list) {
 
 const JOBS_TAB = 'Jobs';
 const HEADERS = {
+  'Watch List': ["Company Name", "Company LinkedIn", "Note"],
   'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
   'Companies': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
   'Jobs': ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
@@ -189,14 +190,15 @@ const HEADERS = {
   "Doesn't Fit - Companies": ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
   "Doesn't Fit - Jobs": ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"]
 };
-const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', "Doesn't Fit - Companies", "Doesn't Fit - Jobs",
+const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Watch List', "Doesn't Fit - Companies", "Doesn't Fit - Jobs",
                    'Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
 const TAB_COLORS = {
-  'Weekly': '#34a853', 'Companies': '#4285f4', 'Jobs': '#7baaf7', 'Do Not Contact': '#fb8c00',
+  'Weekly': '#34a853', 'Companies': '#4285f4', 'Jobs': '#7baaf7', 'Do Not Contact': '#fb8c00', 'Watch List': '#fb8c00',
   'Blocked Companies': '#fb8c00', 'Archive': '#9e9e9e', 'Companies Archive': '#9e9e9e', 'מדריך': '#8e24aa',
   "Doesn't Fit - Companies": '#cccccc', "Doesn't Fit - Jobs": '#cccccc'
 };
 const STATUSES = ["לא נשלח", "בקשת חברות נשלחה", "הודעה ראשונה נשלחה", "פולואפ נשלח", "ענה: חיובי", "ענה: שלילי", "לא רלוונטי"];
+const WATCH_SEED = [["Wonderful", "https://www.linkedin.com/company/wonderfulai/", "גייסו $550M בספטמבר · ת\"א"], ["Cyera", "https://www.linkedin.com/company/cyera/", "גייסו $400M בספטמבר · ת\"א"], ["Island", "https://www.linkedin.com/company/island-io/", "גייסו $400M בספטמבר · ת\"א"], ["Upwind Security", "https://www.linkedin.com/company/upwindsecurity/", "גייסו $300M בספטמבר · רמת גן"], ["Xsight Labs", "https://www.linkedin.com/company/xsightlabs/", "גייסו $300M ביולי · גבעתיים / קריית גת"], ["Dream", "https://www.linkedin.com/company/dreamsecurity/", "גייסו $260M ביוני · ת\"א"], ["HiBob", "https://www.linkedin.com/company/hibob/", "גייסו $166M בספטמבר · ת\"א"], ["Alice (Formerly ActiveFence)", "https://www.linkedin.com/company/alice-io/", "גייסו $140M באוגוסט · רמת גן"], ["Buildots", "https://www.linkedin.com/company/buildots/", "גייסו $130M בספטמבר · ת\"א"], ["Zenity", "https://www.linkedin.com/company/zenitysec/", "גייסו $125M באוגוסט · ת\"א"], ["Onyx Security", "https://www.linkedin.com/company/onyx-sec/", "גייסו $113M ביולי · ת\"א"], ["Glow", "https://www.linkedin.com/company/glowsecurity/", "גייסו $100M ביולי · ת\"א"], ["Neo", "https://www.linkedin.com/company/neo-ai-security/", "גייסו $100M ביולי · ת\"א"], ["groundcover", "https://www.linkedin.com/company/groundcover-com/", "גייסו $100M ביולי · ת\"א"], ["MIND", "https://www.linkedin.com/company/mindsecurity/", "גייסו $72M בספטמבר · ת\"א"], ["OLIGO Security", "https://www.linkedin.com/company/oligo-security/", "גייסו $60M באוגוסט · ת\"א"], ["Faye", "https://www.linkedin.com/company/fayetravelinsurance/", "גייסו $50M באוגוסט · ת\"א"], ["AITAN", "https://www.linkedin.com/company/aitansystems/", "גייסו $41M בספטמבר · ת\"א"], ["Guardio", "https://www.linkedin.com/company/guardiosec/", "גייסו $40M בספטמבר · ת\"א"], ["Remepy", "https://www.linkedin.com/company/remepy/", "גייסו $36M באוגוסט · רמת גן"], ["Huskeys", "https://www.linkedin.com/company/huskeys/", "גייסו $27M בספטמבר · ת\"א"], ["Loora", "https://www.linkedin.com/company/loora/", "גייסו $22M בספטמבר · ת\"א"], ["enso", "https://www.linkedin.com/company/enso-bot/", "גייסו $15M באוקטובר · ת\"א"], ["Zafran Security", "https://www.linkedin.com/company/zafran-security/", "השקעה מ-Cisco ביולי · ת\"א"]];
 const BLOCKED_SEED = [["מטריקס", "Matrix, Matrix IT, מטריקס"], ["NVIDIA", "NVIDIA, NVIDIA AI, Nvidia, אנבידיה, אינבידיה"], ["ONE", "ONE Technologies, One1, וואן טכנולוגיות"], ["SQLink", "SQLink, SQLink Group, אס.קיו.לינק, SQ Link"], ["התעשייה האווירית", "IAI, IAI - Israel Aerospace Industries, Israel Aerospace Industries, התעשייה האווירית, תעשייה אווירית"], ["אלעד מערכות", "Elad Software, Elad Software Systems, Elad Systems, אלעד מערכות"], ["קבוצת יעל", "Yael Group, Yael Software, קבוצת יעל"], ["Commit", "Commit, Commit Software, קומיט"], ["בינת", "Bynet, Bynet Data Communications, בינת, בינת סמך"], ["Intel", "Intel, Intel Corporation, אינטל"], ["Comblack", "Comblack, ComBlack, קומבלק"]];
 // Columns people may edit (yellow header). Everything else is written by the agent.
 const EDITABLE = {
@@ -205,6 +207,7 @@ const EDITABLE = {
   'Companies Archive': ['Outreach Status', 'Status Updated'],
   "Doesn't Fit - Companies": ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
+  'Watch List': ['Company Name', 'Company LinkedIn', 'Note'],
   'Blocked Companies': ['Company', 'Name Variants']
 };
 const WIDTHS = {
@@ -212,7 +215,7 @@ const WIDTHS = {
   'Category': 150, 'Target': 75, 'Fit': 190, 'Outreach Status': 165, 'Outreach Track': 95, 'Outreach Phrasing': 170,
   'Contact Name': 150, 'Contact Title': 190, 'Alt Contact Name': 150, 'Alt Contact Title': 190,
   'Contact': 230, 'Alt Contact': 230, 'Previous Outreach': 190, 'Name Variants': 420, 'Reason': 300,
-  'Company Size': 95, 'Company Type': 120, 'Open Jobs': 75, 'Source': 85
+  'Company Size': 95, 'Company Type': 120, 'Note': 280, 'Open Jobs': 75, 'Source': 85
 };
 // Technical columns: kept (the agent needs them) but hidden to keep the view short.
 // Unhide any time: select the columns around the arrows in the header → right-click → Unhide.
@@ -283,6 +286,9 @@ function setupTab_(ss, tab, headers) {
   if (sh.getMaxColumns() < width) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
   if (sh.getMaxColumns() > width) sh.deleteColumns(width + 1, sh.getMaxColumns() - width);
   if (sh.getLastRow() === 0) sh.getRange(1, 1, 1, width).setValues([headers]);
+  if (tab === 'Watch List' && sh.getLastRow() < 2) {
+    sh.getRange(2, 1, WATCH_SEED.length, 3).setValues(WATCH_SEED);
+  }
   if (tab === 'Blocked Companies' && sh.getLastRow() < 2) {
     sh.getRange(2, 1, BLOCKED_SEED.length, 2).setValues(BLOCKED_SEED);
   }
@@ -363,6 +369,7 @@ function setupGuide_(ss) {
     ['Jobs', 'כל משרה פתוחה בחברות שמתאימות (או שעוד חסר עליהן מידע), עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
     ["Doesn't Fit - Companies / Jobs", 'חברות שאינן בקהל היעד (גדולות מדי, קטנות מדי, בנקים, השמה וכו׳) והמשרות שלהן. נשמרות כדי לא לבדוק אותן שוב, ולמקרה שתרצו להרחיב את קהל היעד.', 'לקריאה בלבד. אם חברה הופכת לקהל יעד – היא עוברת אוטומטית ל־Companies.'],
     ['Do Not Contact', 'חברות שלא פונים אליהן (כבר בשיחה, בקמפיין אחר וכו׳).', 'מוסיפים שם חברה ומשפט סיבה.'],
+    ['Watch List', 'חברות שבוחרים ידנית (למשל סטארטאפים שגייסו). בכל ריצה הסוכן אוסף את כל המשרות הפתוחות שלהן, והן נחשבות מתאימות בלי קשר לגודל.', 'מוסיפים שם חברה + קישור לעמוד הלינקדאין שלה + הערה.'],
     ['Blocked Companies', 'חברות שלא אוספים מהן משרות בכלל, עם כל וריאציות השם.', 'מוסיפים שורה. בריצה הבאה המשרות שלהן נמחקות.'],
     ['Archive', 'משרות שנסגרו, עם תאריך הסגירה.', 'לקריאה בלבד.'],
     ['Companies Archive', 'חברות שאין להן כרגע משרות פתוחות, עם ההיסטוריה שלהן. חוזרות ל־Companies כשהן מפרסמות משרה חדשה.', 'לקריאה בלבד.'],

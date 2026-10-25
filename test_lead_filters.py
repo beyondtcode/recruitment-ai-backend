@@ -201,5 +201,43 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([(l.company_name, l.category) for l in leads2], [("Delta", "QA")])
 
 
+class LinkedInPaginationTests(unittest.TestCase):
+    def test_fetches_more_pages_until_empty(self) -> None:
+        from services import scraper
+
+        card = '<li><div class="base-card base-search-card"><h3 class="base-search-card__title">X</h3></div></li>'
+
+        class Resp:
+            def __init__(self, status, text):
+                self.status, self._text = status, text
+
+            def text(self):
+                return self._text
+
+        pages = [Resp(200, card * 10), Resp(429, ""), Resp(200, card * 10), Resp(200, "")]
+        calls = []
+
+        class Ctx:
+            class request:
+                @staticmethod
+                def get(url, timeout=0):
+                    calls.append(url)
+                    return pages.pop(0)
+
+        url = "https://www.linkedin.com/jobs/search?location=Israel&f_TPR=r259200&keywords=Backend"
+        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+            extra = scraper._linkedin_more_pages(Ctx, url, card * 60)
+            small = scraper._linkedin_more_pages(Ctx, url, card * 5)
+        self.assertEqual(extra.count("base-search-card__title"), 20)
+        self.assertEqual([c.split("start=")[1] for c in calls], ["60", "70", "70", "80"])
+        self.assertTrue(calls[0].startswith(scraper.LINKEDIN_MORE_API + "?location=Israel&f_TPR=r259200"))
+        self.assertEqual(small, "")  # fewer than 20 jobs: no extra requests
+        real = ('<li><div class="base-card base-search-card"><a class="base-card__full-link" '
+                'href="https://il.linkedin.com/jobs/view/{i}"></a><h3 class="base-search-card__title">Backend Developer</h3>'
+                '<h4 class="base-search-card__subtitle">Acme</h4></div></li>')
+        html = "<ul>" + "".join(real.format(i=i) for i in range(3)) + "</ul>" + "".join(real.format(i=i) for i in range(3, 5))
+        self.assertEqual(len(scraper.parse_job_cards(html, scraper.BOARD_CONFIGS["LinkedIn"])), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

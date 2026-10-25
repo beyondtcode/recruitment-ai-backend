@@ -161,7 +161,7 @@ async def scrape_one(url: str, source: str) -> list[dict]:
 
 
 # One-time backfill: LinkedIn jobs per search when looking further back.
-BACKFILL_LINKEDIN_MAX_JOBS = 400
+BACKFILL_LINKEDIN_MAX_JOBS = 1000
 
 
 async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], list[str]]:

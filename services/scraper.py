@@ -876,13 +876,13 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
     """LinkedIn's guest page shows only the first ~60 jobs; fetch the rest.
 
     Uses the guest pagination API (same search, ``start`` offset) until it
-    returns no new cards or LINKEDIN_MAX_JOBS (env, default 150) is reached.
+    returns no new cards or LINKEDIN_MAX_JOBS (env, default 1000 = LinkedIn's own limit) is reached.
     Returns the extra card HTML (appended to the first page before parsing).
     """
     try:
-        max_jobs = int(os.getenv("LINKEDIN_MAX_JOBS", "150"))
+        max_jobs = int(os.getenv("LINKEDIN_MAX_JOBS", "1000"))
     except ValueError:
-        max_jobs = 150
+        max_jobs = 1000
     override = LINKEDIN_MAX_JOBS_OVERRIDE.get()
     if override is not None:
         max_jobs = override  # 0 = first page only

@@ -585,3 +585,47 @@ class StatusMirrorTests(unittest.TestCase):
         from services.lead_sheet import JOB_HEADERS
         self.assertIn("Status Updated", JOB_HEADERS)
         self.assertIn("Status Updated", lead_agent.MIRRORED_COLUMNS)
+
+
+class SmallTestRunTests(unittest.TestCase):
+    def test_max_new_jobs_cap_leaves_rest_unseen(self) -> None:
+        from routers import leads
+        tmp = tempfile.TemporaryDirectory()
+        raw = [{"company_name": f"C{i}", "job_title": "Backend Developer", "job_link": f"https://li/{i}",
+                "source": "LinkedIn"} for i in range(5)]
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db"),
+                                          "LEADS_MAX_NEW_JOBS": "2"}), \
+                mock.patch("services.enrichment._classify_job", classify):
+            first = asyncio.run(leads._run_lead_pipeline([dict(j) for j in raw]))
+            second = asyncio.run(leads._run_lead_pipeline([dict(j) for j in raw]))
+        tmp.cleanup()
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)  # the rest were not marked seen
+
+    def test_search_fallback_when_page_has_no_size(self) -> None:
+        async def page(url):
+            return ce.LinkedInPage(size=ce.UNKNOWN, industry="Software", description="SaaS")
+
+        provider = FakeProvider({"": [SearchResult("Acme | LinkedIn", "https://il.linkedin.com/company/acme",
+                                                   "Software Development · 51-200 employees")]})
+        with mock.patch.object(ce, "fetch_linkedin_company", page), \
+                mock.patch.object(ce, "complete_json", mock.AsyncMock(return_value={"company_type": "product"})):
+            info = asyncio.run(ce.enrich_company("Acme", ["Dev"], BudgetedSearch([provider], 5),
+                                                 "https://il.linkedin.com/company/acme"))
+        self.assertEqual((info.size, info.company_type), ("51-200", "מוצר"))
+
+    def test_clear_sheet_keeps_settings(self) -> None:
+        store = MemoryStore({
+            "Sheet1": [["Company Name", "Job Title"], ["A", "Dev"]],
+            "Companies": [["Company Name", "Target"], ["A", "כן"]],
+            "Blocked Companies": [["Company", "Name Variants"], ["Intel", "Intel"]],
+        })
+        lead_agent.clear_sheet(store)
+        self.assertEqual(store.read("Sheet1").rows, [])
+        self.assertEqual(store.read("Sheet1").headers, ["Company Name", "Job Title"])
+        self.assertEqual(store.read("Companies").rows, [])
+        self.assertEqual(len(store.read("Blocked Companies").rows), 1)

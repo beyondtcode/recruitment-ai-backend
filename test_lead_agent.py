@@ -842,6 +842,47 @@ class WatchListTests(unittest.TestCase):
         self.assertNotEqual(row["Target"], "כן")
         self.assertEqual(summary["watch_list_jobs_found"], 1)
 
+    def test_company_id_search(self) -> None:
+        from services import watch_list as wl
+
+        html = ('<a href="https://www.linkedin.com/jobs/search?f_C=12345&trk=x">See jobs</a>'
+                '<code>{"entityUrn":"urn:li:fsd_company:12345"}</code><span>urn:li:organization:999</span>')
+        self.assertEqual(wl.parse_company_id(html), "12345")
+        self.assertEqual(wl.parse_company_id("<html>nothing</html>"), "")
+
+        cyera = wl.WatchCompany("Cyera", "https://www.linkedin.com/company/cyera/")
+        other = wl.WatchCompany("Nameless", "https://www.linkedin.com/company/nameless/")
+        urls, id_calls = [], []
+
+        async def scrape_one(url, source):
+            urls.append((url, wl_override()))
+            if "f_C=" in url:
+                return [{"company_name": "Cyera Ltd", "job_link": "https://li/1"}]
+            return [{"company_name": "Someone Else", "job_link": "https://li/2"}]
+
+        async def get_id(company):
+            id_calls.append(company.slug)
+            return "777" if company.slug == "cyera" else ""
+
+        from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE
+
+        def wl_override():
+            return LINKEDIN_MAX_JOBS_OVERRIDE.get()
+
+        tmp = tempfile.TemporaryDirectory()
+        with mock.patch.dict(os.environ, {"LEADS_WATCH_IDS": os.path.join(tmp.name, "ids.json")}), \
+                mock.patch.object(wl, "SEARCH_PAUSE_SECONDS", 0):
+            jobs, empty = asyncio.run(wl._scrape(wl.WatchList([cyera, other]), scrape_one, get_id))
+            self.assertEqual([j["job_link"] for j in jobs], ["https://li/1"])
+            self.assertEqual(empty, ["Nameless"])
+            self.assertEqual(urls[0], ("https://www.linkedin.com/jobs/search?location=Israel&f_C=777", None))
+            self.assertIn("keywords=", urls[1][0])
+            self.assertEqual(urls[1][1], 0)  # name search: first page only
+            # Second run: the id comes from the cache.
+            asyncio.run(wl._scrape(wl.WatchList([cyera]), scrape_one, get_id))
+        tmp.cleanup()
+        self.assertEqual(id_calls, ["cyera", "nameless"])
+
     def test_watch_list_seeded(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})

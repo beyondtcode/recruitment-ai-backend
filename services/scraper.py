@@ -17,8 +17,11 @@ Add new boards by extending ``BOARD_CONFIGS`` (selectors + host match).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
@@ -854,6 +857,64 @@ def _fetch_alljobs_sync(url: str, timeout_ms: int = 30000) -> tuple[str, int]:
     return combined, pages_scraped
 
 
+# Set by a one-time backfill run to page deeper than LINKEDIN_MAX_JOBS.
+LINKEDIN_MAX_JOBS_OVERRIDE: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "LINKEDIN_MAX_JOBS_OVERRIDE", default=None
+)
+
+LINKEDIN_MORE_API = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+
+
+def linkedin_more_url(search_url: str, start: int) -> str:
+    """Guest "see more jobs" API URL for the same search, from offset ``start``."""
+    query = urlparse(search_url).query
+    return f"{LINKEDIN_MORE_API}?{query}&start={start}"
+
+
+def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
+    """LinkedIn's guest page shows only the first ~60 jobs; fetch the rest.
+
+    Uses the guest pagination API (same search, ``start`` offset) until it
+    returns no new cards or LINKEDIN_MAX_JOBS (env, default 150) is reached.
+    Returns the extra card HTML (appended to the first page before parsing).
+    """
+    try:
+        max_jobs = int(os.getenv("LINKEDIN_MAX_JOBS", "150"))
+    except ValueError:
+        max_jobs = 150
+    max_jobs = LINKEDIN_MAX_JOBS_OVERRIDE.get() or max_jobs
+    count = first_html.count("base-search-card__title")
+    if count < 20 or count >= max_jobs:
+        return ""  # small result set: nothing more to fetch
+    extra: list[str] = []
+    start = count
+    failures = 0
+    while start < max_jobs:
+        try:
+            resp = context.request.get(linkedin_more_url(url, start), timeout=20000)
+        except Exception:
+            logger.warning("scrape_jobs: LinkedIn more-jobs request failed at start=%d", start, exc_info=True)
+            break
+        if resp.status == 429:
+            failures += 1
+            if failures > 2:
+                break
+            time.sleep(5)
+            continue
+        if resp.status != 200:
+            break
+        chunk = resp.text()
+        n = chunk.count("base-search-card__title")
+        if n == 0:
+            break
+        extra.append(chunk)
+        start += n
+        time.sleep(1.0)
+    if extra:
+        logger.info("scrape_jobs: LinkedIn pagination → %d more pages (up to offset %d) for %s", len(extra), start, url)
+    return "".join(extra)
+
+
 def _fetch_listing_playwright_sync(
     url: str,
     config: BoardConfig,
@@ -897,6 +958,8 @@ def _fetch_listing_playwright_sync(
                 page.wait_for_timeout(1500)
 
             html = page.content()
+            if is_linkedin:
+                html += _linkedin_more_pages(context, url, html)
             logger.info(
                 "scrape_jobs: %s Playwright rendered listing page (%d chars)",
                 config.source,

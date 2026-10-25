@@ -9,7 +9,9 @@ search: jobs found this way go through the same checks as any other job
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -111,35 +113,117 @@ def belongs_to(job: dict, company: WatchCompany) -> bool:
     }
 
 
+# LinkedIn's numeric company id lets the job search filter on the company
+# itself (f_C=<id>) instead of a keyword search on its name, which misses
+# jobs and needs filtering. Ids are cached in a small JSON file.
+_ID_PATTERNS = [
+    re.compile(r"f_C=(\d+)"),
+    re.compile(r"urn:li:(?:fsd_)?(?:organization|company|normalized_company):(\d+)"),
+    re.compile(r"urn%3Ali%3A(?:fsd_)?(?:organization|company)%3A(\d+)"),
+    re.compile(r'"companyId"\s*:\s*"?(\d+)'),
+    re.compile(r"companyId=(\d+)"),
+]
+
+
+def parse_company_id(html: str) -> str:
+    """Numeric LinkedIn company id from a public company page, or ''."""
+    counts: dict[str, int] = {}
+    for pattern in _ID_PATTERNS:
+        for m in pattern.finditer(html or ""):
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
+def _ids_path() -> str:
+    return os.environ.get("LEADS_WATCH_IDS", "data/watch_company_ids.json")
+
+
+def _load_ids() -> dict[str, str]:
+    try:
+        with open(_ids_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ids(ids: dict[str, str]) -> None:
+    try:
+        path = _ids_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ids, f, ensure_ascii=False, indent=1)
+    except OSError:
+        logger.warning("watch_list: could not save company ids", exc_info=True)
+
+
+async def fetch_company_id(company: WatchCompany) -> str:
+    """Open the company's public LinkedIn page and read its numeric id."""
+    from services import company_enrichment as ce
+
+    if not company.slug:
+        return ""
+    url = f"https://www.linkedin.com/company/{company.slug}/"
+    async with ce._linkedin_lock:
+        try:
+            html = await asyncio.to_thread(ce._fetch_company_playwright_sync, url)
+        except Exception:
+            logger.info("watch_list: company page fetch failed for %s", url, exc_info=True)
+            html = ""
+        finally:
+            await asyncio.sleep(ce.LINKEDIN_PAUSE_SECONDS)
+    return parse_company_id(html)
+
+
+def company_jobs_url(company_id: str) -> str:
+    """All of the company's open jobs in Israel."""
+    return f"https://www.linkedin.com/jobs/search?location=Israel&f_C={company_id}"
+
+
 async def scrape_watch_list(watch: WatchList) -> tuple[list[dict], list[str]]:
     """Open jobs of every watch-list company. Returns (jobs, companies with none found)."""
     from services.lead_pipeline import scrape_one
+
+    return await _scrape(watch, scrape_one, fetch_company_id)
+
+
+async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], list[str]]:
     from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE
 
-    # A company-name search also matches unrelated jobs further down; the
-    # company's own jobs rank at the top, so the first page is enough.
-    token = LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
-    try:
-        return await _scrape(watch, scrape_one)
-    finally:
-        LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
-
-
-async def _scrape(watch: WatchList, scrape_one) -> tuple[list[dict], list[str]]:
+    ids = _load_ids()
+    ids_changed = False
     jobs: list[dict] = []
     empty: list[str] = []
     for i, company in enumerate(watch.companies):
         if i:
             await asyncio.sleep(SEARCH_PAUSE_SECONDS)
+        cid = ids.get(company.slug, "")
+        if not cid and company.slug:
+            cid = await get_id(company)
+            if cid:
+                ids[company.slug] = cid
+                ids_changed = True
+        if cid:
+            # Company filter: every result is the company's own job, so page through all.
+            url, how = company_jobs_url(cid), f"company id {cid}"
+            token = LINKEDIN_MAX_JOBS_OVERRIDE.set(None)
+        else:
+            # Keyword fallback: unrelated jobs follow the company's own, first page only.
+            url, how = search_url(company), "name search"
+            token = LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
         try:
-            found = [j for j in await scrape_one(search_url(company), "LinkedIn") if belongs_to(j, company)]
+            found = [j for j in await scrape_one(url, "LinkedIn") if belongs_to(j, company) or cid]
         except Exception:
             logger.warning("watch_list: search failed for %s", company.name, exc_info=True)
             found = []
+        finally:
+            LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
         for j in found:
             j["watch"] = "1"
         jobs.extend(found)
         if not found:
             empty.append(company.name)
-        logger.info("watch_list: %s → %d jobs", company.name, len(found))
+        logger.info("watch_list: %s (%s) → %d jobs", company.name, how, len(found))
+    if ids_changed:
+        _save_ids(ids)
     return jobs, empty

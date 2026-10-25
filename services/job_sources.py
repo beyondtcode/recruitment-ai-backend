@@ -70,6 +70,7 @@ LEAD_SEARCHES: list[tuple[str, str, str]] = [
     ("LinkedIn", "AI Automation", _LI + "AI%20Automation"),
     ("LinkedIn", "AI Agent", _LI + "AI%20Agent%20Developer"),
     ("LinkedIn", "AI Implementation", _LI + "AI%20Implementation"),
+    ("LinkedIn", "AI Workflow", _LI + "AI%20Workflow"),
     ("Drushim", "AI Builder", _DRUSHIM.format(q="AI%20Builder")),
     ("JobMaster", "AI Builder", _JOBMASTER.format(q="AI+Builder")),
 ]

@@ -273,7 +273,7 @@ class LookbackTests(unittest.TestCase):
                 mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
                 mock.patch.dict(os.environ, {"LEADS_SEARCH_LIMIT": "2"}):
             asyncio.run(go(30))
-            self.assertTrue(all("r2592000" in u and m == 400 for u, m in seen))
+            self.assertTrue(all("r2592000" in u and m == 1000 for u, m in seen))
             seen.clear()
             asyncio.run(go(None))
             self.assertTrue(all("r259200" in u and "r2592000" not in u and m is None for u, m in seen))

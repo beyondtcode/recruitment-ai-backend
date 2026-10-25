@@ -225,33 +225,25 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
     "JobMaster": BoardConfig(
         url="",
         source="JobMaster",
-        job_card=".JobItem, .job-item, article.job, .results-list .item",
-        title="h2 a, h3 a, .JobItem-title a, a.jobTitle, .title a",
-        company=".JobItem-company, .company, .companyName, [class*='company']",
-        link="h2 a, h3 a, .JobItem-title a, a.jobTitle, a[href]",
-        publish_date=".JobItem-date, .date, time, [class*='date']",
-        snippet=(
-            ".JobItem-description, .job-description, .description, "
-            "[class*='snippet'], [class*='description']"
-        ),
+        job_card="article.JobItem",
+        title="a.CardHeader",
+        company=".CompanyNameLink",
+        link="a.CardHeader",
+        publish_date=".paddingTop10px .Gray",
+        snippet=".jobShortDescription",
         hosts=("jobmaster.co.il",),
     ),
     "Glassdoor": BoardConfig(
         url="",
         source="Glassdoor",
-        job_card=(
-            '[data-test="job-listing-first-item"], .JobsList_jobListItem__, .jobTile'
-        ),
-        title='[data-test="job-title"], .JobCard_seoLink__',
+        job_card='[data-test="job-card-wrapper"]',
+        title='a[data-test="job-title"]',
         company=(
-            '[data-test="employer-name"], .EmployerProfile_compactEmployerName__'
+            '[data-test="employer-name"], [class*="EmployerProfile_compactEmployerName"]'
         ),
-        link='a[data-test="job-title"], a.JobCard_seoLink__',
-        publish_date='[data-test="job-age"], .JobCard_listingAge__',
-        snippet=(
-            '[data-test="job-description-snippet"], .JobCard_jobDescriptionSnippet__, '
-            "[class*='snippet'], [class*='description']"
-        ),
+        link='a[data-test="job-title"]',
+        publish_date='[data-test="job-age"], [class*="listingAge"]',
+        snippet='[data-test="descSnippet"], [class*="jobDescriptionSnippet"]',
         hosts=("glassdoor.com", "glassdoor.co.il"),
         use_playwright=True,
     ),
@@ -446,8 +438,17 @@ def _first_href(element: Any, base_url: str) -> str:
     return urljoin(base_url, href)
 
 
+# Query parameters that identify the job itself (kept); everything else is tracking.
+_JOB_ID_PARAMS = {"jobid", "key", "jl", "positionid", "jobkey"}
+
+
 def _clean_job_link(url: str) -> str:
-    """Strip tracking query/fragment and decode percent-encoded path characters."""
+    """Strip tracking query/fragment and decode percent-encoded path characters.
+
+    Job-id parameters are kept: AllJobs (?JobID=), JobMaster (?key=),
+    Glassdoor (?jl=) and Jobnet (?positionid=) put the job id in the query, and
+    without it every job of the board would collapse into one link.
+    """
     raw = (url or "").strip()
     if not raw:
         return ""
@@ -455,7 +456,9 @@ def _clean_job_link(url: str) -> str:
         parsed = urlparse(raw)
     except ValueError:
         return unquote(raw.split("?", 1)[0].split("#", 1)[0])
-    cleaned = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    kept = [(k, v) for k, v in parse_qs(parsed.query).items() if k.lower() in _JOB_ID_PARAMS]
+    query = urlencode([(k, v[0]) for k, v in kept])
+    cleaned = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", query, ""))
     return unquote(cleaned)
 
 

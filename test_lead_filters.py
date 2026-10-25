@@ -279,5 +279,79 @@ class LookbackTests(unittest.TestCase):
             self.assertTrue(all("r259200" in u and "r2592000" not in u and m is None for u, m in seen))
 
 
+class IsraeliBoardParsingTests(unittest.TestCase):
+    """Card HTML copied (trimmed) from the live boards, October 2026."""
+
+    def parse(self, url, html):
+        from services import scraper
+        return scraper.parse_job_cards(html, scraper.board_config_for_url(url))
+
+    def test_alljobs_keeps_job_id(self) -> None:
+        card = ('<div class="job-content-top"><div class="job-content-top-date"> לפני 3 שעות </div>'
+                '<div class="job-content-top-title"><div><a class="N" href="/Search/UploadSingle.aspx?JobID={id}" '
+                'title="x"><h2>מפתח/ת Backend</h2></a></div><div class="T14"><a href="/Employer/HP/Default.aspx?cid=1">Acme</a></div></div></div>')
+        jobs = self.parse("https://www.alljobs.co.il/SearchResultsGuest.aspx?page=1",
+                          card.format(id=1) + card.format(id=2))
+        self.assertEqual([j["job_link"] for j in jobs], [
+            "https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID=1",
+            "https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID=2",
+        ])
+        self.assertEqual(jobs[0]["company_name"], "Acme")
+
+    def test_jobmaster(self) -> None:
+        html = ('<article class="CardStyle JobItem font14" id="misra9901005"> <div class="JobItemRight Transition View_Job_Details"> '
+                '<a class="CardHeader View_Job_Details" href="/jobs/checknum.asp?key=9901005"> Software Developer </a> '
+                '<div class="paddingTop10px"> <span class="Gray"> פורסם לפני 4 ימים </span> ע"י '
+                '<a class="font14 CompanyNameLink" href="checkhevra.asp?cs=X"> <span>Acme</span> </a> </div> '
+                '<div class="JobExtraInfo"><ul><div class="jobShortDescription Gray"> פיתוח בצד שרת </div></ul></div></div></article>')
+        [job] = self.parse("https://www.jobmaster.co.il/jobs/q-Software-Developer/", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("Software Developer", "Acme"))
+        self.assertEqual(job["job_link"], "https://www.jobmaster.co.il/jobs/checknum.asp?key=9901005")
+        self.assertIn("4", job["publish_date"])
+        self.assertIn("פיתוח", job["snippet"])
+
+    def test_glassdoor(self) -> None:
+        html = ('<div class="JobCard_jobCardWrapper__vX29z" data-test="job-card-wrapper"><div class="JobCard_jobCardContainer__arQlW">'
+                '<span class="EmployerProfile_compactEmployerName__9MGcV">Acme Ltd</span>'
+                '<a class="JobCard_jobTitle__GLyJ1" data-test="job-title" href="https://www.glassdoor.com/job-listing/qa-JV_KO0,2.htm?jl=1010305845301">Manual QA Engineer</a>'
+                '<div data-test="descSnippet"><div>Testing methodologies</div></div></div></div>')
+        [job] = self.parse("https://www.glassdoor.com/Job/x.htm", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("Manual QA Engineer", "Acme Ltd"))
+        self.assertTrue(job["job_link"].endswith("?jl=1010305845301"))
+
+    def test_jobnet(self) -> None:
+        html = ('<div class="whitebox" itemscope="" itemtype="https://schema.org/JobPosting"><div class="inerbox orange">'
+                '<div class="titlehdn hidden">QA Automation Engineer</div><a class="logoimg hidden" href="/Company?companyID=11737"></a>'
+                '<a href="/jobs?positionid=13227516"><h2>QA Automation Engineer</h2></a><div><h2>QA Automation Engineer</h2></div>'
+                '<p><a href="/Company?companyID=11737"> Acme</a></p><p class="boxDateCls">25/10/2026</p></div>'
+                '<div class="middletext"><div class="divJobInner">בדיקות אוטומציה</div></div></div>')
+        [job] = self.parse("https://www.jobnet.co.il/jobs?subprofid=819", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("QA Automation Engineer", "Acme"))
+        self.assertEqual(job["job_link"], "https://www.jobnet.co.il/jobs?positionid=13227516")
+        self.assertEqual(job["publish_date"], "2026-10-25")
+
+    def test_drushim(self) -> None:
+        html = ('<article class="job-card-module-scss-module__nFMPJW__card job-card-module-scss-module__nFMPJW__search" '
+                'data-nagish="job-card-item" data-node-item="449"><a href="/job/38820442/3f939a77/"></a>'
+                '<div class="job-card-header-module-scss-module__JxqRYa__box"><div class="job-card-header-module-scss-module__JxqRYa__titleGroup">'
+                '<h3 class="job-card-header-module-scss-module__JxqRYa__title">Software Engineer</h3>'
+                '<span class="job-card-header-module-scss-module__JxqRYa__companyName">Comm-IT</span></div></div>'
+                '<div class="job-card-module-scss-module__nFMPJW__body"><div class="job-card-meta-module-scss-module__DkSa0a__box">'
+                '<div class="job-card-meta-module-scss-module__DkSa0a__row"><span>באר יעקב</span></div>'
+                '<div class="job-card-meta-module-scss-module__DkSa0a__row"><span>לפני 9 שעות</span></div></div>'
+                '<p class="job-card-module-scss-module__nFMPJW__description">C# and C++ server-side development</p>'
+                '<a href="/job/38820442/3f939a77/">פרטים</a></div></article>')
+        [job] = self.parse("https://www.drushim.co.il/jobs/search/Software%20Developer/?ssaen=3", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("Software Engineer", "Comm-IT"))
+        self.assertEqual(job["job_link"], "https://www.drushim.co.il/job/38820442/3f939a77/")
+        self.assertIn("C#", job["snippet"])
+        self.assertNotEqual(job["publish_date"], "")
+
+    def test_linkedin_tracking_still_stripped(self) -> None:
+        from services import scraper
+        self.assertEqual(scraper._clean_job_link("https://il.linkedin.com/jobs/view/x-123?refId=a&trackingId=b"),
+                         "https://il.linkedin.com/jobs/view/x-123")
+
+
 if __name__ == "__main__":
     unittest.main()

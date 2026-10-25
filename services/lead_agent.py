@@ -533,7 +533,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             to_enrich.append(ck)
     # Newest companies first, capped per run.
     to_enrich.sort(key=company_last_found, reverse=True)
-    to_enrich = to_enrich[: _env_int("LEADS_MAX_COMPANY_ENRICH", 80)]
+    to_enrich = to_enrich[: _env_int("LEADS_MAX_COMPANY_ENRICH", 200)]
     # Company lookups may use at most half of the run's search budget, so
     # contacts for target companies always get searches too.
     company_search_cap = (search.budget // 2) if search is not None and hasattr(search, "budget") else 0
@@ -557,9 +557,11 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         titles = [j.get("Job Title", "") for j in company_jobs(ck)]
         link = company_link_for(ck)
         use_search = search
-        if search is not None and getattr(search, "used", 0) >= company_search_cap and getattr(search, "has_free", False):
-            use_search = search.free_only()  # paid share for companies is spent: free search only
-        elif search is not None and getattr(search, "used", 0) >= company_search_cap:
+        if search is not None and hasattr(search, "limited"):
+            # Paid calls stop at the companies' share (enforced per call, so
+            # concurrent lookups cannot eat the contacts' share).
+            use_search = search.limited(company_search_cap)
+        if search is not None and getattr(search, "used", 0) >= company_search_cap and not getattr(search, "has_free", False):
             if not link:
                 skipped_for_budget += 1
                 return  # no free source and no budget left for companies: try next run

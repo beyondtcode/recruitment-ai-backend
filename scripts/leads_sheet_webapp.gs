@@ -181,12 +181,16 @@ const HEADERS = {
   'Do Not Contact': ["Company Name", "Reason"],
   'Blocked Companies': ["Company", "Name Variants"],
   'Archive': ["Company Name", "Job Title", "Category", "Job Link", "Publish Date", "Found Date", "Last Checked", "Closed Date", "Outreach Status", "Source", "Job Summary"],
-  'Companies Archive': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"]
+  'Companies Archive': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Other Companies': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Other Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"]
 };
-const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
+const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Other Companies', 'Other Jobs',
+                   'Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
 const TAB_COLORS = {
   'Weekly': '#34a853', 'Companies': '#4285f4', 'Jobs': '#7baaf7', 'Do Not Contact': '#fb8c00',
-  'Blocked Companies': '#fb8c00', 'Archive': '#9e9e9e', 'Companies Archive': '#9e9e9e', 'מדריך': '#8e24aa'
+  'Blocked Companies': '#fb8c00', 'Archive': '#9e9e9e', 'Companies Archive': '#9e9e9e', 'מדריך': '#8e24aa',
+  'Other Companies': '#cccccc', 'Other Jobs': '#cccccc'
 };
 const STATUSES = ["לא נשלח", "בקשת חברות נשלחה", "הודעה ראשונה נשלחה", "פולואפ נשלח", "ענה: חיובי", "ענה: שלילי", "לא רלוונטי"];
 const BLOCKED_SEED = [["מטריקס", "Matrix, Matrix IT, מטריקס"], ["NVIDIA", "NVIDIA, NVIDIA AI, Nvidia, אנבידיה, אינבידיה"], ["ONE", "ONE Technologies, One1, וואן טכנולוגיות"], ["SQLink", "SQLink, SQLink Group, אס.קיו.לינק, SQ Link"], ["התעשייה האווירית", "IAI, IAI - Israel Aerospace Industries, Israel Aerospace Industries, התעשייה האווירית, תעשייה אווירית"], ["אלעד מערכות", "Elad Software, Elad Software Systems, Elad Systems, אלעד מערכות"], ["קבוצת יעל", "Yael Group, Yael Software, קבוצת יעל"], ["Commit", "Commit, Commit Software, קומיט"], ["בינת", "Bynet, Bynet Data Communications, בינת, בינת סמך"], ["Intel", "Intel, Intel Corporation, אינטל"], ["Comblack", "Comblack, ComBlack, קומבלק"]];
@@ -195,6 +199,7 @@ const EDITABLE = {
   'Companies': ['Outreach Status', 'Status Updated', 'Contact Name', 'Contact Title', 'Contact LinkedIn',
                 'Alt Contact Name', 'Alt Contact Title', 'Alt Contact LinkedIn'],
   'Companies Archive': ['Outreach Status', 'Status Updated'],
+  'Other Companies': ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
   'Blocked Companies': ['Company', 'Name Variants']
 };
@@ -216,7 +221,13 @@ const HIDDEN_COLUMNS = {
   'Jobs': ['Contact LinkedIn', 'Job Link', 'Company Size', 'Company Type', 'Alt Contact Name', 'Alt Contact Title',
            'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source', 'Last Checked', 'Company LinkedIn',
            'Status Updated'],
-  'Archive': ['Job Link', 'Source', 'Job Summary', 'Last Checked']
+  'Archive': ['Job Link', 'Source', 'Job Summary', 'Last Checked'],
+  'Other Companies': ['Contact Name', 'Contact Title', 'Contact LinkedIn', 'Alt Contact Name', 'Alt Contact Title',
+                      'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing', 'Outreach Track',
+                      'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched', 'Status Updated'],
+  'Other Jobs': ['Contact Name', 'Contact Title', 'Contact LinkedIn', 'Outreach Status', 'Job Link', 'Alt Contact Name',
+                 'Alt Contact Title', 'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source',
+                 'Last Checked', 'Company LinkedIn', 'Status Updated']
 };
 // Tabs you rarely need: hidden (open them from the ☰ "All sheets" button, bottom-left).
 const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
@@ -301,7 +312,7 @@ function setupTab_(ss, tab, headers) {
     ['בקשת חברות נשלחה', 'הודעה ראשונה נשלחה', 'פולואפ נשלח'].forEach(function (v) {
       rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(v).setBackground('#cfe2f3').setRanges([r]).build());
     });
-    if (tab === 'Companies' || tab === 'Companies Archive') {
+    if (tab === 'Companies' || tab === 'Companies Archive' || tab === 'Other Companies') {
       const rule = SpreadsheetApp.newDataValidation().requireValueInList(STATUSES, true).setAllowInvalid(true).build();
       r.setDataValidation(rule);
     }
@@ -332,7 +343,8 @@ function setupGuide_(ss) {
     ['לשונית', 'מה יש בה', 'מי עורך'],
     ['Weekly', 'רשימת הפנייה של השבוע: שורה לכל חברה (ולכל מסלול). חברות חדשות למעלה; חברות שכבר פנו אליהן ופרסמו משרה חדשה – למטה, בצבע.', 'נבנית מחדש בכל יום ראשון ב־8:00. לא עורכים כאן.'],
     ['Companies', 'כל חברה שמגייסת עכשיו: גודל, סוג, האם בקהל היעד, איש קשר + חלופי, סטטוס פנייה. חברה עם משרות פיתוח וגם Salesforce/monday מופיעה פעמיים (מסלול פיתוח ומסלול מערכות).', 'מעדכנים את סטטוס הפנייה כאן. אפשר להקליד איש קשר ידנית – הסוכן לא יחליף אותו. עמודות עם כותרת צהובה = מותר לערוך.'],
-    ['Jobs', 'כל משרה פתוחה, עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
+    ['Jobs', 'כל משרה פתוחה בחברות שבקהל היעד (או שעוד לא ידוע), עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
+    ['Other Companies / Other Jobs', 'חברות שאינן בקהל היעד (גדולות מדי, קטנות מדי, בנקים, השמה וכו׳) והמשרות שלהן. נשמרות כדי לא לבדוק אותן שוב, ולמקרה שתרצו להרחיב את קהל היעד.', 'לקריאה בלבד. אם חברה הופכת לקהל יעד – היא עוברת אוטומטית ל־Companies.'],
     ['Do Not Contact', 'חברות שלא פונים אליהן (כבר בשיחה, בקמפיין אחר וכו׳).', 'מוסיפים שם חברה ומשפט סיבה.'],
     ['Blocked Companies', 'חברות שלא אוספים מהן משרות בכלל, עם כל וריאציות השם.', 'מוסיפים שורה. בריצה הבאה המשרות שלהן נמחקות.'],
     ['Archive', 'משרות שנסגרו, עם תאריך הסגירה.', 'לקריאה בלבד.'],

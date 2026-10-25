@@ -58,6 +58,8 @@ from services.lead_sheet import (
     TAB_COMPANIES,
     TAB_COMPANIES_ARCHIVE,
     TAB_DO_NOT_CONTACT,
+    TAB_OTHER_COMPANIES,
+    TAB_OTHER_JOBS,
     TAB_WEEKLY,
     WEEKLY_HEADERS,
     SheetStore,
@@ -243,8 +245,12 @@ def clear_sheet(store: SheetStore) -> list[str]:
         (TAB_COMPANIES_ARCHIVE, COMPANY_HEADERS),
         (TAB_ARCHIVE, ARCHIVE_HEADERS),
         (TAB_WEEKLY, WEEKLY_HEADERS),
+        (TAB_OTHER_JOBS, JOB_HEADERS),
+        (TAB_OTHER_COMPANIES, COMPANY_HEADERS),
     ):
         existing = store.read(tab)
+        if existing is None and tab in (TAB_OTHER_JOBS, TAB_OTHER_COMPANIES):
+            continue
         table = Table(headers=list(existing.headers) if existing and existing.headers else list(headers))
         store.write(tab, table, reset_colors=(tab == TAB_WEEKLY))
         cleared.append(tab)
@@ -352,17 +358,25 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
 
     jobs = store.read(jobs_tab()) or Table(headers=[])
     jobs.ensure_headers(JOB_HEADERS)
+    # Jobs of non-target companies live in "Other Jobs"; process both together.
+    other_jobs = store.read(TAB_OTHER_JOBS) or Table(headers=[])
+    for h in other_jobs.headers:
+        if h and h not in jobs.headers:
+            jobs.headers.append(h)
+    jobs.rows = jobs.rows + other_jobs.rows
     companies = store.read(TAB_COMPANIES) or Table(headers=[])
     companies.canonical_headers(COMPANY_HEADERS)
     companies_archive = store.read(TAB_COMPANIES_ARCHIVE) or Table(headers=[])
     companies_archive.canonical_headers(COMPANY_HEADERS)
-    for h in companies_archive.headers:
+    other_companies = store.read(TAB_OTHER_COMPANIES) or Table(headers=[])
+    other_companies.canonical_headers(COMPANY_HEADERS)
+    for h in companies_archive.headers + other_companies.headers:
         if h not in companies.headers:
             companies.headers.append(h)
     company_rows: dict[str, dict[str, str]] = {}
-    # Archived companies are loaded too, so a company that posts again comes
-    # back with its previous outreach status and contacts.
-    for r in companies_archive.rows + companies.rows:
+    # Archived and non-target companies are loaded too, so a company keeps its
+    # history (status, contacts, size) when it posts again or becomes a target.
+    for r in companies_archive.rows + other_companies.rows + companies.rows:
         r["Outreach Track"] = r.get("Outreach Track") or TRACK_DEV
         company_rows[_company_row_key(r)] = r
 
@@ -610,7 +624,10 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             -(parse_date(r.get("Last Job Found", "")) or date.min).toordinal(),
         )
     )
-    companies.rows = [r for r in rows if _company_row_key(r) in by_row]
+    active = [r for r in rows if _company_row_key(r) in by_row]
+    companies.rows = [r for r in active if r.get("Target") != NO]
+    other_companies.headers = list(companies.headers)
+    other_companies.rows = [r for r in active if r.get("Target") == NO]
     companies_archive.headers = list(companies.headers)
     companies_archive.rows = [r for r in rows if _company_row_key(r) not in by_row]
 
@@ -621,8 +638,18 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             for col in MIRRORED_COLUMNS:
                 job[col] = company.get(col, "")
 
+    # Jobs of non-target companies go to the "Other Jobs" tab.
+    all_jobs = jobs.rows
+    jobs.rows = [j for j in all_jobs if j.get("Target") != NO]
+    other_jobs.headers = list(jobs.headers)
+    other_jobs.rows = [j for j in all_jobs if j.get("Target") == NO]
+
     store.write(jobs_tab(), jobs)
+    if other_jobs.rows or store.read(TAB_OTHER_JOBS) is not None:
+        store.write(TAB_OTHER_JOBS, other_jobs)
     store.write(TAB_COMPANIES, companies)
+    if other_companies.rows or store.read(TAB_OTHER_COMPANIES) is not None:
+        store.write(TAB_OTHER_COMPANIES, other_companies)
     store.set_dropdown(TAB_COMPANIES, "Outreach Status", OUTREACH_STATUSES)
     if companies_archive.rows or store.read(TAB_COMPANIES_ARCHIVE) is not None:
         store.write(TAB_COMPANIES_ARCHIVE, companies_archive)
@@ -637,8 +664,11 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
             "new_jobs": len(new_rows),
             "archived_jobs": len(archived),
             "removed_blocked_jobs": removed_blocked,
-            "open_jobs": len(jobs.rows),
-            "companies": len({_key(r.get("Company Name", "")) for r in companies.rows}),
+            "open_jobs": len(all_jobs),
+            "target_or_unknown_jobs": len(jobs.rows),
+            "other_jobs": len(other_jobs.rows),
+            "companies": len({_key(r.get("Company Name", "")) for r in active}),
+            "other_companies": len(other_companies.rows),
             "companies_archived": len(companies_archive.rows),
             "target_companies": len(
                 {rk.split("|")[0] for rk, r in company_rows.items() if r.get("Target") == YES}

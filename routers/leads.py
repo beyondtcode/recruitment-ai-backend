@@ -16,7 +16,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from services import lead_agent
 from services.lead_dedup import clear_seen_jobs
@@ -76,13 +76,25 @@ def _check_token(token: str | None) -> None:
 
 
 @router.api_route("/run", methods=["GET", "POST"])
-async def run_agent(x_leads_token: str | None = Header(default=None)) -> dict[str, Any]:
-    """Full every-2-days run. Writes the sheet and returns a summary for Slack."""
+async def run_agent(
+    x_leads_token: str | None = Header(default=None),
+    lookback_days: int | None = Query(default=None, ge=1, le=30),
+) -> dict[str, Any]:
+    """Full every-2-days run. Writes the sheet and returns a summary for Slack.
+
+    ``?lookback_days=30`` = one-time backfill: searches look back that many days
+    instead of 3 (and LinkedIn pages deeper). Leave it off for scheduled runs.
+    """
     _check_token(x_leads_token)
     search = get_search_client()
     if search is None:
         logger.warning("leads/run: no TAVILY_API_KEY or SERPER_API_KEY — company data from LinkedIn pages / the LLM only, no contacts")
-    return await lead_agent.run(_store(), search)
+    if lookback_days:
+        logger.info("leads/run: one-time backfill, looking back %d days", lookback_days)
+    summary = await lead_agent.run(_store(), search, lookback_days=lookback_days)
+    if lookback_days:
+        summary["lookback_days"] = lookback_days
+    return summary
 
 
 @router.api_route("/weekly", methods=["GET", "POST"])

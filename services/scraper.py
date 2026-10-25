@@ -17,6 +17,7 @@ Add new boards by extending ``BOARD_CONFIGS`` (selectors + host match).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -856,6 +857,11 @@ def _fetch_alljobs_sync(url: str, timeout_ms: int = 30000) -> tuple[str, int]:
     return combined, pages_scraped
 
 
+# Set by a one-time backfill run to page deeper than LINKEDIN_MAX_JOBS.
+LINKEDIN_MAX_JOBS_OVERRIDE: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "LINKEDIN_MAX_JOBS_OVERRIDE", default=None
+)
+
 LINKEDIN_MORE_API = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
 
@@ -876,6 +882,7 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
         max_jobs = int(os.getenv("LINKEDIN_MAX_JOBS", "150"))
     except ValueError:
         max_jobs = 150
+    max_jobs = LINKEDIN_MAX_JOBS_OVERRIDE.get() or max_jobs
     count = first_html.count("base-search-card__title")
     if count < 20 or count >= max_jobs:
         return ""  # small result set: nothing more to fetch

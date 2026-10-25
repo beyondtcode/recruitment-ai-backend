@@ -370,7 +370,10 @@ async def run(
     check: Callable[[list[str]], Awaitable[dict[str, str]]] = check_jobs,
     scrape_watch: Callable[[WatchList], Awaitable[tuple[list[dict], list[str]]]] | None = None,
     today: date | None = None,
+    lookback_days: int | None = None,
 ) -> dict[str, Any]:
+    if lookback_days and scrape is scrape_all_raw:
+        scrape = lambda: scrape_all_raw(lookback_days)  # noqa: E731 — one-time backfill
     async with _agent_lock:
         return await _run(
             store, search, scrape=scrape, check=check,

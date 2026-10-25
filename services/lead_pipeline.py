@@ -9,7 +9,7 @@ import os
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from services.enrichment import classify_lead_jobs
-from services.job_sources import LEAD_SEARCHES
+from services.job_sources import LEAD_SEARCHES, with_lookback
 from services.lead_dedup import (
     filter_unseen_fingerprints,
     filter_unseen_jobs,
@@ -27,7 +27,7 @@ from services.lead_filters import (
     to_ddmmyyyy,
     today_israel,
 )
-from services.scraper import scrape_jobs
+from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE, scrape_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,15 @@ async def scrape_one(url: str, source: str) -> list[dict]:
     )
 
 
-async def scrape_all_raw() -> tuple[list[dict], list[str]]:
+# One-time backfill: LinkedIn jobs per search when looking further back.
+BACKFILL_LINKEDIN_MAX_JOBS = 400
+
+
+async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], list[str]]:
     """Run every search in ``LEAD_SEARCHES``.
+
+    ``lookback_days`` (one-time backfill) widens each search's date window and
+    lets LinkedIn page deeper; normal runs use the 3-day window.
 
     Returns (jobs, labels of searches that failed or returned nothing). A search
     with zero results usually means the board changed its layout or blocked us.
@@ -175,6 +182,9 @@ async def scrape_all_raw() -> tuple[list[dict], list[str]]:
         limit = 0
     if limit > 0:  # short test runs
         searches = searches[:limit]
+    if lookback_days:
+        searches = [(b, l, with_lookback(u, lookback_days)) for b, l, u in searches]
+        LINKEDIN_MAX_JOBS_OVERRIDE.set(BACKFILL_LINKEDIN_MAX_JOBS)
     for i, (board, label, url) in enumerate(searches):
         if i:
             # Be gentle with the boards (LinkedIn rate-limits bursts of guest searches).

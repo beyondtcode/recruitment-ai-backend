@@ -239,5 +239,41 @@ class LinkedInPaginationTests(unittest.TestCase):
         self.assertEqual(len(scraper.parse_job_cards(html, scraper.BOARD_CONFIGS["LinkedIn"])), 5)
 
 
+class LookbackTests(unittest.TestCase):
+    def test_with_lookback(self) -> None:
+        from services.job_sources import LEAD_SEARCHES, with_lookback
+
+        urls = {label if board == "LinkedIn" else board: u for board, label, u in LEAD_SEARCHES}
+        li = with_lookback(urls["Backend"], 30)
+        self.assertIn("f_TPR=r2592000", li)
+        self.assertIn("keywords=Backend%20Developer", li)
+        self.assertNotIn("duration=", with_lookback(urls["AllJobs"], 30))
+        self.assertIn("position=235", with_lookback(urls["AllJobs"], 30))
+        self.assertNotIn("ssaen", with_lookback(urls["Drushim"], 30))
+        self.assertNotIn("fromAge", with_lookback(urls["Glassdoor"], 30))
+        self.assertEqual(with_lookback(urls["Jobnet"], 30), urls["Jobnet"])
+
+    def test_scrape_all_raw_uses_lookback(self) -> None:
+        from services import lead_pipeline, scraper
+
+        seen = []
+
+        async def fake_scrape_one(url, source):
+            seen.append((url, scraper.LINKEDIN_MAX_JOBS_OVERRIDE.get()))
+            return []
+
+        async def go(days):
+            return await lead_pipeline.scrape_all_raw(days)
+
+        with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
+                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                mock.patch.dict(os.environ, {"LEADS_SEARCH_LIMIT": "2"}):
+            asyncio.run(go(30))
+            self.assertTrue(all("r2592000" in u and m == 400 for u, m in seen))
+            seen.clear()
+            asyncio.run(go(None))
+            self.assertTrue(all("r259200" in u and "r2592000" not in u and m is None for u, m in seen))
+
+
 if __name__ == "__main__":
     unittest.main()

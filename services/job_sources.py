@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import re
+from urllib.parse import urlparse
+
 DEFAULT_SEARCH_URLS: dict[str, str] = {
     "LinkedIn": (
         "https://www.linkedin.com/jobs/search?"
@@ -74,3 +77,25 @@ LEAD_SEARCHES: list[tuple[str, str, str]] = [
     ("Drushim", "AI Builder", _DRUSHIM.format(q="AI%20Builder")),
     ("JobMaster", "AI Builder", _JOBMASTER.format(q="AI+Builder")),
 ]
+
+
+# Date-window query parameters per board (the 3-day defaults above).
+_DATE_PARAMS = {"alljobs.co.il": "duration", "drushim.co.il": "ssaen", "glassdoor.": "fromAge"}
+
+
+def with_lookback(url: str, days: int) -> str:
+    """Widen a search URL's publish-date window to ``days`` (one-time backfill).
+
+    LinkedIn gets ``f_TPR=r<seconds>``. Boards whose date filter only accepts
+    fixed values (AllJobs, Drushim, Glassdoor) get the filter removed, i.e. all
+    open jobs. URLs without a date filter are returned unchanged.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if "linkedin.com" in host:
+        return re.sub(r"f_TPR=r\d+", f"f_TPR=r{days * 86400}", url)
+    param = next((p for h, p in _DATE_PARAMS.items() if h in host), None)
+    if param is None:
+        return url
+    base, _, query = url.partition("?")
+    kept = [kv for kv in query.split("&") if kv and not kv.startswith(param + "=")]
+    return base + ("?" + "&".join(kept) if kept else "")

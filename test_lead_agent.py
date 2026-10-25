@@ -561,7 +561,7 @@ class CompaniesArchiveTests(unittest.TestCase):
             self.assertEqual([r["Company Name"] for r in store.read("Companies").rows], ["Alive"])
             archived = store.read("Companies Archive").rows
             self.assertEqual((archived[0]["Company Name"], archived[0]["Outreach Status"]), ("Gone", "פולואפ נשלח"))
-            self.assertEqual(store.read("Companies").headers[:3], ["Company Name", "Target", "Outreach Status"])
+            self.assertEqual(store.read("Companies").headers[:3], ["Company Name", "Fit", "Target"])
 
             new.append({"company_name": "Gone", "job_title": "QA Engineer", "job_link": "https://x/back",
                         "source": "LinkedIn"})
@@ -662,14 +662,27 @@ class OtherTabsTests(unittest.TestCase):
             summary = asyncio.run(lead_agent.run(store, None, scrape=scrape,
                                                  check=mock.AsyncMock(return_value={}), today=TODAY))
             self.assertEqual([r["Company Name"] for r in store.read("Sheet1").rows], ["SmallCo"])
-            self.assertEqual([r["Company Name"] for r in store.read("Other Jobs").rows], ["BigCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Not a Fit - Jobs").rows], ["BigCo"])
             self.assertEqual([r["Company Name"] for r in store.read("Companies").rows], ["SmallCo"])
-            self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Not a Fit - Companies").rows], ["BigCo"])
             self.assertEqual((summary["open_jobs"], summary["other_jobs"]), (2, 1))
 
             # Second run: nothing lost, BigCo not re-enriched, still in Other.
             asyncio.run(lead_agent.run(store, None, scrape=scrape,
                                        check=mock.AsyncMock(return_value={}), today=date(2026, 10, 27)))
         tmp.cleanup()
-        self.assertEqual(len(store.read("Sheet1").rows) + len(store.read("Other Jobs").rows), 2)
-        self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])
+        self.assertEqual(len(store.read("Sheet1").rows) + len(store.read("Not a Fit - Jobs").rows), 2)
+        self.assertEqual([r["Company Name"] for r in store.read("Not a Fit - Companies").rows], ["BigCo"])
+
+
+class FitReasonTests(unittest.TestCase):
+    def test_reasons(self) -> None:
+        f = ce.fit_reason
+        self.assertEqual(f(ce.CompanyInfo("51-200", "מוצר"), {"Backend"}), "מתאימה")
+        self.assertEqual(f(ce.CompanyInfo("5001-10000", "בנק"), {"יישום Salesforce"}), "מתאימה (Salesforce/monday)")
+        self.assertEqual(f(ce.CompanyInfo("10001+", "מוצר"), {"Backend"}), "גדולה מדי (10001+)")
+        self.assertEqual(f(ce.CompanyInfo("11-50", "מוצר"), {"Backend"}), "קטנה מדי (11-50)")
+        self.assertEqual(f(ce.CompanyInfo("51-200", "בנק"), {"Backend"}), "לא חברת מוצר (בנק)")
+        self.assertEqual(f(ce.CompanyInfo("51-200", "השמה"), {"Backend"}), "חברת השמה / מיקור חוץ")
+        self.assertEqual(f(ce.CompanyInfo(), {"Backend"}), "חסר מידע על גודל")
+        self.assertEqual(f(ce.CompanyInfo("51-200", "מוצר"), {"Backend"}, do_not_contact=True), "ברשימת לא לפנות")

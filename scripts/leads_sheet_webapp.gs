@@ -176,21 +176,21 @@ function dropdown_(ss, tab, column, list) {
 const JOBS_TAB = 'Jobs';
 const HEADERS = {
   'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
-  'Companies': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
-  'Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
+  'Companies': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Jobs': ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
   'Do Not Contact': ["Company Name", "Reason"],
   'Blocked Companies': ["Company", "Name Variants"],
   'Archive': ["Company Name", "Job Title", "Category", "Job Link", "Publish Date", "Found Date", "Last Checked", "Closed Date", "Outreach Status", "Source", "Job Summary"],
-  'Companies Archive': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
-  'Other Companies': ["Company Name", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
-  'Other Jobs': ["Company Name", "Job Title", "Category", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"]
+  'Companies Archive': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Not a Fit - Companies': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
+  'Not a Fit - Jobs': ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"]
 };
-const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Other Companies', 'Other Jobs',
+const TAB_ORDER = ['Weekly', 'Companies', 'Jobs', 'Do Not Contact', 'Not a Fit - Companies', 'Not a Fit - Jobs',
                    'Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
 const TAB_COLORS = {
   'Weekly': '#34a853', 'Companies': '#4285f4', 'Jobs': '#7baaf7', 'Do Not Contact': '#fb8c00',
   'Blocked Companies': '#fb8c00', 'Archive': '#9e9e9e', 'Companies Archive': '#9e9e9e', 'מדריך': '#8e24aa',
-  'Other Companies': '#cccccc', 'Other Jobs': '#cccccc'
+  'Not a Fit - Companies': '#cccccc', 'Not a Fit - Jobs': '#cccccc'
 };
 const STATUSES = ["לא נשלח", "בקשת חברות נשלחה", "הודעה ראשונה נשלחה", "פולואפ נשלח", "ענה: חיובי", "ענה: שלילי", "לא רלוונטי"];
 const BLOCKED_SEED = [["מטריקס", "Matrix, Matrix IT, מטריקס"], ["NVIDIA", "NVIDIA, NVIDIA AI, Nvidia, אנבידיה, אינבידיה"], ["ONE", "ONE Technologies, One1, וואן טכנולוגיות"], ["SQLink", "SQLink, SQLink Group, אס.קיו.לינק, SQ Link"], ["התעשייה האווירית", "IAI, IAI - Israel Aerospace Industries, Israel Aerospace Industries, התעשייה האווירית, תעשייה אווירית"], ["אלעד מערכות", "Elad Software, Elad Software Systems, Elad Systems, אלעד מערכות"], ["קבוצת יעל", "Yael Group, Yael Software, קבוצת יעל"], ["Commit", "Commit, Commit Software, קומיט"], ["בינת", "Bynet, Bynet Data Communications, בינת, בינת סמך"], ["Intel", "Intel, Intel Corporation, אינטל"], ["Comblack", "Comblack, ComBlack, קומבלק"]];
@@ -199,13 +199,13 @@ const EDITABLE = {
   'Companies': ['Outreach Status', 'Status Updated', 'Contact Name', 'Contact Title', 'Contact LinkedIn',
                 'Alt Contact Name', 'Alt Contact Title', 'Alt Contact LinkedIn'],
   'Companies Archive': ['Outreach Status', 'Status Updated'],
-  'Other Companies': ['Outreach Status', 'Status Updated'],
+  'Not a Fit - Companies': ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
   'Blocked Companies': ['Company', 'Name Variants']
 };
 const WIDTHS = {
   'Company Name': 190, 'Job Title': 250, 'Latest Job': 230, 'Job Summary': 320, 'Other Jobs': 260,
-  'Category': 150, 'Target': 75, 'Outreach Status': 165, 'Outreach Track': 95, 'Outreach Phrasing': 170,
+  'Category': 150, 'Target': 75, 'Fit': 190, 'Outreach Status': 165, 'Outreach Track': 95, 'Outreach Phrasing': 170,
   'Contact Name': 150, 'Contact Title': 190, 'Alt Contact Name': 150, 'Alt Contact Title': 190,
   'Contact': 230, 'Alt Contact': 230, 'Previous Outreach': 190, 'Name Variants': 420, 'Reason': 300,
   'Company Size': 95, 'Company Type': 120, 'Open Jobs': 75, 'Source': 85
@@ -214,18 +214,18 @@ const WIDTHS = {
 // Unhide any time: select the columns around the arrows in the header → right-click → Unhide.
 const HIDDEN_COLUMNS = {
   'Weekly': ['Outreach Track', 'Latest Job Link', 'Contact LinkedIn', 'Alt Contact LinkedIn'],
-  'Companies': ['Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
+  'Companies': ['Target', 'Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
                 'Outreach Track', 'Company Type', 'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched'],
-  'Companies Archive': ['Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
+  'Companies Archive': ['Target', 'Contact LinkedIn', 'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing',
                         'Outreach Track', 'Company Type', 'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched'],
-  'Jobs': ['Contact LinkedIn', 'Job Link', 'Company Size', 'Company Type', 'Alt Contact Name', 'Alt Contact Title',
+  'Jobs': ['Target', 'Contact LinkedIn', 'Job Link', 'Company Size', 'Company Type', 'Alt Contact Name', 'Alt Contact Title',
            'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source', 'Last Checked', 'Company LinkedIn',
            'Status Updated'],
   'Archive': ['Job Link', 'Source', 'Job Summary', 'Last Checked'],
-  'Other Companies': ['Contact Name', 'Contact Title', 'Contact LinkedIn', 'Alt Contact Name', 'Alt Contact Title',
+  'Not a Fit - Companies': ['Target', 'Contact Name', 'Contact Title', 'Contact LinkedIn', 'Alt Contact Name', 'Alt Contact Title',
                       'Alt Contact LinkedIn', 'Latest Job Link', 'Category', 'Outreach Phrasing', 'Outreach Track',
                       'Last Job Found', 'Contact Found', 'Company LinkedIn', 'Last Enriched', 'Status Updated'],
-  'Other Jobs': ['Contact Name', 'Contact Title', 'Contact LinkedIn', 'Outreach Status', 'Job Link', 'Alt Contact Name',
+  'Not a Fit - Jobs': ['Target', 'Contact Name', 'Contact Title', 'Contact LinkedIn', 'Outreach Status', 'Job Link', 'Alt Contact Name',
                  'Alt Contact Title', 'Alt Contact LinkedIn', 'Outreach Phrasing', 'Job Summary', 'Source',
                  'Last Checked', 'Company LinkedIn', 'Status Updated']
 };
@@ -233,6 +233,7 @@ const HIDDEN_COLUMNS = {
 const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מדריך'];
 
 const NOTES = {
+  'Fit': 'האם החברה מתאימה לקמפיין, ואם לא – למה (גדולה מדי, לא חברת מוצר, חברת השמה, חסר מידע...).',
   'Target': 'כן = בקהל היעד (חברת מוצר 50–200 עובדים; Salesforce/monday: כל חברה מ־50 עובדים). לא ידוע = הסוכן ינסה שוב.',
   'Outreach Status': 'מעדכנים כאן בלבד (בלשונית Companies). הסוכן לא דורס ערך שעודכן ידנית.',
   'Status Updated': 'מתמלא אוטומטית כשהסטטוס משתנה. אפשר לתקן ידנית.',
@@ -303,6 +304,13 @@ function setupTab_(ss, tab, headers) {
     rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('לא ידוע').setBackground('#fff2cc').setRanges([r]).build());
     rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('לא').setFontColor('#999999').setRanges([r]).build());
   }
+  const fCol = headers.indexOf('Fit');
+  if (fCol >= 0) {
+    const r = sh.getRange(2, fCol + 1, sh.getMaxRows() - 1, 1);
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('מתאימה').setBackground('#d9ead3').setFontColor('#274e13').setBold(true).setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('חסר מידע').setBackground('#fff2cc').setRanges([r]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenCellNotEmpty().setFontColor('#999999').setRanges([r]).build());
+  }
   const sCol = headers.indexOf('Outreach Status');
   if (sCol >= 0) {
     const r = sh.getRange(2, sCol + 1, sh.getMaxRows() - 1, 1);
@@ -312,7 +320,7 @@ function setupTab_(ss, tab, headers) {
     ['בקשת חברות נשלחה', 'הודעה ראשונה נשלחה', 'פולואפ נשלח'].forEach(function (v) {
       rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(v).setBackground('#cfe2f3').setRanges([r]).build());
     });
-    if (tab === 'Companies' || tab === 'Companies Archive' || tab === 'Other Companies') {
+    if (tab === 'Companies' || tab === 'Companies Archive' || tab === 'Not a Fit - Companies') {
       const rule = SpreadsheetApp.newDataValidation().requireValueInList(STATUSES, true).setAllowInvalid(true).build();
       r.setDataValidation(rule);
     }
@@ -343,8 +351,8 @@ function setupGuide_(ss) {
     ['לשונית', 'מה יש בה', 'מי עורך'],
     ['Weekly', 'רשימת הפנייה של השבוע: שורה לכל חברה (ולכל מסלול). חברות חדשות למעלה; חברות שכבר פנו אליהן ופרסמו משרה חדשה – למטה, בצבע.', 'נבנית מחדש בכל יום ראשון ב־8:00. לא עורכים כאן.'],
     ['Companies', 'כל חברה שמגייסת עכשיו: גודל, סוג, האם בקהל היעד, איש קשר + חלופי, סטטוס פנייה. חברה עם משרות פיתוח וגם Salesforce/monday מופיעה פעמיים (מסלול פיתוח ומסלול מערכות).', 'מעדכנים את סטטוס הפנייה כאן. אפשר להקליד איש קשר ידנית – הסוכן לא יחליף אותו. עמודות עם כותרת צהובה = מותר לערוך.'],
-    ['Jobs', 'כל משרה פתוחה בחברות שבקהל היעד (או שעוד לא ידוע), עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
-    ['Other Companies / Other Jobs', 'חברות שאינן בקהל היעד (גדולות מדי, קטנות מדי, בנקים, השמה וכו׳) והמשרות שלהן. נשמרות כדי לא לבדוק אותן שוב, ולמקרה שתרצו להרחיב את קהל היעד.', 'לקריאה בלבד. אם חברה הופכת לקהל יעד – היא עוברת אוטומטית ל־Companies.'],
+    ['Jobs', 'כל משרה פתוחה בחברות שמתאימות (או שעוד חסר עליהן מידע), עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
+    ['Not a Fit - Companies / Jobs', 'חברות שאינן בקהל היעד (גדולות מדי, קטנות מדי, בנקים, השמה וכו׳) והמשרות שלהן. נשמרות כדי לא לבדוק אותן שוב, ולמקרה שתרצו להרחיב את קהל היעד.', 'לקריאה בלבד. אם חברה הופכת לקהל יעד – היא עוברת אוטומטית ל־Companies.'],
     ['Do Not Contact', 'חברות שלא פונים אליהן (כבר בשיחה, בקמפיין אחר וכו׳).', 'מוסיפים שם חברה ומשפט סיבה.'],
     ['Blocked Companies', 'חברות שלא אוספים מהן משרות בכלל, עם כל וריאציות השם.', 'מוסיפים שורה. בריצה הבאה המשרות שלהן נמחקות.'],
     ['Archive', 'משרות שנסגרו, עם תאריך הסגירה.', 'לקריאה בלבד.'],
@@ -359,7 +367,7 @@ function setupGuide_(ss) {
     ['ענה: שלילי', 'אין עניין', ''],
     ['לא רלוונטי', 'לא לפנות שוב', ''],
     ['', '', ''],
-    ['Target', 'כן = בקהל היעד · לא = מחוץ לקהל היעד · לא ידוע = עוד לא נמצא מידע, הסוכן ינסה שוב', ''],
+    ['Fit', 'מתאימה = בקהל היעד (חברת מוצר 50–200 עובדים, או משרת Salesforce/monday בחברה מ־50). אחרת כתובה הסיבה: גדולה מדי, קטנה מדי, לא חברת מוצר, חברת השמה, ברשימת לא לפנות, או חסר מידע (הסוכן ינסה שוב).', ''],
     ['לוח זמנים', 'הסוכן רץ כל יומיים ב־8:00. הקובץ השבועי נבנה בכל יום ראשון ב־8:00 ונשלחת הודעה בסלאק.', ''],
     ['איש קשר חלופי', 'פונים אליו רק אם הראשון לא אישר את בקשת החברות תוך שבוע.', ''],
     ['לפני פנייה', 'כדאי להציץ בפרופיל הלינקדאין ולוודא שזה האדם הנכון בחברה הנכונה.', ''],

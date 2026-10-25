@@ -143,6 +143,40 @@ def compute_target(
     return NO, ""
 
 
+FIT_OK = "מתאימה"
+
+
+def fit_reason(
+    info: CompanyInfo,
+    categories: set[str],
+    *,
+    do_not_contact: bool = False,
+) -> str:
+    """Short Hebrew explanation shown in the Fit column.
+
+    "מתאימה" for target companies; otherwise why not (or what is missing).
+    """
+    target, why = compute_target(info, categories, do_not_contact=do_not_contact)
+    if target == YES:
+        return f"{FIT_OK} (Salesforce/monday)" if why == "systems" else FIT_OK
+    type_key = _TYPE_BY_LABEL.get(info.company_type)
+    if do_not_contact:
+        return "ברשימת לא לפנות"
+    if type_key in EXCLUDED_ALWAYS:
+        return "חברת השמה / מיקור חוץ"
+    bounds = _size_bounds(info.size)
+    if bounds is None:
+        return "חסר מידע על גודל"
+    lo, hi = bounds
+    if lo > 200:
+        return f"גדולה מדי ({info.size})"
+    if hi <= 50:
+        return f"קטנה מדי ({info.size})"
+    if type_key is None:
+        return "חסר מידע על סוג"
+    return f"לא חברת מוצר ({info.company_type})"
+
+
 _SYSTEM_PROMPT = """You profile Israeli employers for a B2B outreach campaign.
 Given a company name, a few of its job titles, and data from its LinkedIn company page or web
 search results, return ONLY a JSON object:

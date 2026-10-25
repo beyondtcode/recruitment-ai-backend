@@ -34,6 +34,7 @@ from services.company_enrichment import (
     CompanyInfo,
     compute_target,
     enrich_company,
+    fit_reason,
 )
 from services.contact_enrichment import NOT_FOUND, choose_profile, find_contacts
 from services.job_status import check_jobs
@@ -123,6 +124,7 @@ def _job_row_key(row: dict[str, str]) -> str:
 
 # Copied from Companies into every job row (read-only there; edit in Companies).
 MIRRORED_COLUMNS: tuple[str, ...] = (
+    "Fit",
     "Company Size",
     "Company Type",
     "Target",
@@ -543,8 +545,10 @@ async def _run(store, search, *, scrape, check, today: date) -> dict[str, Any]:
         categories = {j.get("Category", "") for j in by_row.get(rk, [])}
         if not categories and row.get("Outreach Track") == TRACK_SYSTEMS:
             categories = set(SYSTEMS_CATEGORIES)
-        target, _reason = compute_target(info, categories, do_not_contact=rk.split("|")[0] in do_not_contact)
+        dnc = rk.split("|")[0] in do_not_contact
+        target, _reason = compute_target(info, categories, do_not_contact=dnc)
         row["Target"] = target
+        row["Fit"] = fit_reason(info, categories, do_not_contact=dnc)
 
     # 4. Contacts for target rows without one; the profile follows the track.
     # Contacts the agent found more than CONTACT_REFRESH_DAYS ago are re-checked

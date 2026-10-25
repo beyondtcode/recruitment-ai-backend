@@ -587,7 +587,8 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         row["Target"] = target
         row["Fit"] = fit
 
-    # 4. Contacts for target rows without one; the profile follows the track.
+    # 4. Contacts for target rows (and rows whose size/type is still unknown)
+    #    without one; the profile follows the track.
     # Contacts the agent found more than CONTACT_REFRESH_DAYS ago are re-checked
     # when the company posts a new job (people change roles / leave). Contacts
     # typed in by hand have no "Contact Found" date and are never replaced.
@@ -595,7 +596,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     need_contact = []
     refreshing: set[str] = set()
     for rk, row in company_rows.items():
-        if row.get("Target") != YES or rk not in by_row:
+        if row.get("Target") not in (YES, UNKNOWN) or rk not in by_row:
             continue
         contact = row.get("Contact Name", "").strip()
         if contact == "":
@@ -609,8 +610,12 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             if found_on and last_job and last_job > found_on and today - found_on >= refresh_after:
                 need_contact.append(rk)
                 refreshing.add(rk)
-    need_contact.sort(key=lambda k: parse_date(company_rows[k].get("Last Job Found", "")) or date.min, reverse=True)
-    need_contact = need_contact[: _env_int("LEADS_MAX_CONTACT_ENRICH", 40)]
+    # Confirmed targets first, then unknown size/type; newest jobs first within each.
+    need_contact.sort(key=lambda k: (
+        company_rows[k].get("Target") == YES,
+        parse_date(company_rows[k].get("Last Job Found", "")) or date.min,
+    ), reverse=True)
+    need_contact = need_contact[: _env_int("LEADS_MAX_CONTACT_ENRICH", 300)]
     contacts_found = 0
     contacts_searched = 0
 

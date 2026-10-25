@@ -254,7 +254,8 @@ class AgentRunTests(unittest.TestCase):
         bank = companies["BigBank"]
         self.assertEqual((bank["Target"], bank["Contact Title"]), ("כן", "VP Operations"))
         self.assertEqual(companies["StillOpen"]["Target"], "לא ידוע")
-        self.assertEqual(companies["StillOpen"]["Contact Name"], "")
+        # Size unknown → contacts are still searched (none in the fake results here).
+        self.assertEqual(companies["StillOpen"]["Contact Name"], "לא נמצא")
         self.assertEqual(list(companies)[:2], ["Acme", "BigBank"])  # targets first
         self.assertEqual(store.dropdowns["Companies"][0], "Outreach Status")
 

@@ -319,6 +319,17 @@ class IsraeliBoardParsingTests(unittest.TestCase):
         self.assertEqual((job["job_title"], job["company_name"]), ("Manual QA Engineer", "Acme Ltd"))
         self.assertTrue(job["job_link"].endswith("?jl=1010305845301"))
 
+    def test_jobnet(self) -> None:
+        html = ('<div class="whitebox" itemscope="" itemtype="https://schema.org/JobPosting"><div class="inerbox orange">'
+                '<div class="titlehdn hidden">QA Automation Engineer</div><a class="logoimg hidden" href="/Company?companyID=11737"></a>'
+                '<a href="/jobs?positionid=13227516"><h2>QA Automation Engineer</h2></a><div><h2>QA Automation Engineer</h2></div>'
+                '<p><a href="/Company?companyID=11737"> Acme</a></p><p class="boxDateCls">25/10/2026</p></div>'
+                '<div class="middletext"><div class="divJobInner">בדיקות אוטומציה</div></div></div>')
+        [job] = self.parse("https://www.jobnet.co.il/jobs?subprofid=819", html)
+        self.assertEqual((job["job_title"], job["company_name"]), ("QA Automation Engineer", "Acme"))
+        self.assertEqual(job["job_link"], "https://www.jobnet.co.il/jobs?positionid=13227516")
+        self.assertEqual(job["publish_date"], "2026-10-25")
+
     def test_linkedin_tracking_still_stripped(self) -> None:
         from services import scraper
         self.assertEqual(scraper._clean_job_link("https://il.linkedin.com/jobs/view/x-123?refId=a&trackingId=b"),

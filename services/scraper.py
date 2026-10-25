@@ -211,16 +211,14 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
     "Drushim": BoardConfig(
         url="",
         source="Drushim",
-        job_card=".job-item, .jobList_item, article.job, .primary--list--job",
-        title="h2 a, h3 a, .job-url, a.job-title, .job-item-title a",
-        company=".job-item-company, .company-name, .companyName, [data-company]",
-        link="h2 a, h3 a, .job-url, a.job-title, a[href*='/job/']",
-        publish_date=".job-item-date, .date, time, [class*='date']",
-        snippet=(
-            ".job-item-description, .job-description, .job-item-content, "
-            "[class*='snippet'], [class*='description']"
-        ),
+        job_card='article[data-nagish="job-card-item"], article[class*="job-card-module"]',
+        title='h3[class*="__title"]',
+        company='[class*="__companyName"]',
+        link="a[href*='/job/']",
+        publish_date='[class*="job-card-meta"] [class*="__row"]:last-child',
+        snippet='p[class*="__description"]',
         hosts=("drushim.co.il",),
+        use_playwright=True,
     ),
     "JobMaster": BoardConfig(
         url="",
@@ -250,11 +248,12 @@ BOARD_CONFIGS: dict[str, BoardConfig] = {
     "Jobnet": BoardConfig(
         url="",
         source="Jobnet",
-        job_card=".job-item, .JobCard, #JobList .item, tr.JobRow",
-        title='.job-title, .JobName, a[id*="JobName"]',
-        company=".company-name, .CompanyName",
-        link='a[href*="Position"], a[href*="Job"]',
-        publish_date=".job-date, .Date",
+        job_card='div.whitebox[itemtype*="JobPosting"]',
+        title='a[href*="positionid"] h2',
+        company='a[href*="Company?companyID"]',
+        link='a[href*="positionid"]',
+        publish_date=".boxDateCls",
+        snippet=".divJobInner",
         hosts=("jobnet.co.il",),
         use_playwright=True,
     ),

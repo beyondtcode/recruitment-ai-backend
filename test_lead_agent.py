@@ -662,14 +662,14 @@ class OtherTabsTests(unittest.TestCase):
             summary = asyncio.run(lead_agent.run(store, None, scrape=scrape,
                                                  check=mock.AsyncMock(return_value={}), today=TODAY))
             self.assertEqual([r["Company Name"] for r in store.read("Sheet1").rows], ["SmallCo"])
-            self.assertEqual([r["Company Name"] for r in store.read("Other Jobs").rows], ["BigCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Non-Target Jobs").rows], ["BigCo"])
             self.assertEqual([r["Company Name"] for r in store.read("Companies").rows], ["SmallCo"])
-            self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])
+            self.assertEqual([r["Company Name"] for r in store.read("Non-Target Companies").rows], ["BigCo"])
             self.assertEqual((summary["open_jobs"], summary["other_jobs"]), (2, 1))
 
             # Second run: nothing lost, BigCo not re-enriched, still in Other.
             asyncio.run(lead_agent.run(store, None, scrape=scrape,
                                        check=mock.AsyncMock(return_value={}), today=date(2026, 10, 27)))
         tmp.cleanup()
-        self.assertEqual(len(store.read("Sheet1").rows) + len(store.read("Other Jobs").rows), 2)
-        self.assertEqual([r["Company Name"] for r in store.read("Other Companies").rows], ["BigCo"])
+        self.assertEqual(len(store.read("Sheet1").rows) + len(store.read("Non-Target Jobs").rows), 2)
+        self.assertEqual([r["Company Name"] for r in store.read("Non-Target Companies").rows], ["BigCo"])

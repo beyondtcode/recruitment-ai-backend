@@ -31,8 +31,8 @@ TAB_ARCHIVE = "Archive"
 TAB_COMPANIES_ARCHIVE = "Companies Archive"
 # Companies outside the target audience (Target = לא) and their jobs: kept as the
 # agent's memory and for widening the audience later, out of the way.
-TAB_OTHER_JOBS = "Other Jobs"
-TAB_OTHER_COMPANIES = "Other Companies"
+TAB_OTHER_JOBS = "Non-Target Jobs"
+TAB_OTHER_COMPANIES = "Non-Target Companies"
 TAB_BLOCKED = "Blocked Companies"
 TAB_DO_NOT_CONTACT = "Do Not Contact"
 TAB_WEEKLY = "Weekly"

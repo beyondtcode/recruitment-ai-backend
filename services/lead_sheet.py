@@ -31,8 +31,8 @@ TAB_ARCHIVE = "Archive"
 TAB_COMPANIES_ARCHIVE = "Companies Archive"
 # Companies outside the target audience (Target = לא) and their jobs: kept as the
 # agent's memory and for widening the audience later, out of the way.
-TAB_OTHER_JOBS = "Non-Target Jobs"
-TAB_OTHER_COMPANIES = "Non-Target Companies"
+TAB_OTHER_JOBS = "Not a Fit - Jobs"
+TAB_OTHER_COMPANIES = "Not a Fit - Companies"
 TAB_BLOCKED = "Blocked Companies"
 TAB_DO_NOT_CONTACT = "Do Not Contact"
 TAB_WEEKLY = "Weekly"
@@ -44,6 +44,7 @@ JOB_HEADERS: list[str] = [
     "Company Name",
     "Job Title",
     "Category",
+    "Fit",
     # Copied from Companies by the agent (read-only here):
     "Target",
     "Contact Name",
@@ -70,6 +71,7 @@ JOB_HEADERS: list[str] = [
 # Important columns first, technical ones at the end.
 COMPANY_HEADERS: list[str] = [
     "Company Name",
+    "Fit",
     "Target",
     "Outreach Status",
     "Contact Name",

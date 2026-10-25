@@ -100,11 +100,19 @@ Rules:
 Do not include markdown or extra keys."""
 
 
+_AT_COMPANY_RE = re.compile(r"\s+(?:at|@|ב-?)\s+.+$", re.IGNORECASE)
+
+
+def clean_title(title: str) -> str:
+    """'Chief Technology Officer at Lumana' → 'Chief Technology Officer'."""
+    return _AT_COMPANY_RE.sub("", title or "").strip(" -–|,")
+
+
 def _valid(raw: object, allowed_links: set[str]) -> Contact | None:
     if not isinstance(raw, dict):
         return None
     name = " ".join(str(raw.get("name") or "").split())
-    title = " ".join(str(raw.get("title") or "").split())
+    title = clean_title(" ".join(str(raw.get("title") or "").split()))
     url = str(raw.get("linkedin_url") or "").strip().split("?")[0].rstrip("/")
     if not name or "linkedin.com/in/" not in url:
         return None

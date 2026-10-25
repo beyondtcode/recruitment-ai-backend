@@ -629,3 +629,11 @@ class SmallTestRunTests(unittest.TestCase):
         self.assertEqual(store.read("Sheet1").headers, ["Company Name", "Job Title"])
         self.assertEqual(store.read("Companies").rows, [])
         self.assertEqual(len(store.read("Blocked Companies").rows), 1)
+
+
+class TitleCleanupTests(unittest.TestCase):
+    def test_clean_title(self) -> None:
+        self.assertEqual(cc.clean_title("Chief Technology Officer at Lumana"), "Chief Technology Officer")
+        self.assertEqual(cc.clean_title("VP R&D @ Adaptive6"), "VP R&D")
+        self.assertEqual(cc.clean_title("Owner & CTO at PayPlus LTD"), "Owner & CTO")
+        self.assertEqual(cc.clean_title("CTO"), "CTO")

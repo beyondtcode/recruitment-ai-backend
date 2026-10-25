@@ -124,6 +124,25 @@ def _valid(raw: object, allowed_links: set[str]) -> Contact | None:
     return Contact(name=name, title=title, linkedin_url=url)
 
 
+# Simpler second-pass queries (no quotes / boolean operators), used only when
+# the first pass found nobody suitable.
+LOOSE_ROLES: dict[str, list[str]] = {
+    "dev": ["CTO", "VP R&D", "Head of Engineering", "Founder"],
+    "ai": ["CTO", "COO", "CEO"],
+    "systems": ["VP Operations", "COO", "CIO"],
+}
+
+_NAME_TAIL_RE = re.compile(r"\s*(?:[|(–—]|\s-\s).*$")
+_NAME_SUFFIX_RE = re.compile(r"[,.]?\s+(?:ltd|inc|llc|corp|corporation|group|technologies|בע\"?מ)\.?$", re.IGNORECASE)
+
+
+def short_company_name(name: str) -> str:
+    """'PayPlus - The Future of Payments' → 'PayPlus'; 'AppCard, Inc.' → 'AppCard'."""
+    text = _NAME_TAIL_RE.sub("", name or "").strip()
+    text = _NAME_SUFFIX_RE.sub("", text).strip()
+    return text or (name or "").strip()
+
+
 async def find_contacts(
     company_name: str,
     profile: str,
@@ -133,6 +152,9 @@ async def find_contacts(
 ) -> tuple[Contact | None, Contact | None]:
     """Return (primary, alternate).
 
+    Pass 1: precise queries. Pass 2 (only if pass 1 found nobody suitable):
+    simpler queries with the short company name.
+
     Raises ``BudgetExceeded`` only when the run's search budget ran out before
     anything was searched for this company. Other errors are swallowed.
     """
@@ -141,20 +163,21 @@ async def find_contacts(
     priority, clauses = PROFILES.get(profile, PROFILES["dev"])
     results: list[SearchResult] = []
     seen: set[str] = set()
-    for i, clause in enumerate(clauses):
-        # The last clause is a fallback (e.g. CEO/Founder): skip it when the
-        # earlier searches already found at least two people.
-        if i == len(clauses) - 1 and i >= 2 and len(results) >= 2:
-            break
+    searched = False
+
+    async def collect(query: str) -> bool:
+        """Run one query; returns False when the budget ran out."""
+        nonlocal searched
         try:
-            batch = await search.search(f'"{company_name}" {clause} Israel', num=10, domain="linkedin.com")
+            batch = await search.search(query, num=10, domain="linkedin.com")
         except BudgetExceeded:
-            if not results:
+            if not searched and not results:
                 raise  # nothing searched for this company: caller retries next run
-            break
+            return False
         except Exception:
             logger.warning("contact_enrichment: search failed for %r", company_name, exc_info=True)
-            continue
+            return True
+        searched = True
         for r in batch:
             link = r.link.split("?")[0].rstrip("/")
             if _foreign_profile(link):
@@ -162,10 +185,39 @@ async def find_contacts(
             if "linkedin.com/in/" in link and link not in seen:
                 seen.add(link)
                 results.append(SearchResult(title=r.title, link=link, snippet=r.snippet))
+        return True
 
+    # Pass 1 — precise.
+    for i, clause in enumerate(clauses):
+        # The last clause is a fallback (e.g. CEO/Founder): skip it when the
+        # earlier searches already found at least two people.
+        if i == len(clauses) - 1 and i >= 2 and len(results) >= 2:
+            break
+        if not await collect(f'"{company_name}" {clause} Israel'):
+            break
+    primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
+    if primary is not None:
+        return primary, alternate
+
+    # Pass 2 — looser, with the short company name.
+    short = short_company_name(company_name)
+    for role in LOOSE_ROLES.get(profile, LOOSE_ROLES["dev"]):
+        if not await collect(f"{short} {role}"):
+            break
+        if len(results) >= 6:
+            break
+    return await _pick(company_name, priority, domain, company_hint, results)
+
+
+async def _pick(
+    company_name: str,
+    priority: str,
+    domain: str,
+    company_hint: str,
+    results: list[SearchResult],
+) -> tuple[Contact | None, Contact | None]:
     if not results:
         return None, None
-
     system = _SYSTEM_PROMPT.replace("{priority}", priority.format(domain=domain or "software"))
     hint = f"Company LinkedIn page: {company_hint}\n" if company_hint else ""
     user = (

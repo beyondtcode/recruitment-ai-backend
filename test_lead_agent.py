@@ -82,6 +82,29 @@ class FakeProvider:
         return []
 
 
+class BlockedAdditionsTests(unittest.TestCase):
+    def test_added_once_and_not_readded(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Blocked Companies": [["Company", "Name Variants"], ["Intel", "Intel"]]})
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            bl = lead_agent.load_blocklist(store)
+            self.assertEqual(bl.match("Malam Team Ltd"), "מלם תים")
+            self.assertEqual(bl.match("Ness Digital Engineering"), "Ness")
+            self.assertIsNone(bl.match("Business Insights"))  # whole words only
+            table = store.read("Blocked Companies")
+            table.rows = [r for r in table.rows if r["Company"] != "Ness"]  # the team removes Ness
+            store.write("Blocked Companies", table)
+            bl = lead_agent.load_blocklist(store)
+            self.assertIsNone(bl.match("Ness Technologies"))
+        tmp.cleanup()
+
+    def test_software_house_never_a_target(self) -> None:
+        info = ce.CompanyInfo("51-200", "חברת שירות")
+        self.assertEqual(ce.compute_target(info, {"יישום Salesforce"})[0], "לא")
+        self.assertEqual(ce.fit_reason(ce.CompanyInfo("לא ידוע", "חברת שירות"), {"Backend"}),
+                         "בית תוכנה / השמה / מיקור חוץ")
+
+
 class SearchBudgetTests(unittest.TestCase):
     def test_no_cap_and_quota_exhausted(self) -> None:
         from services import search_client as sc
@@ -308,7 +331,11 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(archive.rows[0]["Closed Date"], "25/10/2026")
 
         blocked = store.read("Blocked Companies")
-        self.assertEqual(len(blocked.rows), 11)
+        self.assertEqual(len(blocked.rows), 16)  # 11 + one-time additions (software houses etc.)
+        names = {r["Company"] for r in blocked.rows}
+        self.assertTrue({"Ness", "מלם תים", "דנאל", "Quicklizard"} <= names)
+        one = [r for r in blocked.rows if r["Company"] == "ONE"][0]
+        self.assertIn("ONE Tech", one["Name Variants"])
         self.assertIsNotNone(store.read("Do Not Contact"))
 
         companies = {r["Company Name"]: r for r in store.read("Companies").rows}
@@ -760,7 +787,7 @@ class FitReasonTests(unittest.TestCase):
         self.assertEqual(f(ce.CompanyInfo("10001+", "מוצר"), {"Backend"}), "גדולה מדי (10001+)")
         self.assertEqual(f(ce.CompanyInfo("11-50", "מוצר"), {"Backend"}), "קטנה מדי (11-50)")
         self.assertEqual(f(ce.CompanyInfo("51-200", "בנק"), {"Backend"}), "לא חברת מוצר (בנק)")
-        self.assertEqual(f(ce.CompanyInfo("51-200", "השמה"), {"Backend"}), "חברת השמה / מיקור חוץ")
+        self.assertEqual(f(ce.CompanyInfo("51-200", "השמה"), {"Backend"}), "בית תוכנה / השמה / מיקור חוץ")
         self.assertEqual(f(ce.CompanyInfo(), {"Backend"}), "חסר מידע על גודל")
         self.assertEqual(f(ce.CompanyInfo("51-200", "מוצר"), {"Backend"}, do_not_contact=True), "ברשימת לא לפנות")
 

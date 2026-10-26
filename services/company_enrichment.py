@@ -51,7 +51,9 @@ COMPANY_TYPES: dict[str, str] = {
     "other": "אחר",
 }
 _TYPE_BY_LABEL = {v: k for k, v in COMPANY_TYPES.items()}
-EXCLUDED_ALWAYS = {"staffing", "outsourcing"}
+# Software houses / IT services, staffing and outsourcing are never a target
+# (Beyond Code, Oct 2026), whatever their size.
+EXCLUDED_ALWAYS = {"services", "staffing", "outsourcing"}
 
 SYSTEMS_CATEGORIES = frozenset({"יישום Salesforce", "יישום monday.com"})
 
@@ -163,7 +165,7 @@ def fit_reason(
     if do_not_contact:
         return "ברשימת לא לפנות"
     if type_key in EXCLUDED_ALWAYS:
-        return "חברת השמה / מיקור חוץ"
+        return "בית תוכנה / השמה / מיקור חוץ"
     bounds = _size_bounds(info.size)
     if bounds is None:
         return "חסר מידע על גודל"
@@ -189,9 +191,11 @@ search results, return ONLY a JSON object:
   "product"     — develops and sells its own software product (incl. SaaS / tech startups)
   "bank", "insurance", "telecom", "retail", "government" (also public bodies, municipalities,
   hospitals, universities, defense bodies)
-  "services"    — IT / consulting / integration / service company
-  "staffing"    — recruitment / placement agency
-  "outsourcing" — dev outsourcing / body shop
+  "services"    — software house / IT services / consulting / systems integrator: builds
+                  software or provides IT for clients rather than selling its own product
+                  (e.g. Malam Team, Ness, Matrix, One, Elad, Bynet)
+  "staffing"    — recruitment / placement / HR agency (e.g. Danel, Manpower, Ethosia)
+  "outsourcing" — dev outsourcing / body shop / nearshore teams
   "dev_center"  — Israeli R&D center of a large international company
   "other"
   or null if you cannot tell.

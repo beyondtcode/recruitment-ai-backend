@@ -43,6 +43,7 @@ from services.contact_enrichment import NOT_FOUND, choose_profile, find_contacts
 from services.job_status import check_jobs
 from services.lead_dedup import _db_path
 from services.lead_filters import (
+    BLOCKED_ADDITIONS,
     BLOCKED_COMPANIES,
     Blocklist,
     format_ddmmyyyy,
@@ -297,6 +298,36 @@ def _may_retry(attempts: dict, key: str, kind: str, today: date) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_BLOCKED_ADDITIONS_MARK = "blocklist-2026-10"
+
+
+def _add_blocked_once(table: Table) -> bool:
+    """Add BLOCKED_ADDITIONS to the tab once (new rows / missing spellings).
+
+    Done once per server (a flag in the status database), so a company the
+    team later removes from the tab is not added back.
+    """
+    conn = _status_db()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY)")
+        if conn.execute("SELECT 1 FROM flags WHERE name = ?", (_BLOCKED_ADDITIONS_MARK,)).fetchone():
+            return False
+        conn.execute("INSERT INTO flags (name) VALUES (?)", (_BLOCKED_ADDITIONS_MARK,))
+        conn.commit()
+    finally:
+        conn.close()
+    rows = {(r.get("Company") or "").strip(): r for r in table.rows}
+    for name, variants in BLOCKED_ADDITIONS.items():
+        row = rows.get(name)
+        if row is None:
+            table.rows.append({"Company": name, "Name Variants": ", ".join(variants)})
+            continue
+        have = [v.strip() for v in (row.get("Name Variants") or "").split(",") if v.strip()]
+        row["Name Variants"] = ", ".join(have + [v for v in variants if v not in have])
+    logger.info("lead_agent: added %d companies / spellings to %s", len(BLOCKED_ADDITIONS), TAB_BLOCKED)
+    return True
+
+
 def load_blocklist(store: SheetStore) -> Blocklist:
     table = store.read(TAB_BLOCKED)
     if table is None or not table.rows:
@@ -307,6 +338,8 @@ def load_blocklist(store: SheetStore) -> Blocklist:
         ]
         store.write(TAB_BLOCKED, table)
         logger.info("lead_agent: seeded %s tab with %d companies", TAB_BLOCKED, len(table.rows))
+    if _add_blocked_once(table):
+        store.write(TAB_BLOCKED, table)
     entries: dict[str, list[str]] = {}
     for row in table.rows:
         name = (row.get("Company") or "").strip()

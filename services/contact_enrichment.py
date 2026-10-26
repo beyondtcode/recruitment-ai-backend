@@ -187,25 +187,23 @@ async def find_contacts(
                 results.append(SearchResult(title=r.title, link=link, snippet=r.snippet))
         return True
 
-    # Pass 1 — precise.
-    for i, clause in enumerate(clauses):
-        # The last clause is a fallback (e.g. CEO/Founder): skip it when the
-        # earlier searches already found at least two people.
-        if i == len(clauses) - 1 and i >= 2 and len(results) >= 2:
-            break
-        if not await collect(f'"{company_name}" {clause} Israel'):
-            break
-    primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
-    if primary is not None:
-        return primary, alternate
-
-    # Pass 2 — looser, with the short company name.
-    short = short_company_name(company_name)
-    for role in LOOSE_ROLES.get(profile, LOOSE_ROLES["dev"]):
-        if not await collect(f"{short} {role}"):
-            break
-        if len(results) >= 6:
-            break
+    # Each paid search costs budget, so a company gets at most three:
+    # 1) one query with every role of the profile;
+    # 2) only if nobody suitable: the top-priority roles on their own (more
+    #    results for them than the combined query leaves room for);
+    # 3) only if still nobody: a loose query with the short company name.
+    combined = " OR ".join(c.strip("()") for c in clauses)
+    if await collect(f'"{company_name}" ({combined}) Israel'):
+        primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
+        if primary is not None:
+            return primary, alternate
+        if await collect(f'"{company_name}" {clauses[0]} Israel'):
+            primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
+            if primary is not None:
+                return primary, alternate
+            short = short_company_name(company_name)
+            roles = LOOSE_ROLES.get(profile, LOOSE_ROLES["dev"])
+            await collect(f"{short} {' '.join(roles[:3])} linkedin")
     return await _pick(company_name, priority, domain, company_hint, results)
 
 

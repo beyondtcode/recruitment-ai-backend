@@ -117,6 +117,7 @@ WEEKLY_HEADERS: list[str] = [
     "Outreach Track",
     "Latest Job",
     "Latest Job Link",
+    "Outreach Status",
     "Other Jobs",
     "Outreach Phrasing",
     "Contact",

@@ -30,6 +30,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 from services.company_enrichment import (
+    _TYPE_BY_LABEL,
+    EXCLUDED_ALWAYS,
+    _size_bounds,
     SYSTEMS_CATEGORIES,
     UNKNOWN,
     YES,
@@ -41,7 +44,7 @@ from services.company_enrichment import (
 )
 from services.contact_enrichment import NOT_FOUND, choose_profile, find_contacts
 from services.job_status import check_jobs
-from services.lead_dedup import _db_path
+from services.lead_dedup import _db_path, all_seen_links
 from services.lead_filters import (
     BLOCKED_ADDITIONS,
     BLOCKED_COMPANIES,
@@ -51,6 +54,7 @@ from services.lead_filters import (
     today_israel,
 )
 from services.lead_pipeline import run_lead_pipeline, scrape_all_raw
+from services.scraper import KNOWN_JOB_LINKS
 from services.lead_sheet import (
     ARCHIVE_HEADERS,
     BLOCKED_HEADERS,
@@ -444,6 +448,46 @@ def _add_blocked_once(table: Table) -> bool:
     return True
 
 
+_SYSTEMS_TITLE_RE = re.compile(r"salesforce|monday|מאנדיי|\bcrm\b", re.IGNORECASE)
+
+
+def _known_not_fit(
+    company_rows: dict[str, dict[str, str]], do_not_contact: set[str], watch: WatchList | None
+) -> Callable[[dict], bool]:
+    """True for a scraped job whose company is already known not to fit,
+    whatever the job's category, so the LLM call can be skipped.
+
+    Category matters only for the Salesforce / monday exception (any company of
+    51+), so a job whose title looks like that is still classified, as are
+    jobs of companies not seen before, with unknown size, or marked Any Size.
+    """
+    by_company: dict[str, list[dict[str, str]]] = {}
+    for r in company_rows.values():
+        by_company.setdefault(_key(r.get("Company Name", "")), []).append(r)
+
+    def check(job: dict) -> bool:
+        name = job.get("company_name") or ""
+        key = _key(name)
+        if key in do_not_contact:
+            return True
+        rows = by_company.get(key)
+        if not rows or any(r.get("Target") != NO for r in rows):
+            return False
+        if watch is not None and watch.any_size(name, [job.get("company_link") or ""]):
+            return False
+        type_key = _TYPE_BY_LABEL.get(rows[0].get("Company Type") or "")
+        if type_key in EXCLUDED_ALWAYS:
+            return True
+        bounds = _size_bounds(rows[0].get("Company Size") or UNKNOWN)
+        if bounds is None:
+            return False
+        if bounds[1] <= 50:
+            return True  # too small even for the Salesforce / monday exception
+        return not _SYSTEMS_TITLE_RE.search(job.get("job_title") or "")
+
+    return check
+
+
 def load_blocklist(store: SheetStore) -> Blocklist:
     table = store.read(TAB_BLOCKED)
     if table is None or not table.rows:
@@ -615,16 +659,26 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             row["Last Checked"] = today_s
         open_rows.append(row)
 
-    # 2. New jobs.
-    raw, empty_searches = await scrape()
-    watch = load_watch_list(store)
-    watch_raw: list[dict] = []
-    watch_without_jobs: list[str] = []
-    if len(watch):
-        watch_raw, watch_without_jobs = await scrape_watch(watch)
-        raw = raw + watch_raw
+    # 2. New jobs. LinkedIn paging stops at the first page of jobs we already
+    #    know (results are newest first), which keeps runs short.
+    known_token = KNOWN_JOB_LINKS.set(
+        all_seen_links() | {(r.get("Job Link") or "").strip() for r in jobs.rows} - {""}
+    )
+    try:
+        raw, empty_searches = await scrape()
+        watch = load_watch_list(store)
+        watch_raw: list[dict] = []
+        watch_without_jobs: list[str] = []
+        if len(watch):
+            watch_raw, watch_without_jobs = await scrape_watch(watch)
+            raw = raw + watch_raw
+    finally:
+        KNOWN_JOB_LINKS.reset(known_token)
     known_links = {r.get("Job Link", "").strip() for r in jobs.rows}
-    leads = await run_lead_pipeline(raw, blocklist=blocklist, known_links=known_links)
+    leads = await run_lead_pipeline(
+        raw, blocklist=blocklist, known_links=known_links,
+        skip_classify=_known_not_fit(company_rows, do_not_contact, watch),
+    )
     new_rows = []
     for lead in leads:
         row = {k: str(v) for k, v in lead.model_dump(by_alias=True).items()}

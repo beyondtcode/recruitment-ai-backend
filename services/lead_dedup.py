@@ -47,6 +47,16 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def all_seen_links() -> set[str]:
+    """Every job link recorded so far (used to stop paging through old results)."""
+    with _lock:
+        conn = _connect()
+        try:
+            return {row[0] for row in conn.execute("SELECT job_link FROM seen_jobs")}
+        finally:
+            conn.close()
+
+
 def filter_unseen_jobs(jobs: list[dict[str, str]]) -> list[dict[str, str]]:
     """Return jobs whose ``job_link`` has not been recorded yet (keeps order)."""
     if not jobs:

@@ -482,6 +482,41 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(store.read("Weekly").rows[0]["Outreach Status"], "פולואפ נשלח")
         self.assertEqual(store.read("Sheet1").rows[0]["Outreach Status"], "פולואפ נשלח")
 
+    def test_known_non_fit_company_skips_llm(self) -> None:
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+        batch = [{"company_name": "BigCo", "job_title": "Backend Developer", "job_link": "https://li/b1", "source": "LinkedIn"}]
+
+        async def scrape():
+            return list(batch), []
+
+        classified = []
+
+        async def classify(provider, company, title, snippet):
+            classified.append(title)
+            cat = "יישום Salesforce" if "Salesforce" in title else "Backend"
+            return {"category": cat, "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"size": "1001-5000", "company_type": "product"}
+
+        def run(day):
+            with mock.patch("services.enrichment._classify_job", classify), \
+                    mock.patch.object(ce, "fetch_linkedin_company", mock.AsyncMock(return_value=None)), \
+                    mock.patch.object(ce, "complete_json", fake_llm):
+                asyncio.run(lead_agent.run(store, None, scrape=scrape, check=mock.AsyncMock(return_value={}), today=day))
+
+        run(TODAY)
+        self.assertEqual(classified, ["Backend Developer"])  # first time: unknown company → classified
+        batch[:] = [{"company_name": "BigCo", "job_title": "Frontend Developer", "job_link": "https://li/b2", "source": "LinkedIn"},
+                    {"company_name": "BigCo", "job_title": "Salesforce Developer", "job_link": "https://li/b3", "source": "LinkedIn"}]
+        run(date(2026, 10, 27))
+        # Too big → the Frontend job skips the LLM; a Salesforce title is still classified (51+ exception).
+        self.assertEqual(classified, ["Backend Developer", "Salesforce Developer"])
+        other = {r["Job Link"]: r for r in store.read("Doesn't Fit - Jobs").rows}
+        self.assertEqual(other["https://li/b2"]["Category"], "לא סווג (חברה לא מתאימה)")
+        main = {r["Job Link"]: r for r in store.read("Sheet1").rows}
+        self.assertEqual(main["https://li/b3"]["Fit"], "מתאימה (Salesforce/monday)")
+
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
 

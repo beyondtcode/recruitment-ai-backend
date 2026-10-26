@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -32,6 +33,9 @@ from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE, scrape_jobs
 logger = logging.getLogger(__name__)
 
 SEARCH_PAUSE_SECONDS = 3.0
+
+# Category of jobs that were not sent to the LLM (company known not to fit).
+UNCLASSIFIED = "לא סווג (חברה לא מתאימה)"
 
 
 class LeadOpportunity(BaseModel):
@@ -110,8 +114,14 @@ async def run_lead_pipeline(
     *,
     blocklist: Blocklist | None = None,
     known_links: set[str] | None = None,
+    skip_classify: Callable[[dict], bool] | None = None,
 ) -> list[LeadOpportunity]:
-    """Filter, dedup and classify scraped jobs; returns new leads only."""
+    """Filter, dedup and classify scraped jobs; returns new leads only.
+
+    ``skip_classify(job)`` → True for jobs of companies already known not to
+    fit whatever the category: they are kept (category UNCLASSIFIED) without
+    an LLM call.
+    """
     known = known_links or set()
     by_link: dict[str, dict] = {}
     for job in raw:
@@ -129,7 +139,16 @@ async def run_lead_pipeline(
         max_new = 0
     if max_new > 0 and len(candidates) > max_new:
         candidates = candidates[:max_new]
+    skipped: list[dict] = []
+    if skip_classify is not None:
+        skipped = [j for j in candidates if skip_classify(j)]
+        skipped_ids = {id(j) for j in skipped}
+        candidates = [j for j in candidates if id(j) not in skipped_ids]
+    for job in skipped:
+        job["category"] = UNCLASSIFIED
     kept, settled = await classify_lead_jobs(candidates)
+    kept = kept + skipped
+    settled = settled + skipped
 
     # Only mark what got a definitive answer; LLM errors are retried next run.
     mark_jobs_seen(dropped + settled)
@@ -139,13 +158,14 @@ async def run_lead_pipeline(
     leads = [lead for job in kept if (lead := _to_lead(job, found_date)) is not None]
     logger.info(
         "leads: %d scraped → %d new → blocked %d, hardware %d, duplicates %d → "
-        "%d classified → %d leads",
+        "%d classified (+%d of known non-fit companies, not classified) → %d leads",
         len(raw),
         len(fresh),
         stats["blocked"],
         stats["hardware"],
         stats["duplicates"],
         len(candidates),
+        len(skipped),
         len(leads),
     )
     return leads

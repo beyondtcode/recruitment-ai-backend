@@ -437,6 +437,7 @@ function onEdit(e) {
       } else {
         syncStatus_(JOBS_TAB, 'Job Link', link, status, today);
       }
+      updateCompanyStatus_(link);
     }
   } catch (err) {
     console.log('onEdit sync failed: ' + err);
@@ -460,4 +461,48 @@ function syncStatus_(tab, linkHeader, link, status, today) {
 
 function setText_(cell, text) {
   cell.setNumberFormat('@').setValue(text);
+}
+
+// Companies tab: the furthest-along status among the company's jobs (same
+// company + outreach track), as the agent computes it on each run.
+function updateCompanyStatus_(link) {
+  var ss = SpreadsheetApp.getActive();
+  var jobs = ss.getSheetByName(JOBS_TAB), companies = ss.getSheetByName('Companies');
+  if (!jobs || !companies || jobs.getLastRow() < 2 || companies.getLastRow() < 2) return;
+  var jh = jobs.getRange(1, 1, 1, jobs.getLastColumn()).getValues()[0];
+  var col = function (h) { return jh.indexOf(h); };
+  var rows = jobs.getRange(2, 1, jobs.getLastRow() - 1, jh.length).getValues();
+  var me = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][col('Job Link')] || '').trim() === link) { me = rows[i]; break; }
+  }
+  if (!me) return;
+  var key = function (r) {
+    return String(r[col('Company Name')] || '').trim().toLowerCase() + '|' + trackOf_(r[col('Category')]);
+  };
+  var target = key(me), best = null, bestRank = 0;
+  rows.forEach(function (r) {
+    if (key(r) !== target) return;
+    var rank = STATUSES.indexOf(String(r[col('Outreach Status')] || '').trim());
+    if (rank > bestRank) { bestRank = rank; best = r; }  // rank 0 = לא נשלח: not worked on
+  });
+  if (!best) return;  // none of the jobs worked on: the company keeps its status
+
+  var ch = companies.getRange(1, 1, 1, companies.getLastColumn()).getValues()[0];
+  var cName = ch.indexOf('Company Name'), cTrack = ch.indexOf('Outreach Track');
+  var cStatus = ch.indexOf('Outreach Status'), cUpd = ch.indexOf('Status Updated');
+  if (cName < 0 || cStatus < 0) return;
+  var crows = companies.getRange(2, 1, companies.getLastRow() - 1, ch.length).getValues();
+  for (var j = 0; j < crows.length; j++) {
+    var ck = String(crows[j][cName] || '').trim().toLowerCase() + '|' +
+             (cTrack >= 0 ? (String(crows[j][cTrack] || '').trim() || 'פיתוח') : 'פיתוח');
+    if (ck !== target) continue;
+    companies.getRange(j + 2, cStatus + 1).setValue(STATUSES[bestRank]);
+    if (cUpd >= 0) setText_(companies.getRange(j + 2, cUpd + 1), String(best[col('Status Updated')] || ''));
+  }
+}
+
+function trackOf_(category) {
+  var c = String(category || '').trim();
+  return (c === 'יישום Salesforce' || c === 'יישום monday.com') ? 'מערכות' : 'פיתוח';
 }

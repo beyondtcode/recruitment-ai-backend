@@ -244,6 +244,49 @@ class LinkedInPaginationTests(unittest.TestCase):
         self.assertEqual(len(scraper.parse_job_cards(html, scraper.BOARD_CONFIGS["LinkedIn"])), 5)
 
 
+class KnownLinksStopTests(unittest.TestCase):
+    def test_paging_stops_at_a_page_of_known_jobs(self) -> None:
+        from services import scraper
+
+        def page(ids):
+            return "".join(
+                f'<li><div class="base-card base-search-card"><a class="base-card__full-link" '
+                f'href="https://il.linkedin.com/jobs/view/job-{i}?position=1&amp;refId=x"></a>'
+                f'<h3 class="base-search-card__title">Dev</h3></div></li>' for i in ids)
+
+        class Resp:
+            def __init__(self, text):
+                self.status, self._text = 200, text
+
+            def text(self):
+                return self._text
+
+        pages = [Resp(page(range(10, 20))), Resp(page(range(20, 30))), Resp(page(range(30, 40)))]
+        calls = []
+
+        class Ctx:
+            class request:
+                @staticmethod
+                def get(url, timeout=0):
+                    calls.append(url)
+                    return pages.pop(0)
+
+        known = {f"https://il.linkedin.com/jobs/view/job-{i}" for i in range(15, 40)}
+        url = "https://www.linkedin.com/jobs/search?location=Israel&sortBy=DD&keywords=Dev"
+        token = scraper.KNOWN_JOB_LINKS.set(known)
+        try:
+            with mock.patch.object(scraper.time, "sleep", lambda s: None):
+                extra = scraper._linkedin_more_pages(Ctx, url, page(range(0, 10)))
+                # A first page that is all known: no paging at all.
+                calls_before = len(calls)
+                self.assertEqual(scraper._linkedin_more_pages(Ctx, url, page(range(20, 30))), "")
+                self.assertEqual(len(calls), calls_before)
+        finally:
+            scraper.KNOWN_JOB_LINKS.reset(token)
+        self.assertEqual(len(calls), 2)  # page 2 had new jobs (10–14); page 3 was all known
+        self.assertEqual(extra.count("base-search-card__title"), 10)
+        self.assertIn("https://il.linkedin.com/jobs/view/job-3", known)  # found this run → known
+
 class LookbackTests(unittest.TestCase):
     def test_with_lookback(self) -> None:
         from services.job_sources import LEAD_SEARCHES, with_lookback

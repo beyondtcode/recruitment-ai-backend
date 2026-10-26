@@ -17,6 +17,7 @@ Add new boards by extending ``BOARD_CONFIGS`` (selectors + host match).
 from __future__ import annotations
 
 import asyncio
+from html import unescape
 import contextvars
 import logging
 import os
@@ -865,6 +866,18 @@ LINKEDIN_MAX_JOBS_OVERRIDE: contextvars.ContextVar[int | None] = contextvars.Con
     "LINKEDIN_MAX_JOBS_OVERRIDE", default=None
 )
 
+# Job links the agent already knows (sheet + seen store + found earlier in this
+# run). When set, LinkedIn paging stops at the first page with nothing new.
+KNOWN_JOB_LINKS: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "KNOWN_JOB_LINKS", default=None
+)
+_LINKEDIN_JOB_HREF_RE = re.compile(r'href="([^"]*linkedin\.com/jobs/view/[^"]+)"')
+
+
+def _linkedin_page_links(html: str) -> set[str]:
+    return {_clean_job_link(unescape(h)) for h in _LINKEDIN_JOB_HREF_RE.findall(html or "")} - {""}
+
+
 LINKEDIN_MORE_API = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
 
@@ -891,6 +904,13 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
     count = first_html.count("base-search-card__title")
     if count == 0 or count >= max_jobs:
         return ""
+    known = KNOWN_JOB_LINKS.get()
+    if known is not None:
+        first_links = _linkedin_page_links(first_html)
+        nothing_new = bool(first_links) and first_links <= known
+        known.update(first_links)
+        if nothing_new:
+            return ""  # newest first and all known: the rest is older
     # Even a short first page can hide more results (a company filter showed
     # 3 of ~30 jobs), so always ask once; an empty page ends the loop.
     extra: list[str] = []
@@ -914,6 +934,11 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
         n = chunk.count("base-search-card__title")
         if n == 0:
             break
+        if known is not None:
+            links = _linkedin_page_links(chunk)
+            if links and links <= known:
+                break  # a whole page of jobs we already have: stop here
+            known.update(links)
         extra.append(chunk)
         start += n
         time.sleep(1.0)

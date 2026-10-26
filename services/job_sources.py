@@ -44,7 +44,8 @@ DEFAULT_SEARCH_URLS: dict[str, str] = {
 # SQLink is intentionally excluded (it is on the blocked-companies list).
 # ---------------------------------------------------------------------------
 
-_LI = "https://www.linkedin.com/jobs/search?location=Israel&f_TPR=r259200&keywords="
+# sortBy=DD: newest first, so paging can stop at the first page of known jobs.
+_LI = "https://www.linkedin.com/jobs/search?location=Israel&f_TPR=r259200&sortBy=DD&keywords="
 _DRUSHIM = "https://www.drushim.co.il/jobs/search/{q}/?ssaen=3"
 _JOBMASTER = "https://www.jobmaster.co.il/jobs/?q={q}"
 

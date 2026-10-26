@@ -205,6 +205,39 @@ def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
         conn.close()
 
 
+def _pull_status_from_jobs(
+    company_rows: dict[str, dict[str, str]], by_row: dict[str, list[dict[str, str]]]
+) -> int:
+    """Outreach Status edited in the Jobs tab → the company row (and from there
+    to all of its jobs).
+
+    A job's status counts as an edit when it differs from the company's status
+    at the end of the last run. If the company row was edited too, the
+    Companies tab wins. Returns the number of companies updated.
+    """
+    conn = _status_db()
+    try:
+        last = {k: s for k, s in conn.execute("SELECT company_key, status FROM company_status")}
+    finally:
+        conn.close()
+    order = {s: i for i, s in enumerate(OUTREACH_STATUSES)}
+    updated = 0
+    for rk, row in company_rows.items():
+        prev = last.get(rk)
+        if prev is None or (row.get("Outreach Status") or "").strip() != prev:
+            continue  # new company, or edited in Companies (that edit wins)
+        edits = {
+            (j.get("Outreach Status") or "").strip()
+            for j in by_row.get(rk, [])
+            if (j.get("Outreach Status") or "").strip() not in ("", prev)
+        }
+        if edits:
+            # Several different edits: keep the furthest along the outreach.
+            row["Outreach Status"] = max(edits, key=lambda s: order.get(s, -1))
+            updated += 1
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Retry limits for lookups that found nothing ("לא ידוע" / "לא נמצא")
 # ---------------------------------------------------------------------------
@@ -723,6 +756,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
 
     # 5. Status tracking, ordering, write back. Companies without open jobs
     #    move to the Companies Archive tab (and come back when they post again).
+    status_from_jobs = _pull_status_from_jobs(company_rows, by_row)
     rows = list(company_rows.values())
     _apply_status_tracking(rows, today_s)
     order = {YES: 0, UNKNOWN: 1, NO: 2}
@@ -759,6 +793,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     if other_companies.rows or store.read(TAB_OTHER_COMPANIES) is not None:
         store.write(TAB_OTHER_COMPANIES, other_companies)
     store.set_dropdown(TAB_COMPANIES, "Outreach Status", OUTREACH_STATUSES)
+    store.set_dropdown(jobs_tab(), "Outreach Status", OUTREACH_STATUSES)
     if companies_archive.rows or store.read(TAB_COMPANIES_ARCHIVE) is not None:
         store.write(TAB_COMPANIES_ARCHIVE, companies_archive)
         store.set_dropdown(TAB_COMPANIES_ARCHIVE, "Outreach Status", OUTREACH_STATUSES)
@@ -785,6 +820,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             "companies_waiting_for_budget": skipped_for_budget,
             "contacts_searched": contacts_searched,
             "contacts_found": contacts_found,
+            "statuses_from_jobs_tab": status_from_jobs,
             "searches_used": getattr(search, "used", 0) if search is not None else 0,
             "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,

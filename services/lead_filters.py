@@ -87,7 +87,7 @@ def outreach_phrasing(category: str) -> str:
 BLOCKED_COMPANIES: dict[str, tuple[str, ...]] = {
     "מטריקס": ("Matrix", "Matrix IT", "מטריקס"),
     "NVIDIA": ("NVIDIA", "NVIDIA AI", "Nvidia", "אנבידיה", "אינבידיה"),
-    "ONE": ("ONE Technologies", "One1", "וואן טכנולוגיות"),
+    "ONE": ("ONE Technologies", "One Technologies Israel", "ONE Tech", "One1", "וואן טכנולוגיות"),
     "SQLink": ("SQLink", "SQLink Group", "אס.קיו.לינק", "SQ Link"),
     "התעשייה האווירית": (
         "IAI",
@@ -102,6 +102,18 @@ BLOCKED_COMPANIES: dict[str, tuple[str, ...]] = {
     "בינת": ("Bynet", "Bynet Data Communications", "בינת", "בינת סמך"),
     "Intel": ("Intel", "Intel Corporation", "אינטל"),
     "Comblack": ("Comblack", "ComBlack", "קומבלק"),
+}
+
+# Added to the Blocked Companies tab once (Beyond Code, Oct 2026): software
+# houses / staffing companies that must not be processed at all.
+BLOCKED_ADDITIONS: dict[str, tuple[str, ...]] = {
+    "מלם תים": ("Malam Team", "Malam-Team", "MalamTeam", "מלם תים", "מל\"ם תים"),
+    "Ness": ("Ness", "Ness Technologies", "Ness Digital Engineering", "Ness Israel", "נס טכנולוגיות"),
+    "דנאל": ("Danel", "Danel Adir", "דנאל", "דנאל אדיר"),
+    "לין ביכלר": ("לין ביכלר", "Lin Bichler", "Lin Bikhler"),
+    "Quicklizard": ("Quicklizard", "Quick Lizard"),
+    # Extra spellings for an existing row.
+    "ONE": ("ONE Technologies", "One Technologies Israel", "ONE Tech", "One1", "וואן טכנולוגיות"),
 }
 
 

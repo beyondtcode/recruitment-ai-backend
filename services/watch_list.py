@@ -20,7 +20,13 @@ from services.lead_filters import normalize_company
 
 logger = logging.getLogger(__name__)
 
-WATCH_HEADERS = ["Company Name", "Company LinkedIn", "Note"]
+WATCH_HEADERS = ["Company Name", "Company LinkedIn", "Any Size", "Note"]
+
+# "Any Size" = כן: the company's jobs count as a fit whatever its size / type
+# (category, blocklist, hardware and Do Not Contact still apply).
+ANY_SIZE_YES = "כן"
+# Marked when the column is first added (Beyond Code's request, Oct 2026).
+ANY_SIZE_DEFAULT = {"cyera", "hibob", "island", "upwind security", "dream", "alice", "buildots"}
 SEARCH_PAUSE_SECONDS = 3.0
 
 # Funded Israeli startups that are hiring (supplied by Beyond Code, Oct 2026).
@@ -64,6 +70,7 @@ class WatchCompany:
     name: str
     linkedin: str
     note: str = ""
+    any_size: bool = False
 
     @property
     def slug(self) -> str:
@@ -86,12 +93,27 @@ class WatchList:
     def __len__(self) -> int:
         return len(self.companies)
 
-    def matches(self, company_name: str = "", company_linkedin: str = "") -> bool:
+    def find(self, company_name: str = "", company_linkedin: str = "") -> WatchCompany | None:
         slug = linkedin_slug(company_linkedin)
-        if slug and slug in self._slugs:
-            return True
         name = normalize_company(company_name)
-        return bool(name) and name in self._names
+        for c in self.companies:
+            if slug and c.slug and slug == c.slug:
+                return c
+        for c in self.companies:
+            if name and name in (normalize_company(c.name), normalize_company(c.search_name)):
+                return c
+        return None
+
+    def matches(self, company_name: str = "", company_linkedin: str = "") -> bool:
+        return self.find(company_name, company_linkedin) is not None
+
+    def any_size(self, company_name: str = "", company_linkedins: list[str] | None = None) -> bool:
+        """True when the company is on the list with "Any Size" = כן."""
+        for link in (company_linkedins or []) + [""]:
+            c = self.find(company_name, link)
+            if c is not None:
+                return c.any_size
+        return False
 
 
 def search_url(company: WatchCompany) -> str:

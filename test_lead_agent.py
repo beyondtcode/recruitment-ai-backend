@@ -855,19 +855,14 @@ class WatchListTests(unittest.TestCase):
         self.assertTrue(wl.belongs_to({"company_link": "https://il.linkedin.com/company/cyera"}, cyera))
         self.assertFalse(wl.belongs_to({"company_link": "https://il.linkedin.com/company/other", "company_name": "Cyera"}, cyera))
 
-    def test_watch_company_gets_normal_fit_check(self) -> None:
+    def _run_watch(self, watch_rows):
         tmp = tempfile.TemporaryDirectory()
-        store = MemoryStore({
-            "Sheet1": [["Company Name", "Job Title", "Job Link"]],
-            "Watch List": [["Company Name", "Company LinkedIn", "Note"],
-                           ["Cyera", "https://www.linkedin.com/company/cyera/", "$400M"]],
-        })
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]], "Watch List": watch_rows})
 
         async def scrape():
             return [], []
 
         async def scrape_watch(watch):
-            self.assertEqual(len(watch), 1)
             return [{"company_name": "Cyera", "job_title": "Backend Developer", "job_link": "https://li/c1",
                      "source": "LinkedIn", "company_link": "https://il.linkedin.com/company/cyera"}], []
 
@@ -884,12 +879,34 @@ class WatchListTests(unittest.TestCase):
             summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, scrape_watch=scrape_watch,
                                                  check=mock.AsyncMock(return_value={}), today=TODAY))
         tmp.cleanup()
+        return store, summary
+
+    def test_watch_company_gets_normal_fit_check(self) -> None:
+        store, summary = self._run_watch([["Company Name", "Company LinkedIn", "Any Size", "Note"],
+                                          ["Cyera", "https://www.linkedin.com/company/cyera/", "", "$400M"]])
         self.assertEqual(store.read("Companies").rows, [])
         row = store.read("Doesn't Fit - Companies").rows[0]
         self.assertEqual(row["Company Name"], "Cyera")
         self.assertTrue(row["Fit"].startswith("גדולה מדי"), row["Fit"])
         self.assertNotEqual(row["Target"], "כן")
         self.assertEqual(summary["watch_list_jobs_found"], 1)
+
+    def test_watch_company_any_size(self) -> None:
+        store, _ = self._run_watch([["Company Name", "Company LinkedIn", "Any Size", "Note"],
+                                    ["Cyera", "https://www.linkedin.com/company/cyera/", "כן", "$400M"]])
+        row = store.read("Companies").rows[0]
+        self.assertEqual((row["Company Name"], row["Fit"], row["Target"]), ("Cyera", "מתאימה (רשימת מעקב)", "כן"))
+        self.assertEqual(row["Company Size"], "1001-5000")  # size still shown
+
+    def test_any_size_column_added_with_defaults(self) -> None:
+        store, _ = self._run_watch([["Company Name", "Company LinkedIn", "Note"],
+                                    ["Cyera", "https://www.linkedin.com/company/cyera/", "$400M"],
+                                    ["Alice (Formerly ActiveFence)", "https://www.linkedin.com/company/alice-io/", ""],
+                                    ["Zenity", "https://www.linkedin.com/company/zenitysec/", ""]])
+        watch = store.read("Watch List")
+        self.assertEqual(watch.headers[:4], ["Company Name", "Company LinkedIn", "Any Size", "Note"])
+        self.assertEqual([r["Any Size"] for r in watch.rows], ["כן", "כן", ""])
+        self.assertEqual(store.read("Companies").rows[0]["Fit"], "מתאימה (רשימת מעקב)")
 
     def test_company_id_search(self) -> None:
         from services import watch_list as wl

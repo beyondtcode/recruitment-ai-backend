@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable
@@ -72,6 +73,8 @@ from services.lead_sheet import (
 )
 from services.search_client import BudgetExceeded, SearchClient, quota_alert, tavily_usage
 from services.watch_list import (
+    ANY_SIZE_DEFAULT,
+    ANY_SIZE_YES,
     WATCH_HEADERS,
     WATCH_SEED,
     WatchCompany,
@@ -319,10 +322,24 @@ def load_watch_list(store: SheetStore) -> WatchList:
     if table is None:
         table = Table(headers=list(WATCH_HEADERS))
         table.rows = [{"Company Name": n, "Company LinkedIn": u, "Note": note} for n, u, note in WATCH_SEED]
+        for r in table.rows:
+            r["Any Size"] = ANY_SIZE_YES if normalize_company(r["Company Name"]) in ANY_SIZE_DEFAULT else ""
         store.write(TAB_WATCH, table)
         logger.info("lead_agent: seeded %s with %d companies", TAB_WATCH, len(table.rows))
+    elif "Any Size" not in table.headers:
+        # One-time: add the column (after Company LinkedIn) and mark the default companies.
+        table.canonical_headers(list(WATCH_HEADERS))
+        for r in table.rows:
+            name = normalize_company(r.get("Company Name", ""))
+            short = normalize_company(re.split(r"\s*[(|–-]\s*", r.get("Company Name", ""), maxsplit=1)[0])
+            r["Any Size"] = ANY_SIZE_YES if name in ANY_SIZE_DEFAULT or short in ANY_SIZE_DEFAULT else ""
+        store.write(TAB_WATCH, table)
+        logger.info("lead_agent: added the Any Size column to %s", TAB_WATCH)
     companies = [
-        WatchCompany(r.get("Company Name", "").strip(), r.get("Company LinkedIn", "").strip(), r.get("Note", ""))
+        WatchCompany(
+            r.get("Company Name", "").strip(), r.get("Company LinkedIn", "").strip(), r.get("Note", ""),
+            any_size=(r.get("Any Size", "") or "").strip() in (ANY_SIZE_YES, "yes", "Yes", "YES", "v", "V", "✓"),
+        )
         for r in table.rows
         if r.get("Company Name", "").strip()
     ]
@@ -592,6 +609,10 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         dnc = rk.split("|")[0] in do_not_contact
         target, _reason = compute_target(info, categories, do_not_contact=dnc)
         fit = fit_reason(info, categories, do_not_contact=dnc)
+        links = [row.get("Company LinkedIn", "")] + [j.get("Company LinkedIn", "") for j in by_row.get(rk, [])]
+        if not dnc and categories and watch.any_size(row.get("Company Name", ""), links):
+            # Watch-list company marked "Any Size": a fit whatever its size / type.
+            target, fit = YES, "מתאימה (רשימת מעקב)"
         row["Target"] = target
         row["Fit"] = fit
 

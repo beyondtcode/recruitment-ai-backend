@@ -179,7 +179,7 @@ function dropdown_(ss, tab, column, list) {
 
 const JOBS_TAB = 'Jobs';
 const HEADERS = {
-  'Watch List': ["Company Name", "Company LinkedIn", "Note"],
+  'Watch List': ["Company Name", "Company LinkedIn", "Any Size", "Note"],
   'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
   'Companies': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
   'Jobs': ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
@@ -207,7 +207,7 @@ const EDITABLE = {
   'Companies Archive': ['Outreach Status', 'Status Updated'],
   "Doesn't Fit - Companies": ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
-  'Watch List': ['Company Name', 'Company LinkedIn', 'Note'],
+  'Watch List': ['Company Name', 'Company LinkedIn', 'Any Size', 'Note'],
   'Blocked Companies': ['Company', 'Name Variants']
 };
 const WIDTHS = {
@@ -287,7 +287,10 @@ function setupTab_(ss, tab, headers) {
   if (sh.getMaxColumns() > width) sh.deleteColumns(width + 1, sh.getMaxColumns() - width);
   if (sh.getLastRow() === 0) sh.getRange(1, 1, 1, width).setValues([headers]);
   if (tab === 'Watch List' && sh.getLastRow() < 2) {
-    sh.getRange(2, 1, WATCH_SEED.length, 3).setValues(WATCH_SEED);
+    const anySize = ['Cyera', 'HiBob', 'Island', 'Upwind Security', 'Dream', 'Alice (Formerly ActiveFence)', 'Buildots'];
+    sh.getRange(2, 1, WATCH_SEED.length, 4).setValues(WATCH_SEED.map(function (r) {
+      return [r[0], r[1], anySize.indexOf(r[0]) >= 0 ? 'כן' : '', r[2]];
+    }));
   }
   if (tab === 'Blocked Companies' && sh.getLastRow() < 2) {
     sh.getRange(2, 1, BLOCKED_SEED.length, 2).setValues(BLOCKED_SEED);

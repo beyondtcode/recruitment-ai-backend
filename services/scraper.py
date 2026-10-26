@@ -889,8 +889,10 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
     if override is not None:
         max_jobs = override  # 0 = first page only
     count = first_html.count("base-search-card__title")
-    if count < 20 or count >= max_jobs:
-        return ""  # small result set: nothing more to fetch
+    if count == 0 or count >= max_jobs:
+        return ""
+    # Even a short first page can hide more results (a company filter showed
+    # 3 of ~30 jobs), so always ask once; an empty page ends the loop.
     extra: list[str] = []
     start = count
     failures = 0

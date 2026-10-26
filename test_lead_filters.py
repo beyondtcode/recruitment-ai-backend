@@ -214,7 +214,8 @@ class LinkedInPaginationTests(unittest.TestCase):
             def text(self):
                 return self._text
 
-        pages = [Resp(200, card * 10), Resp(429, ""), Resp(200, card * 10), Resp(200, "")]
+        pages = [Resp(200, card * 10), Resp(429, ""), Resp(200, card * 10), Resp(200, ""),
+                 Resp(200, card * 3), Resp(200, "")]
         calls = []
 
         class Ctx:
@@ -233,9 +234,9 @@ class LinkedInPaginationTests(unittest.TestCase):
             scraper.LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
         self.assertEqual(first_only, "")  # watch list: first page only
         self.assertEqual(extra.count("base-search-card__title"), 20)
-        self.assertEqual([c.split("start=")[1] for c in calls], ["60", "70", "70", "80"])
+        self.assertEqual([c.split("start=")[1] for c in calls], ["60", "70", "70", "80", "5", "8"])
         self.assertTrue(calls[0].startswith(scraper.LINKEDIN_MORE_API + "?location=Israel&f_TPR=r259200"))
-        self.assertEqual(small, "")  # fewer than 20 jobs: no extra requests
+        self.assertEqual(small.count("base-search-card__title"), 3)  # a short first page is followed up too
         real = ('<li><div class="base-card base-search-card"><a class="base-card__full-link" '
                 'href="https://il.linkedin.com/jobs/view/{i}"></a><h3 class="base-search-card__title">Backend Developer</h3>'
                 '<h4 class="base-search-card__subtitle">Acme</h4></div></li>')

@@ -552,7 +552,7 @@ services/lead_agent.run
 
 Target rules: product company with 51–200 employees → כן. Salesforce / monday.com roles → כן at any company with 51+ employees (any type). Staffing / outsourcing companies and Do Not Contact → לא. Unknown size → לא ידוע (retried).
 
-Cost controls: web search (Tavily, Serper as fallback) is capped per run (`LEADS_MAX_SEARCHES_PER_RUN`, default 60; company lookups may use at most half). Company data is refreshed every 90 days. Lookups that found nothing are retried after 7 days, at most 3 times. The run summary reports `searches_used`.
+Cost controls: web search (Tavily, Serper as fallback) has no per-run cap by default (`LEADS_MAX_SEARCHES_PER_RUN=0`; set a number to cap it, company lookups then use at most half). Each run reads the monthly Tavily usage (`tavily_month_used` / `tavily_month_limit`) and sets `tavily_alert` when 80% is used, when what is left would not cover two more runs, or when the quota ran out mid-run (Tavily HTTP 432/433; the provider is then skipped for the rest of the run). Company data is refreshed every 90 days. Lookups that found nothing are retried after 7 days, at most 3 times. The run summary reports `searches_used`.
 
 Categories: Backend, Frontend, Full Stack, QA, פיתוח אוטומציה, יישום Salesforce, יישום monday.com, AI Builder, AI Workflow Builder, AI Automation Specialist, AI Implementation Specialist, AI Agent Developer. Not collected: DevOps/SRE, data science, product, cyber, support, hardware, and blocked companies. SQLink is not scraped.
 

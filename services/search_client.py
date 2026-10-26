@@ -7,8 +7,9 @@ Order: free first, paid only when needed.
   3. SERPER_API_KEY — Serper.dev (2,500 one-time free searches)
 
 A paid provider is called only when the free search fails (blocked / error) or
-finds nothing. Only paid calls count against the per-run budget
-(LEADS_MAX_SEARCHES_PER_RUN, default 60).
+finds nothing. There is no per-run cap by default (LEADS_MAX_SEARCHES_PER_RUN,
+0 = no cap); the monthly Tavily quota is watched instead (``tavily_usage`` /
+``quota_alert``) and a provider whose quota is used up is skipped.
 """
 
 from __future__ import annotations
@@ -44,6 +45,14 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class QuotaExhausted(RuntimeError):
+    """The provider's plan quota is used up (not a temporary error)."""
+
+
+# Tavily: 432 = plan limit reached, 433 = pay-as-you-go limit reached.
+_QUOTA_STATUS = {432, 433}
+
+
 class TavilyClient:
     name = "tavily"
     free = False
@@ -51,6 +60,7 @@ class TavilyClient:
     def __init__(self, api_key: str, *, timeout: float = 25.0) -> None:
         self._api_key = api_key
         self._timeout = timeout
+        self.exhausted = False
 
     async def search(self, query: str, *, num: int = 10, domain: str | None = None) -> list[SearchResult]:
         body: dict = {"query": query, "max_results": min(num, 20), "search_depth": "basic"}
@@ -62,6 +72,11 @@ class TavilyClient:
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=body,
             )
+            if response.status_code in _QUOTA_STATUS or (
+                response.status_code == 429 and "limit" in response.text.lower() and "usage" in response.text.lower()
+            ):
+                self.exhausted = True
+                raise QuotaExhausted(f"Tavily quota used up (HTTP {response.status_code})")
             response.raise_for_status()
             data = response.json()
         return [
@@ -204,7 +219,15 @@ class BudgetedSearch:
 
     @property
     def remaining(self) -> int:
+        if self._paid and all(getattr(p, "exhausted", False) for p in self._paid):
+            return 0
+        if not self.budget:
+            return 10**9  # no per-run cap
         return max(self.budget - self.used, 0)
+
+    @property
+    def exhausted_providers(self) -> list[str]:
+        return [p.name for p in self._paid if getattr(p, "exhausted", False)]
 
     @property
     def has_free(self) -> bool:
@@ -243,9 +266,12 @@ class BudgetedSearch:
             if last_exc is not None:
                 raise RuntimeError(f"free search failed: {last_exc}")
             return []
-        if self.used >= self.budget:
+        if self.budget and self.used >= self.budget:
             raise BudgetExceeded("paid search budget for this run is used up")
-        for provider in self._paid:
+        paid = [p for p in self._paid if not getattr(p, "exhausted", False)]
+        if not paid:
+            raise BudgetExceeded("paid search quota is used up")
+        for provider in paid:
             self.used += 1
             self._count(provider.name)
             try:
@@ -253,8 +279,10 @@ class BudgetedSearch:
             except Exception as exc:
                 last_exc = exc
                 logger.warning("search: %s failed (%s); trying fallback", provider.name, exc)
-                if self.used >= self.budget:
+                if self.budget and self.used >= self.budget:
                     break
+        if all(getattr(p, "exhausted", False) for p in self._paid):
+            raise BudgetExceeded("paid search quota is used up")
         raise RuntimeError(f"all search providers failed: {last_exc}")
 
 
@@ -293,10 +321,51 @@ def get_search_client() -> BudgetedSearch | None:
     if not providers:
         return None
     try:
-        budget = int(os.environ.get("LEADS_MAX_SEARCHES_PER_RUN") or 60)
+        budget = int(os.environ.get("LEADS_MAX_SEARCHES_PER_RUN") or 0)
     except ValueError:
-        budget = 60
+        budget = 0
     return BudgetedSearch(providers, budget)
+
+
+TAVILY_USAGE_URL = "https://api.tavily.com/usage"
+
+
+async def tavily_usage(api_key: str) -> tuple[int, int] | None:
+    """(used, limit) of the Tavily plan this billing cycle, or None if unknown."""
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(TAVILY_USAGE_URL, headers={"Authorization": f"Bearer {api_key}"})
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        logger.info("search: could not read Tavily usage", exc_info=True)
+        return None
+    for section, used_key, limit_key in (("account", "plan_usage", "plan_limit"), ("key", "usage", "limit")):
+        part = data.get(section) or {}
+        used, limit = part.get(used_key), part.get(limit_key)
+        if isinstance(used, (int, float)) and isinstance(limit, (int, float)) and limit > 0:
+            return int(used), int(limit)
+    return None
+
+
+def quota_alert(used: int | None, limit: int | None, run_used: int, exhausted: bool) -> str:
+    """Hebrew warning for the Slack summary, or '' when the quota is fine.
+
+    Warns when the quota ran out during the run, when 80% of it is used, or
+    when what is left would not cover two more runs like this one.
+    """
+    if exhausted:
+        return ("המכסה החודשית של Tavily נגמרה באמצע הריצה. חברות שלא הספיקו לקבל גודל או "
+                "איש קשר יטופלו כשהמכסה תתחדש.")
+    if not used or not limit:
+        return ""
+    left = max(limit - used, 0)
+    if used >= 0.8 * limit or (run_used and left < 2 * run_used):
+        return (f"נוצלו {used} מתוך {limit} חיפושים החודש ב-Tavily (נשארו {left}). "
+                f"הריצה הזו השתמשה ב-{run_used}, כך שהמכסה עלולה להיגמר בקרוב.")
+    return ""
 
 
 def format_results(results: list[SearchResult], limit: int = 8) -> str:

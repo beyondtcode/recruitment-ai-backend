@@ -83,6 +83,42 @@ class FakeProvider:
 
 
 class SearchBudgetTests(unittest.TestCase):
+    def test_no_cap_and_quota_exhausted(self) -> None:
+        from services import search_client as sc
+
+        paid = FakeProvider({"": [SearchResult("t", "l", "s")]})
+        search = BudgetedSearch([paid], budget=0)  # 0 = no per-run cap
+        for i in range(100):
+            asyncio.run(search.search(f"q{i}"))
+        self.assertEqual(search.used, 100)
+
+        class Quota(FakeProvider):
+            name = "tavily"
+            exhausted = False
+
+            async def search(self, query, *, num=10, domain=None):
+                self.exhausted = True
+                raise sc.QuotaExhausted("432")
+
+        q = Quota()
+        search = BudgetedSearch([q], budget=0)
+        with self.assertRaises(BudgetExceeded):
+            asyncio.run(search.search("a"))
+        with self.assertRaises(BudgetExceeded):
+            asyncio.run(search.search("b"))  # not called again
+        self.assertEqual(search.used, 1)
+        self.assertEqual(search.exhausted_providers, ["tavily"])
+        self.assertEqual(search.remaining, 0)
+
+    def test_quota_alert(self) -> None:
+        from services.search_client import quota_alert
+
+        self.assertEqual(quota_alert(300, 1000, 60, False), "")
+        self.assertIn("800", quota_alert(800, 1000, 60, False))          # 80% used
+        self.assertIn("נשארו 150", quota_alert(850, 1000, 100, False))   # < 2 runs left
+        self.assertIn("נגמרה", quota_alert(None, None, 10, True))
+        self.assertEqual(quota_alert(None, None, 10, False), "")
+
     def test_limited_view_caps_concurrent_paid_calls(self) -> None:
         class SlowFree(FakeProvider):
             name, free = "ddg", True

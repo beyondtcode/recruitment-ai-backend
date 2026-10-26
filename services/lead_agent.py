@@ -12,7 +12,8 @@ weekly():
 Env vars:
   LEADS_MAX_COMPANY_ENRICH (default 0 = no limit) — company lookups per run
   LEADS_MAX_CONTACT_ENRICH (default 0 = no limit) — contact lookups per run
-  (the paid-search budget, LEADS_MAX_SEARCHES_PER_RUN, still applies)
+  (paid searches have no per-run cap; a Slack alert warns before the monthly
+  Tavily quota runs out)
   LEADS_ENRICH_REFRESH_DAYS (default 90) — re-check size/type after N days
   LEADS_MAX_LINK_CHECKS (default 0 = all) — job links checked for "closed" per run
   LEADS_CONTACT_REFRESH_DAYS (default 60) — re-check a contact when a new job appears after N days
@@ -69,7 +70,7 @@ from services.lead_sheet import (
     Table,
     jobs_tab,
 )
-from services.search_client import BudgetExceeded, SearchClient
+from services.search_client import BudgetExceeded, SearchClient, quota_alert, tavily_usage
 from services.watch_list import (
     WATCH_HEADERS,
     WATCH_SEED,
@@ -536,7 +537,8 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     to_enrich = to_enrich[: _env_int("LEADS_MAX_COMPANY_ENRICH", 0) or None]
     # Company lookups may use at most half of the run's search budget, so
     # contacts for target companies always get searches too.
-    company_search_cap = (search.budget // 2) if search is not None and hasattr(search, "budget") else 0
+    budget = getattr(search, "budget", 0) if search is not None else 0
+    company_search_cap = budget // 2 if budget else None  # None = no cap
     skipped_for_budget = 0
 
     def company_jobs(ck: str) -> list[dict[str, str]]:
@@ -557,11 +559,12 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         titles = [j.get("Job Title", "") for j in company_jobs(ck)]
         link = company_link_for(ck)
         use_search = search
-        if search is not None and hasattr(search, "limited"):
+        if search is not None and hasattr(search, "limited") and company_search_cap is not None:
             # Paid calls stop at the companies' share (enforced per call, so
             # concurrent lookups cannot eat the contacts' share).
             use_search = search.limited(company_search_cap)
-        if search is not None and getattr(search, "used", 0) >= company_search_cap and not getattr(search, "has_free", False):
+        if (search is not None and company_search_cap is not None
+                and getattr(search, "used", 0) >= company_search_cap and not getattr(search, "has_free", False)):
             if not link:
                 skipped_for_budget += 1
                 return  # no free source and no budget left for companies: try next run
@@ -739,8 +742,22 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             },
         }
     )
+    summary.update(await _quota_status(search))
     logger.info("lead_agent: run summary %s", summary)
     return summary
+
+
+async def _quota_status(search: SearchClient | None) -> dict[str, Any]:
+    """Monthly Tavily usage and a Slack warning when it is about to run out."""
+    run_used = getattr(search, "by_provider", {}).get("tavily", 0) if search is not None else 0
+    exhausted = "tavily" in (getattr(search, "exhausted_providers", []) if search is not None else [])
+    usage = await tavily_usage((os.environ.get("TAVILY_API_KEY") or "").strip())
+    used, limit = usage if usage else (None, None)
+    return {
+        "tavily_month_used": used,
+        "tavily_month_limit": limit,
+        "tavily_alert": quota_alert(used, limit, run_used, exhausted),
+    }
 
 
 # ---------------------------------------------------------------------------

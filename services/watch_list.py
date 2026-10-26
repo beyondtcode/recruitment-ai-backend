@@ -232,22 +232,25 @@ async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], lis
             if cid:
                 ids[company.slug] = cid
                 ids_changed = True
-        found: list[dict] = []
-        how = "name search"
+        # Both searches, merged: the company filter (paged) and the name search
+        # (first page; unrelated jobs follow the company's own). Neither one
+        # alone finds everything (Cyera: 1 by id, 13 by name).
+        by_id: list[dict] = []
         if cid:
-            # Company filter: page through all of the company's jobs.
-            found = await _search(scrape_one, company_jobs_url(cid), company, None, by_id=True)
-            how = f"company id {cid}"
-        if not found:
-            # Name search (also the check for a wrong or stale id): unrelated
-            # jobs follow the company's own, so first page only.
-            found = await _search(scrape_one, search_url(company), company, 0, by_id=False)
-            if cid:
-                how = f"company id {cid} found nothing → name search"
-                if found:
-                    # The id gave nothing but the name did: the id is wrong.
-                    ids.pop(company.slug, None)
-                    ids_changed = True
+            by_id = await _search(scrape_one, company_jobs_url(cid), company, None, by_id=True)
+        by_name = await _search(scrape_one, search_url(company), company, 0, by_id=False)
+        found, seen_links = [], set()
+        for j in by_id + by_name:
+            link = j.get("job_link", "")
+            if link and link in seen_links:
+                continue
+            seen_links.add(link)
+            found.append(j)
+        how = f"id {cid}: {len(by_id)}, name: {len(by_name)}" if cid else f"name: {len(by_name)}"
+        if cid and not by_id and by_name:
+            # The id gave nothing but the name did: probably a wrong id; read it again next run.
+            ids.pop(company.slug, None)
+            ids_changed = True
         for j in found:
             j["watch"] = "1"
         jobs.extend(found)

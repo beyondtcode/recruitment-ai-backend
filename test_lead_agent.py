@@ -949,6 +949,30 @@ class WatchListTests(unittest.TestCase):
         tmp.cleanup()
         self.assertEqual(id_calls, ["cyera", "nameless"])
 
+    def test_id_and_name_search_are_merged(self) -> None:
+        from services import watch_list as wl
+
+        cyera = wl.WatchCompany("Cyera", "https://www.linkedin.com/company/cyera/")
+        link = "https://il.linkedin.com/company/cyera"
+
+        async def scrape_one(url, source):
+            if "f_C=" in url:
+                return [{"company_name": "Cyera", "job_link": "https://li/a", "company_link": link}]
+            return [{"company_name": "Cyera", "job_link": "https://li/a", "company_link": link},
+                    {"company_name": "Cyera", "job_link": "https://li/b", "company_link": link},
+                    {"company_name": "Other", "job_link": "https://li/x", "company_link": "https://il.linkedin.com/company/other"}]
+
+        async def get_id(company):
+            return "1"
+
+        tmp = tempfile.TemporaryDirectory()
+        with mock.patch.dict(os.environ, {"LEADS_WATCH_IDS": os.path.join(tmp.name, "ids.json")}), \
+                mock.patch.object(wl, "SEARCH_PAUSE_SECONDS", 0):
+            jobs, _ = asyncio.run(wl._scrape(wl.WatchList([cyera]), scrape_one, get_id))
+            self.assertEqual(wl._load_ids(), {"cyera": "1"})
+        tmp.cleanup()
+        self.assertEqual([j["job_link"] for j in jobs], ["https://li/a", "https://li/b"])
+
     def test_company_id_falls_back_to_name_search(self) -> None:
         from services import watch_list as wl
 

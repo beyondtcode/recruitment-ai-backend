@@ -180,7 +180,7 @@ function dropdown_(ss, tab, column, list) {
 const JOBS_TAB = 'Jobs';
 const HEADERS = {
   'Watch List': ["Company Name", "Company LinkedIn", "Any Size", "Note"],
-  'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
+  'Weekly': ["Company Name", "Company Size", "Outreach Track", "Latest Job", "Latest Job Link", "Outreach Status", "Other Jobs", "Outreach Phrasing", "Contact", "Contact LinkedIn", "Alt Contact", "Alt Contact LinkedIn", "Previous Outreach"],
   'Companies': ["Company Name", "Fit", "Target", "Outreach Status", "Contact Name", "Contact Title", "Contact LinkedIn", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Latest Job", "Latest Job Link", "Category", "Outreach Phrasing", "Open Jobs", "Outreach Track", "Company Size", "Company Type", "Last Job Found", "Status Updated", "Contact Found", "Company LinkedIn", "Last Enriched"],
   'Jobs': ["Company Name", "Job Title", "Category", "Fit", "Target", "Contact Name", "Contact Title", "Contact LinkedIn", "Outreach Status", "Status Updated", "Job Link", "Publish Date", "Found Date", "Company Size", "Company Type", "Alt Contact Name", "Alt Contact Title", "Alt Contact LinkedIn", "Outreach Phrasing", "Job Summary", "Source", "Last Checked", "Company LinkedIn"],
   'Do Not Contact': ["Company Name", "Reason"],
@@ -205,6 +205,7 @@ const EDITABLE = {
   'Companies': ['Contact Name', 'Contact Title', 'Contact LinkedIn',
                 'Alt Contact Name', 'Alt Contact Title', 'Alt Contact LinkedIn'],
   'Jobs': ['Outreach Status', 'Status Updated'],
+  'Weekly': ['Outreach Status'],
   'Companies Archive': ['Outreach Status', 'Status Updated'],
   "Doesn't Fit - Companies": ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
@@ -246,7 +247,7 @@ const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מד�
 const NOTES = {
   'Fit': 'האם החברה מתאימה לקמפיין, ואם לא – למה (גדולה מדי, לא חברת מוצר, חברת השמה, חסר מידע...).',
   'Target': 'כן = בקהל היעד (חברת מוצר 50–200 עובדים; Salesforce/monday: כל חברה מ־50 עובדים). לא ידוע = הסוכן ינסה שוב.',
-  'Outreach Status': 'סטטוס לכל משרה – מעדכנים בלשונית Jobs. הסוכן לא דורס ערך שעודכן ידנית. ב-Companies מוצג הסטטוס המתקדם ביותר מבין משרות החברה (לצפייה).',
+  'Outreach Status': 'סטטוס לכל משרה – מעדכנים בלשונית Jobs או ב-Weekly (שם הוא שייך למשרה האחרונה בשורה). עדכון ב-Weekly עובר ל-Jobs בריצה הבאה. הסוכן לא דורס ערך שעודכן ידנית. ב-Companies מוצג הסטטוס המתקדם ביותר מבין משרות החברה (לצפייה).',
   'Status Updated': 'מתמלא אוטומטית כשהסטטוס משתנה. אפשר לתקן ידנית.',
   'Contact Name': 'אפשר להקליד איש קשר ידנית — הסוכן לא יחליף אותו.',
   'Outreach Track': 'פיתוח = CTO / VP R&D. מערכות = משרות Salesforce / monday.com (VP Operations / RevOps / COO / CIO).',
@@ -368,7 +369,7 @@ function setupGuide_(ss) {
     ['סוכן הלידים – מדריך', '', ''],
     ['', '', ''],
     ['לשונית', 'מה יש בה', 'מי עורך'],
-    ['Weekly', 'רשימת הפנייה של השבוע: שורה לכל חברה (ולכל מסלול). חברות חדשות למעלה; חברות שכבר פנו אליהן ופרסמו משרה חדשה – למטה, בצבע.', 'נבנית מחדש בכל יום ראשון ב־8:00. לא עורכים כאן.'],
+    ['Weekly', 'רשימת הפנייה של השבוע: שורה לכל חברה (ולכל מסלול). חברות חדשות למעלה; חברות שכבר פנו אליהן ופרסמו משרה חדשה – למטה, בצבע.', 'נבנית מחדש בכל יום ראשון ב־8:00. כאן מעדכנים רק את Outreach Status – הוא עובר למשרה בלשונית Jobs בריצה הבאה.'],
     ['Companies', 'כל חברה שמגייסת עכשיו: גודל, סוג, האם בקהל היעד, איש קשר + חלופי, סטטוס פנייה. חברה עם משרות פיתוח וגם Salesforce/monday מופיעה פעמיים (מסלול פיתוח ומסלול מערכות).', 'מעדכנים את סטטוס הפנייה כאן. אפשר להקליד איש קשר ידנית – הסוכן לא יחליף אותו. עמודות עם כותרת צהובה = מותר לערוך.'],
     ['Jobs', 'כל משרה פתוחה בחברות שמתאימות (או שעוד חסר עליהן מידע), עם הקטגוריה ואיש הקשר המתאים לסוג המשרה (מועתק מ־Companies).', 'הסוכן כותב מחדש בכל ריצה. לא עורכים כאן.'],
     ["Doesn't Fit - Companies / Jobs", 'חברות שאינן בקהל היעד (גדולות מדי, קטנות מדי, בנקים, השמה וכו׳) והמשרות שלהן. נשמרות כדי לא לבדוק אותן שוב, ולמקרה שתרצו להרחיב את קהל היעד.', 'לקריאה בלבד. אם חברה הופכת לקהל יעד – היא עוברת אוטומטית ל־Companies.'],

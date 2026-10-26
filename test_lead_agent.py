@@ -436,6 +436,52 @@ class AgentRunTests(unittest.TestCase):
         company = store.read("Companies").rows[0]
         self.assertEqual((company["Outreach Status"], company["Status Updated"]), ("הודעה ראשונה נשלחה", "27/10/2026"))
 
+    def test_status_edited_in_weekly(self) -> None:
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+        jobs = [{"company_name": "Acme", "job_title": "Backend Developer", "job_link": "https://li/a1", "source": "LinkedIn"}]
+        results = {"CTO": [SearchResult("Dana - CTO - Acme", "https://il.linkedin.com/in/dana", "CTO at Acme")]}
+        search = BudgetedSearch([FakeProvider(results)], budget=0)
+
+        async def scrape():
+            return list(jobs), []
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            if "Search results" in user and "linkedin.com/in/" in user:
+                return {"primary": {"name": "Dana", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/dana"}}
+            return {"size": "51-200", "company_type": "product"}
+
+        def run(day):
+            with mock.patch("services.enrichment._classify_job", classify), \
+                    mock.patch.object(ce, "fetch_linkedin_company", mock.AsyncMock(return_value=None)), \
+                    mock.patch.object(ce, "complete_json", fake_llm), mock.patch.object(cc, "complete_json", fake_llm):
+                return asyncio.run(lead_agent.run(store, search, scrape=scrape,
+                                                  check=mock.AsyncMock(return_value={}), today=day))
+
+        run(TODAY)
+        asyncio.run(lead_agent.weekly(store, today=TODAY))
+        weekly = store.read("Weekly")
+        self.assertEqual(weekly.rows[0]["Outreach Status"], "לא נשלח")
+        self.assertEqual(store.dropdowns["Weekly"][0], "Outreach Status")
+
+        # Marketing updates the status in Weekly → the job in Jobs follows.
+        weekly.rows[0]["Outreach Status"] = "הודעה ראשונה נשלחה"
+        store.write("Weekly", weekly)
+        summary = run(date(2026, 10, 27))
+        self.assertEqual(summary["statuses_from_weekly_tab"], 1)
+        job = store.read("Sheet1").rows[0]
+        self.assertEqual((job["Outreach Status"], job["Status Updated"]), ("הודעה ראשונה נשלחה", "27/10/2026"))
+
+        # Updated in Jobs → Weekly shows it after the next run.
+        t = store.read("Sheet1")
+        t.rows[0]["Outreach Status"] = "פולואפ נשלח"
+        store.write("Sheet1", t)
+        run(date(2026, 10, 29))
+        self.assertEqual(store.read("Weekly").rows[0]["Outreach Status"], "פולואפ נשלח")
+        self.assertEqual(store.read("Sheet1").rows[0]["Outreach Status"], "פולואפ נשלח")
+
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
 

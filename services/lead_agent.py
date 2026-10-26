@@ -237,6 +237,75 @@ def _apply_job_status_tracking(rows: list[dict[str, str]], today_s: str) -> None
         conn.close()
 
 
+def _weekly_baseline() -> dict[str, str]:
+    conn = _status_db()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS weekly_status (job_link TEXT PRIMARY KEY, status TEXT NOT NULL)")
+        return {k: s for k, s in conn.execute("SELECT job_link, status FROM weekly_status")}
+    finally:
+        conn.close()
+
+
+def _save_weekly_baseline(pairs: list[tuple[str, str]]) -> None:
+    conn = _status_db()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS weekly_status (job_link TEXT PRIMARY KEY, status TEXT NOT NULL)")
+        conn.execute("DELETE FROM weekly_status")
+        conn.executemany("INSERT OR REPLACE INTO weekly_status (job_link, status) VALUES (?, ?)", pairs)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pull_weekly_edits(weekly: Table | None, job_rows: list[dict[str, str]], today_s: str = "") -> int:
+    """Outreach Status edited in the Weekly tab → the same job in Jobs.
+
+    Each Weekly row stands for its "Latest Job Link". A Weekly status counts
+    as an edit when it differs from what the agent last wrote there; if that
+    job was also changed in Jobs since then, Jobs wins. Returns the number of
+    jobs updated.
+    """
+    if weekly is None or "Outreach Status" not in weekly.headers:
+        return 0
+    base = _weekly_baseline()
+    by_link = {(r.get("Job Link") or "").strip(): r for r in job_rows}
+    updated = 0
+    for w in weekly.rows:
+        link = (w.get("Latest Job Link") or "").strip()
+        status = (w.get("Outreach Status") or "").strip()
+        job = by_link.get(link)
+        if job is None or not status:
+            continue
+        current = (job.get("Outreach Status") or "").strip() or NOT_SENT
+        written = base.get(link, current)
+        if status == written or current != written:
+            continue  # not edited in Weekly, or edited in Jobs too (Jobs wins)
+        job["Outreach Status"] = status
+        if today_s:
+            job["Status Updated"] = today_s
+        updated += 1
+    return updated
+
+
+def _refresh_weekly_statuses(store: SheetStore, job_rows: list[dict[str, str]]) -> None:
+    """Show each Weekly row's current job status (after a run) and remember it."""
+    weekly = store.read(TAB_WEEKLY)
+    if weekly is None or not weekly.rows:
+        return
+    weekly.canonical_headers(list(WEEKLY_HEADERS))
+    by_link = {(r.get("Job Link") or "").strip(): r for r in job_rows}
+    pairs = []
+    for w in weekly.rows:
+        link = (w.get("Latest Job Link") or "").strip()
+        job = by_link.get(link)
+        if job is not None:
+            w["Outreach Status"] = (job.get("Outreach Status") or "").strip() or NOT_SENT
+            pairs.append((link, w["Outreach Status"]))
+    store.write(TAB_WEEKLY, weekly)
+    store.set_dropdown(TAB_WEEKLY, "Outreach Status", OUTREACH_STATUSES)
+    _save_weekly_baseline(pairs)
+
+
 def _company_status_from_jobs(company: dict[str, str], jobs: list[dict[str, str]]) -> None:
     """Companies tab: the furthest-along status among the company's open jobs,
     so it is clear at a glance whether anyone has been contacted. When none of
@@ -768,6 +837,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
 
     # 5. Status tracking, ordering, write back. Companies without open jobs
     #    move to the Companies Archive tab (and come back when they post again).
+    statuses_from_weekly = _pull_weekly_edits(store.read(TAB_WEEKLY), jobs.rows)
     _apply_job_status_tracking(jobs.rows, today_s)
     for rk, company in company_rows.items():
         _company_status_from_jobs(company, by_row.get(rk, []))
@@ -801,6 +871,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     other_jobs.rows = [j for j in all_jobs if j.get("Target") == NO]
 
     store.write(jobs_tab(), jobs)
+    _refresh_weekly_statuses(store, jobs.rows + other_jobs.rows)
     if other_jobs.rows or store.read(TAB_OTHER_JOBS) is not None:
         store.write(TAB_OTHER_JOBS, other_jobs)
     store.write(TAB_COMPANIES, companies)
@@ -832,6 +903,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             "companies_waiting_for_budget": skipped_for_budget,
             "contacts_searched": contacts_searched,
             "contacts_found": contacts_found,
+            "statuses_from_weekly_tab": statuses_from_weekly,
             "searches_used": getattr(search, "used", 0) if search is not None else 0,
             "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,
@@ -883,6 +955,9 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
     companies = store.read(TAB_COMPANIES) or Table(headers=list(COMPANY_HEADERS))
     jobs = store.read(jobs_tab()) or Table(headers=list(JOB_HEADERS))
     do_not_contact = load_do_not_contact(store)
+    # Statuses edited in last week's file go to the jobs before it is replaced.
+    if _pull_weekly_edits(store.read(TAB_WEEKLY), jobs.rows, today.strftime("%d/%m/%Y")):
+        store.write(jobs_tab(), jobs)
 
     by_row: dict[str, list[dict[str, str]]] = {}
     for row in jobs.rows:
@@ -928,6 +1003,7 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
                 "Outreach Track": company.get("Outreach Track", "") or TRACK_DEV,
                 "Latest Job": latest.get("Job Title", ""),
                 "Latest Job Link": latest.get("Job Link", ""),
+                "Outreach Status": (latest.get("Outreach Status") or "").strip() or NOT_SENT,
                 "Other Jobs": "; ".join(t for t in others if t),
                 "Outreach Phrasing": latest.get("Outreach Phrasing", ""),
                 "Contact": _contact_text(contact, company.get("Contact Title", "")),
@@ -953,6 +1029,10 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
             row["Company Name"] = " "
     store.write(TAB_WEEKLY, table, reset_colors=True)
     store.highlight_rows(TAB_WEEKLY, highlight, RETURNING_COLOR)
+    store.set_dropdown(TAB_WEEKLY, "Outreach Status", OUTREACH_STATUSES)
+    _save_weekly_baseline([
+        (r["Latest Job Link"], r["Outreach Status"]) for r in new_rows + returning_rows if r.get("Latest Job Link")
+    ])
 
     summary = {
         "sheet_url": store.url,

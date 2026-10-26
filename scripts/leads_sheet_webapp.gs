@@ -204,6 +204,7 @@ const BLOCKED_SEED = [["מטריקס", "Matrix, Matrix IT, מטריקס"], ["NVI
 const EDITABLE = {
   'Companies': ['Outreach Status', 'Status Updated', 'Contact Name', 'Contact Title', 'Contact LinkedIn',
                 'Alt Contact Name', 'Alt Contact Title', 'Alt Contact LinkedIn'],
+  'Jobs': ['Outreach Status'],
   'Companies Archive': ['Outreach Status', 'Status Updated'],
   "Doesn't Fit - Companies": ['Outreach Status', 'Status Updated'],
   'Do Not Contact': ['Company Name', 'Reason'],
@@ -245,7 +246,7 @@ const HIDDEN_TABS = ['Blocked Companies', 'Archive', 'Companies Archive', 'מד�
 const NOTES = {
   'Fit': 'האם החברה מתאימה לקמפיין, ואם לא – למה (גדולה מדי, לא חברת מוצר, חברת השמה, חסר מידע...).',
   'Target': 'כן = בקהל היעד (חברת מוצר 50–200 עובדים; Salesforce/monday: כל חברה מ־50 עובדים). לא ידוע = הסוכן ינסה שוב.',
-  'Outreach Status': 'מעדכנים כאן בלבד (בלשונית Companies). הסוכן לא דורס ערך שעודכן ידנית.',
+  'Outreach Status': 'אפשר לעדכן ב-Companies או ב-Jobs. עדכון באחת המשרות חל על כל החברה ומתעדכן בשאר המשרות שלה בריצה הבאה. אם עודכן בשני המקומות – Companies קובע. הסוכן לא דורס ערך שעודכן ידנית.',
   'Status Updated': 'מתמלא אוטומטית כשהסטטוס משתנה. אפשר לתקן ידנית.',
   'Contact Name': 'אפשר להקליד איש קשר ידנית — הסוכן לא יחליף אותו.',
   'Outreach Track': 'פיתוח = CTO / VP R&D. מערכות = משרות Salesforce / monday.com (VP Operations / RevOps / COO / CIO).',

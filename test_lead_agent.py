@@ -369,6 +369,55 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(returning["Previous Outreach"], "פולואפ נשלח, 27/10/2026")
         self.assertEqual(len(store.highlights["Weekly"]), 1)
 
+    def test_status_edited_in_jobs_tab(self) -> None:
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+        jobs = [{"company_name": "Acme", "job_title": "Backend Developer", "job_link": "https://li/a1", "source": "LinkedIn"},
+                {"company_name": "Acme", "job_title": "Frontend Developer", "job_link": "https://li/a2", "source": "LinkedIn"}]
+
+        async def scrape():
+            return list(jobs), []
+
+        async def classify(provider, company, title, snippet):
+            return {"category": "Backend", "job_summary": "s"}
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"size": "51-200", "company_type": "product"}
+
+        def run(day):
+            with mock.patch("services.enrichment._classify_job", classify), \
+                    mock.patch.object(ce, "fetch_linkedin_company", mock.AsyncMock(return_value=None)), \
+                    mock.patch.object(ce, "complete_json", fake_llm):
+                return asyncio.run(lead_agent.run(store, None, scrape=scrape,
+                                                  check=mock.AsyncMock(return_value={}), today=day))
+
+        def statuses():
+            return ({r["Job Link"]: r["Outreach Status"] for r in store.read("Sheet1").rows},
+                    store.read("Companies").rows[0]["Outreach Status"])
+
+        run(TODAY)
+        # Someone updates one job in the Jobs tab.
+        t = store.read("Sheet1")
+        t.rows[0]["Outreach Status"] = "הודעה ראשונה נשלחה"
+        store.write("Sheet1", t)
+        summary = run(date(2026, 10, 27))
+        self.assertEqual(summary["statuses_from_jobs_tab"], 1)
+        by_job, company = statuses()
+        self.assertEqual(company, "הודעה ראשונה נשלחה")
+        self.assertEqual(set(by_job.values()), {"הודעה ראשונה נשלחה"})  # copied to the other job too
+        self.assertEqual(store.read("Companies").rows[0]["Status Updated"], "27/10/2026")
+
+        # Edited in both places: Companies wins.
+        t = store.read("Sheet1")
+        t.rows[0]["Outreach Status"] = "ענה: שלילי"
+        store.write("Sheet1", t)
+        c = store.read("Companies")
+        c.rows[0]["Outreach Status"] = "פולואפ נשלח"
+        store.write("Companies", c)
+        run(date(2026, 10, 29))
+        by_job, company = statuses()
+        self.assertEqual(company, "פולואפ נשלח")
+        self.assertEqual(set(by_job.values()), {"פולואפ נשלח"})
+
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
 

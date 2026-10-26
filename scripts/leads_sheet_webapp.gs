@@ -404,3 +404,60 @@ function setupGuide_(ss) {
   sh.setColumnWidth(1, 170); sh.setColumnWidth(2, 520); sh.setColumnWidth(3, 380);
   sh.setTabColor(TAB_COLORS['מדריך']);
 }
+
+/* ========================================================================
+ * Instant status sync between Weekly and Jobs (simple trigger, no setup).
+ * Changing Outreach Status in one tab updates the same job in the other right
+ * away. The agent does the same on its next run as a fallback.
+ * ======================================================================== */
+
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    var sh = e.range.getSheet();
+    var name = sh.getName();
+    if (name !== 'Weekly' && name !== JOBS_TAB) return;
+    if (e.range.getRow() < 2 || e.range.getNumColumns() !== 1) return;
+    var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    if (headers[e.range.getColumn() - 1] !== 'Outreach Status') return;
+    var linkCol = headers.indexOf(name === 'Weekly' ? 'Latest Job Link' : 'Job Link') + 1;
+    if (!linkCol) return;
+    var today = Utilities.formatDate(new Date(), 'Asia/Jerusalem', 'dd/MM/yyyy');
+    var updCol = headers.indexOf('Status Updated') + 1;
+    var first = e.range.getRow(), count = e.range.getNumRows();
+    var statuses = e.range.getValues();
+    var links = sh.getRange(first, linkCol, count, 1).getValues();
+    for (var i = 0; i < count; i++) {
+      var link = String(links[i][0] || '').trim();
+      var status = String(statuses[i][0] || '').trim();
+      if (!link || !status) continue;
+      if (name === JOBS_TAB) {
+        if (updCol) setText_(sh.getRange(first + i, updCol), today);
+        syncStatus_('Weekly', 'Latest Job Link', link, status, '');
+      } else {
+        syncStatus_(JOBS_TAB, 'Job Link', link, status, today);
+      }
+    }
+  } catch (err) {
+    console.log('onEdit sync failed: ' + err);
+  }
+}
+
+function syncStatus_(tab, linkHeader, link, status, today) {
+  var sh = SpreadsheetApp.getActive().getSheetByName(tab);
+  if (!sh || sh.getLastRow() < 2) return;
+  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var lc = headers.indexOf(linkHeader) + 1, sc = headers.indexOf('Outreach Status') + 1;
+  var uc = headers.indexOf('Status Updated') + 1;
+  if (!lc || !sc) return;
+  var links = sh.getRange(2, lc, sh.getLastRow() - 1, 1).getValues();
+  for (var i = 0; i < links.length; i++) {
+    if (String(links[i][0] || '').trim() !== link) continue;
+    sh.getRange(i + 2, sc).setValue(status);
+    if (today && uc) setText_(sh.getRange(i + 2, uc), today);
+  }
+}
+
+function setText_(cell, text) {
+  cell.setNumberFormat('@').setValue(text);
+}

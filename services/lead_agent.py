@@ -148,8 +148,6 @@ MIRRORED_COLUMNS: tuple[str, ...] = (
     "Alt Contact Name",
     "Alt Contact Title",
     "Alt Contact LinkedIn",
-    "Outreach Status",
-    "Status Updated",
 )
 
 
@@ -205,37 +203,53 @@ def _apply_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
         conn.close()
 
 
-def _pull_status_from_jobs(
-    company_rows: dict[str, dict[str, str]], by_row: dict[str, list[dict[str, str]]]
-) -> int:
-    """Outreach Status edited in the Jobs tab → the company row (and from there
-    to all of its jobs).
-
-    A job's status counts as an edit when it differs from the company's status
-    at the end of the last run. If the company row was edited too, the
-    Companies tab wins. Returns the number of companies updated.
-    """
+def _apply_job_status_tracking(rows: list[dict[str, str]], today_s: str) -> None:
+    """Each job has its own Outreach Status (edited in the Jobs tab). Stamps
+    "Status Updated" when a job's status was changed by hand."""
     conn = _status_db()
     try:
-        last = {k: s for k, s in conn.execute("SELECT company_key, status FROM company_status")}
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_status ("
+            "job_link TEXT PRIMARY KEY, status TEXT NOT NULL, status_updated TEXT NOT NULL)"
+        )
+        known = {k: (s, u) for k, s, u in conn.execute("SELECT job_link, status, status_updated FROM job_status")}
+        changes = []
+        for row in rows:
+            link = (row.get("Job Link") or "").strip()
+            status = (row.get("Outreach Status") or "").strip() or NOT_SENT
+            row["Outreach Status"] = status
+            updated = (row.get("Status Updated") or "").strip()
+            prev = known.get(link)
+            if prev is None:
+                if not updated:
+                    row["Status Updated"] = today_s
+            elif status != prev[0] and updated == prev[1]:
+                row["Status Updated"] = today_s  # status edited by hand, date not
+            if link:
+                changes.append((link, row["Outreach Status"], row.get("Status Updated", "")))
+        conn.executemany(
+            "INSERT INTO job_status (job_link, status, status_updated) VALUES (?, ?, ?) "
+            "ON CONFLICT(job_link) DO UPDATE SET status=excluded.status, status_updated=excluded.status_updated",
+            changes,
+        )
+        conn.commit()
     finally:
         conn.close()
+
+
+def _company_status_from_jobs(company: dict[str, str], jobs: list[dict[str, str]]) -> None:
+    """Companies tab: the furthest-along status among the company's open jobs,
+    so it is clear at a glance whether anyone has been contacted. When none of
+    the open jobs has been worked on, the company keeps its last status (the
+    outreach history, also used by the weekly file for returning companies)."""
     order = {s: i for i, s in enumerate(OUTREACH_STATUSES)}
-    updated = 0
-    for rk, row in company_rows.items():
-        prev = last.get(rk)
-        if prev is None or (row.get("Outreach Status") or "").strip() != prev:
-            continue  # new company, or edited in Companies (that edit wins)
-        edits = {
-            (j.get("Outreach Status") or "").strip()
-            for j in by_row.get(rk, [])
-            if (j.get("Outreach Status") or "").strip() not in ("", prev)
-        }
-        if edits:
-            # Several different edits: keep the furthest along the outreach.
-            row["Outreach Status"] = max(edits, key=lambda s: order.get(s, -1))
-            updated += 1
-    return updated
+    worked = [j for j in jobs if (j.get("Outreach Status") or "").strip() not in ("", NOT_SENT)]
+    if not worked:
+        return
+    best = max(worked, key=lambda j: (order.get(j["Outreach Status"].strip(), -1),
+                                      parse_date(j.get("Status Updated", "")) or date.min))
+    company["Outreach Status"] = best["Outreach Status"].strip()
+    company["Status Updated"] = best.get("Status Updated", "")
 
 
 # ---------------------------------------------------------------------------
@@ -526,10 +540,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     for row in kept:
         status = statuses.get(row.get("Job Link", "").strip(), "unknown")
         if status == "closed":
-            company = company_rows.get(_job_row_key(row), {})
-            archived.append(
-                {**row, "Closed Date": today_s, "Outreach Status": company.get("Outreach Status", "")}
-            )
+            archived.append({**row, "Closed Date": today_s})
             continue
         if status == "open":
             row["Last Checked"] = today_s
@@ -549,6 +560,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     for lead in leads:
         row = {k: str(v) for k, v in lead.model_dump(by_alias=True).items()}
         row["Last Checked"] = today_s
+        row["Outreach Status"] = NOT_SENT
         new_rows.append(row)
     jobs.rows = open_rows + new_rows
 
@@ -756,7 +768,9 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
 
     # 5. Status tracking, ordering, write back. Companies without open jobs
     #    move to the Companies Archive tab (and come back when they post again).
-    status_from_jobs = _pull_status_from_jobs(company_rows, by_row)
+    _apply_job_status_tracking(jobs.rows, today_s)
+    for rk, company in company_rows.items():
+        _company_status_from_jobs(company, by_row.get(rk, []))
     rows = list(company_rows.values())
     _apply_status_tracking(rows, today_s)
     order = {YES: 0, UNKNOWN: 1, NO: 2}
@@ -792,11 +806,9 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     store.write(TAB_COMPANIES, companies)
     if other_companies.rows or store.read(TAB_OTHER_COMPANIES) is not None:
         store.write(TAB_OTHER_COMPANIES, other_companies)
-    store.set_dropdown(TAB_COMPANIES, "Outreach Status", OUTREACH_STATUSES)
     store.set_dropdown(jobs_tab(), "Outreach Status", OUTREACH_STATUSES)
     if companies_archive.rows or store.read(TAB_COMPANIES_ARCHIVE) is not None:
         store.write(TAB_COMPANIES_ARCHIVE, companies_archive)
-        store.set_dropdown(TAB_COMPANIES_ARCHIVE, "Outreach Status", OUTREACH_STATUSES)
     if archived:
         archive = store.read(TAB_ARCHIVE) or Table(headers=[])
         archive.ensure_headers(ARCHIVE_HEADERS)
@@ -820,7 +832,6 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
             "companies_waiting_for_budget": skipped_for_budget,
             "contacts_searched": contacts_searched,
             "contacts_found": contacts_found,
-            "statuses_from_jobs_tab": status_from_jobs,
             "searches_used": getattr(search, "used", 0) if search is not None else 0,
             "searches_by_provider": dict(getattr(search, "by_provider", {}) or {}),
             "empty_searches": empty_searches,

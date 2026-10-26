@@ -352,7 +352,7 @@ class AgentRunTests(unittest.TestCase):
         # Size unknown → contacts are still searched (none in the fake results here).
         self.assertEqual(companies["StillOpen"]["Contact Name"], "לא נמצא")
         self.assertEqual(list(companies)[:2], ["Acme", "BigBank"])  # targets first
-        self.assertEqual(store.dropdowns["Companies"][0], "Outreach Status")
+        self.assertEqual(store.dropdowns["Sheet1"][0], "Outreach Status")
 
         # --- Weekly file ---
         summary_w = asyncio.run(lead_agent.weekly(store, today=TODAY))
@@ -396,7 +396,7 @@ class AgentRunTests(unittest.TestCase):
         self.assertEqual(returning["Previous Outreach"], "פולואפ נשלח, 27/10/2026")
         self.assertEqual(len(store.highlights["Weekly"]), 1)
 
-    def test_status_edited_in_jobs_tab(self) -> None:
+    def test_status_per_job(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
         jobs = [{"company_name": "Acme", "job_title": "Backend Developer", "job_link": "https://li/a1", "source": "LinkedIn"},
                 {"company_name": "Acme", "job_title": "Frontend Developer", "job_link": "https://li/a2", "source": "LinkedIn"}]
@@ -417,33 +417,24 @@ class AgentRunTests(unittest.TestCase):
                 return asyncio.run(lead_agent.run(store, None, scrape=scrape,
                                                   check=mock.AsyncMock(return_value={}), today=day))
 
-        def statuses():
-            return ({r["Job Link"]: r["Outreach Status"] for r in store.read("Sheet1").rows},
-                    store.read("Companies").rows[0]["Outreach Status"])
-
         run(TODAY)
-        # Someone updates one job in the Jobs tab.
-        t = store.read("Sheet1")
-        t.rows[0]["Outreach Status"] = "הודעה ראשונה נשלחה"
-        store.write("Sheet1", t)
-        summary = run(date(2026, 10, 27))
-        self.assertEqual(summary["statuses_from_jobs_tab"], 1)
-        by_job, company = statuses()
-        self.assertEqual(company, "הודעה ראשונה נשלחה")
-        self.assertEqual(set(by_job.values()), {"הודעה ראשונה נשלחה"})  # copied to the other job too
-        self.assertEqual(store.read("Companies").rows[0]["Status Updated"], "27/10/2026")
+        rows = {r["Job Link"]: r for r in store.read("Sheet1").rows}
+        self.assertEqual({r["Outreach Status"] for r in rows.values()}, {"לא נשלח"})
 
-        # Edited in both places: Companies wins.
+        # One job is updated in the Jobs tab: only that job changes.
         t = store.read("Sheet1")
-        t.rows[0]["Outreach Status"] = "ענה: שלילי"
+        for r in t.rows:
+            if r["Job Link"] == "https://li/a1":
+                r["Outreach Status"] = "הודעה ראשונה נשלחה"
         store.write("Sheet1", t)
-        c = store.read("Companies")
-        c.rows[0]["Outreach Status"] = "פולואפ נשלח"
-        store.write("Companies", c)
-        run(date(2026, 10, 29))
-        by_job, company = statuses()
-        self.assertEqual(company, "פולואפ נשלח")
-        self.assertEqual(set(by_job.values()), {"פולואפ נשלח"})
+        run(date(2026, 10, 27))
+        rows = {r["Job Link"]: r for r in store.read("Sheet1").rows}
+        self.assertEqual(rows["https://li/a1"]["Outreach Status"], "הודעה ראשונה נשלחה")
+        self.assertEqual(rows["https://li/a1"]["Status Updated"], "27/10/2026")
+        self.assertEqual(rows["https://li/a2"]["Outreach Status"], "לא נשלח")
+        # Companies shows the furthest-along status of its jobs.
+        company = store.read("Companies").rows[0]
+        self.assertEqual((company["Outreach Status"], company["Status Updated"]), ("הודעה ראשונה נשלחה", "27/10/2026"))
 
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
@@ -737,7 +728,9 @@ class StatusMirrorTests(unittest.TestCase):
     def test_status_updated_in_jobs(self) -> None:
         from services.lead_sheet import JOB_HEADERS
         self.assertIn("Status Updated", JOB_HEADERS)
-        self.assertIn("Status Updated", lead_agent.MIRRORED_COLUMNS)
+        # Each job has its own status: not copied from the company row.
+        self.assertNotIn("Outreach Status", lead_agent.MIRRORED_COLUMNS)
+        self.assertNotIn("Status Updated", lead_agent.MIRRORED_COLUMNS)
 
 
 class SmallTestRunTests(unittest.TestCase):

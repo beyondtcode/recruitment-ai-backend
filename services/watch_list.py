@@ -126,12 +126,19 @@ _ID_PATTERNS = [
 
 
 def parse_company_id(html: str) -> str:
-    """Numeric LinkedIn company id from a public company page, or ''."""
-    counts: dict[str, int] = {}
+    """Numeric LinkedIn company id from a public company page, or ''.
+
+    Patterns are tried in order of reliability (the page's own "see jobs" link
+    first); the page also lists similar companies, so a later pattern is only
+    used when the earlier ones find nothing.
+    """
     for pattern in _ID_PATTERNS:
+        counts: dict[str, int] = {}
         for m in pattern.finditer(html or ""):
             counts[m.group(1)] = counts.get(m.group(1), 0) + 1
-    return max(counts, key=counts.get) if counts else ""
+        if counts:
+            return max(counts, key=counts.get)
+    return ""
 
 
 def _ids_path() -> str:
@@ -203,21 +210,22 @@ async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], lis
             if cid:
                 ids[company.slug] = cid
                 ids_changed = True
+        found: list[dict] = []
+        how = "name search"
         if cid:
-            # Company filter: every result is the company's own job, so page through all.
-            url, how = company_jobs_url(cid), f"company id {cid}"
-            token = LINKEDIN_MAX_JOBS_OVERRIDE.set(None)
-        else:
-            # Keyword fallback: unrelated jobs follow the company's own, first page only.
-            url, how = search_url(company), "name search"
-            token = LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
-        try:
-            found = [j for j in await scrape_one(url, "LinkedIn") if belongs_to(j, company) or cid]
-        except Exception:
-            logger.warning("watch_list: search failed for %s", company.name, exc_info=True)
-            found = []
-        finally:
-            LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
+            # Company filter: page through all of the company's jobs.
+            found = await _search(scrape_one, company_jobs_url(cid), company, None, by_id=True)
+            how = f"company id {cid}"
+        if not found:
+            # Name search (also the check for a wrong or stale id): unrelated
+            # jobs follow the company's own, so first page only.
+            found = await _search(scrape_one, search_url(company), company, 0, by_id=False)
+            if cid:
+                how = f"company id {cid} found nothing → name search"
+                if found:
+                    # The id gave nothing but the name did: the id is wrong.
+                    ids.pop(company.slug, None)
+                    ids_changed = True
         for j in found:
             j["watch"] = "1"
         jobs.extend(found)
@@ -227,3 +235,21 @@ async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], lis
     if ids_changed:
         _save_ids(ids)
     return jobs, empty
+
+
+async def _search(scrape_one, url: str, company: WatchCompany, max_jobs: int | None, *, by_id: bool) -> list[dict]:
+    from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE
+
+    token = LINKEDIN_MAX_JOBS_OVERRIDE.set(max_jobs)
+    try:
+        jobs = await scrape_one(url, "LinkedIn")
+    except Exception:
+        logger.warning("watch_list: search failed for %s", company.name, exc_info=True)
+        return []
+    finally:
+        LINKEDIN_MAX_JOBS_OVERRIDE.reset(token)
+    if by_id:
+        # Results of a company filter are the company's own jobs; keep a
+        # sanity check on the company name when the card carries a link.
+        return [j for j in jobs if belongs_to(j, company) or not j.get("company_link")]
+    return [j for j in jobs if belongs_to(j, company)]

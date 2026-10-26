@@ -883,6 +883,34 @@ class WatchListTests(unittest.TestCase):
         tmp.cleanup()
         self.assertEqual(id_calls, ["cyera", "nameless"])
 
+    def test_company_id_falls_back_to_name_search(self) -> None:
+        from services import watch_list as wl
+
+        self.assertEqual(wl.parse_company_id('urn:li:organization:5 urn:li:organization:5 <a href="/jobs?f_C=42">'), "42")
+        cyera = wl.WatchCompany("Cyera", "https://www.linkedin.com/company/cyera/")
+        urls = []
+
+        async def scrape_one(url, source):
+            urls.append(url)
+            if "f_C=" in url:
+                return []  # wrong / useless id
+            return [{"company_name": "Cyera", "job_link": "https://li/1",
+                     "company_link": "https://il.linkedin.com/company/cyera"}]
+
+        async def get_id(company):
+            return "999"
+
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "ids.json")
+        with mock.patch.dict(os.environ, {"LEADS_WATCH_IDS": path}), \
+                mock.patch.object(wl, "SEARCH_PAUSE_SECONDS", 0):
+            jobs, empty = asyncio.run(wl._scrape(wl.WatchList([cyera]), scrape_one, get_id))
+            self.assertEqual([j["job_link"] for j in jobs], ["https://li/1"])
+            self.assertEqual(empty, [])
+            self.assertEqual(len(urls), 2)
+            self.assertNotIn("cyera", wl._load_ids())  # wrong id dropped
+        tmp.cleanup()
+
     def test_watch_list_seeded(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})

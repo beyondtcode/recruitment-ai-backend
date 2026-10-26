@@ -287,6 +287,35 @@ class KnownLinksStopTests(unittest.TestCase):
         self.assertEqual(extra.count("base-search-card__title"), 10)
         self.assertIn("https://il.linkedin.com/jobs/view/job-3", known)  # found this run → known
 
+class CompanyFilterEmptyPageTests(unittest.TestCase):
+    def test_force_pages_an_empty_first_page(self) -> None:
+        from services import scraper
+        card = '<li><div class="base-card base-search-card"><h3 class="base-search-card__title">X</h3></div></li>'
+
+        class Resp:
+            def __init__(self, text):
+                self.status, self._text = 200, text
+
+            def text(self):
+                return self._text
+
+        pages = [Resp(card * 4), Resp("")]
+        calls = []
+
+        class Ctx:
+            class request:
+                @staticmethod
+                def get(url, timeout=0):
+                    calls.append(url)
+                    return pages.pop(0)
+
+        url = "https://www.linkedin.com/jobs/search?location=Israel&geoId=101620260&f_C=1"
+        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+            self.assertEqual(scraper._linkedin_more_pages(Ctx, url, ""), "")  # not forced: nothing
+            extra = scraper._linkedin_more_pages(Ctx, url, "", force=True)
+        self.assertEqual(extra.count("base-search-card__title"), 4)
+        self.assertTrue(calls[0].endswith("f_C=1&start=0"))
+
 class LookbackTests(unittest.TestCase):
     def test_with_lookback(self) -> None:
         from services.job_sources import LEAD_SEARCHES, with_lookback

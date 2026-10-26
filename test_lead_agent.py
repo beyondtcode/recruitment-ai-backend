@@ -1091,7 +1091,7 @@ class WatchListTests(unittest.TestCase):
             jobs, empty = asyncio.run(wl._scrape(wl.WatchList([cyera, other]), scrape_one, get_id))
             self.assertEqual([j["job_link"] for j in jobs], ["https://li/1"])
             self.assertEqual(empty, ["Nameless"])
-            self.assertEqual(urls[0], ("https://www.linkedin.com/jobs/search?location=Israel&f_C=777", None))
+            self.assertEqual(urls[0], ("https://www.linkedin.com/jobs/search?location=Israel&geoId=101620260&f_C=777", None))
             self.assertIn("keywords=", urls[1][0])
             self.assertEqual(urls[1][1], 0)  # name search: first page only
             # Second run: the id comes from the cache.

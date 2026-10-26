@@ -206,7 +206,8 @@ async def fetch_company_id(company: WatchCompany) -> str:
 
 def company_jobs_url(company_id: str) -> str:
     """All of the company's open jobs in Israel."""
-    return f"https://www.linkedin.com/jobs/search?location=Israel&f_C={company_id}"
+    # geoId 101620260 = Israel (more reliable than the location text with f_C).
+    return f"https://www.linkedin.com/jobs/search?location=Israel&geoId=101620260&f_C={company_id}"
 
 
 async def scrape_watch_list(watch: WatchList) -> tuple[list[dict], list[str]]:

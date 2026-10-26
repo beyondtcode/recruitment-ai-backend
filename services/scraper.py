@@ -887,7 +887,7 @@ def linkedin_more_url(search_url: str, start: int) -> str:
     return f"{LINKEDIN_MORE_API}?{query}&start={start}"
 
 
-def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
+def _linkedin_more_pages(context: Any, url: str, first_html: str, *, force: bool = False) -> str:
     """LinkedIn's guest page shows only the first ~60 jobs; fetch the rest.
 
     Uses the guest pagination API (same search, ``start`` offset) until it
@@ -902,7 +902,7 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str) -> str:
     if override is not None:
         max_jobs = override  # 0 = first page only
     count = first_html.count("base-search-card__title")
-    if count == 0 or count >= max_jobs:
+    if (count == 0 and not force) or count >= max_jobs:
         return ""
     known = KNOWN_JOB_LINKS.get()
     if known is not None:
@@ -982,6 +982,11 @@ def _fetch_listing_playwright_sync(
                     config.source,
                     url,
                 )
+                if is_linkedin and "f_C=" in url:
+                    # A company filter can show an empty first page while the
+                    # jobs API still has the company's jobs.
+                    html = _linkedin_more_pages(context, url, "", force=True)
+                    return html, 1 if html else 0
                 return "", 0
 
             if is_linkedin:

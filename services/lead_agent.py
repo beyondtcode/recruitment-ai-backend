@@ -14,7 +14,7 @@ Env vars:
   LEADS_MAX_CONTACT_ENRICH (default 0 = no limit) — contact lookups per run
   (the paid-search budget, LEADS_MAX_SEARCHES_PER_RUN, still applies)
   LEADS_ENRICH_REFRESH_DAYS (default 90) — re-check size/type after N days
-  LEADS_MAX_LINK_CHECKS (default 200)    — job links checked for "closed" per run
+  LEADS_MAX_LINK_CHECKS (default 0 = all) — job links checked for "closed" per run
   LEADS_CONTACT_REFRESH_DAYS (default 60) — re-check a contact when a new job appears after N days
 """
 
@@ -432,11 +432,10 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         else:
             kept.append(row)
 
-    # Check the jobs that were checked longest ago first (never-checked first),
-    # capped per run so a big backlog is worked through over several runs.
+    # Check every open job each run (longest-unchecked first, in case a cap is set).
     checkable = [r for r in kept if r.get("Job Link", "").strip().startswith("http")]
     checkable.sort(key=lambda r: parse_date(r.get("Last Checked", "")) or date.min)
-    links = [r["Job Link"].strip() for r in checkable[: _env_int("LEADS_MAX_LINK_CHECKS", 200)]]
+    links = [r["Job Link"].strip() for r in checkable[: _env_int("LEADS_MAX_LINK_CHECKS", 0) or None]]
     statuses = await check(links) if links else {}
     open_rows: list[dict[str, str]] = []
     archived: list[dict[str, str]] = []

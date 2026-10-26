@@ -137,7 +137,20 @@ class ContactTests(unittest.TestCase):
             primary, alt = asyncio.run(cc.find_contacts("Acme", "dev", "Backend", search))
         self.assertEqual(primary.name, "Dana Levi")
         self.assertIsNone(alt)  # recruiter rejected
-        self.assertEqual(search.used, 2)  # CEO fallback skipped: 2 people already found
+        self.assertEqual(search.used, 1)  # one combined query was enough
+
+    def test_contact_search_uses_at_most_three_queries(self) -> None:
+        provider = FakeProvider({})  # nobody found anywhere
+        search = BudgetedSearch([provider], budget=10)
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"primary": None, "alternate": None}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            self.assertEqual(asyncio.run(cc.find_contacts("Acme - Payments", "dev", "", search)), (None, None))
+        self.assertEqual(search.used, 3)
+        self.assertIn("CTO OR", provider.queries[0])
+        self.assertTrue(provider.queries[2].startswith("Acme "))
 
     def test_invented_url_rejected(self) -> None:
         search = BudgetedSearch([FakeProvider({"": [SearchResult("A - CTO", "https://il.linkedin.com/in/a", "")]})], 10)

@@ -970,6 +970,13 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         }
     )
     summary.update(await _quota_status(search))
+    # The weekly file is built by the first run of each week (Sunday, or the
+    # next run after it), so no separate schedule is needed.
+    summary["weekly_built"] = False
+    if _weekly_due(today):
+        summary["weekly"] = _weekly(store, today)
+        summary["weekly_built"] = True
+        _mark_weekly_built(today)
     logger.info("lead_agent: run summary %s", summary)
     return summary
 
@@ -999,9 +1006,39 @@ def _contact_text(name: str, title: str) -> str:
     return f"{name} — {title}".strip(" —") if title else name
 
 
+def _last_sunday(today: date) -> date:
+    return today - timedelta(days=(today.weekday() + 1) % 7)  # Monday=0 … Sunday=6
+
+
+def _weekly_due(today: date) -> bool:
+    conn = _status_db()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = conn.execute("SELECT value FROM kv WHERE name = 'weekly_built'").fetchone()
+    finally:
+        conn.close()
+    last = parse_date(row[0]) if row else None
+    return last is None or last < _last_sunday(today)
+
+
+def _mark_weekly_built(today: date) -> None:
+    conn = _status_db()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT OR REPLACE INTO kv (name, value) VALUES ('weekly_built', ?)",
+                     (today.strftime("%d/%m/%Y"),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def weekly(store: SheetStore, *, today: date | None = None) -> dict[str, Any]:
+    """Build the weekly file now (also done automatically by the week's first run)."""
+    today = today or today_israel()
     async with _agent_lock:
-        return _weekly(store, today or today_israel())
+        summary = _weekly(store, today)
+        _mark_weekly_built(today)
+        return summary
 
 
 def _weekly(store: SheetStore, today: date) -> dict[str, Any]:

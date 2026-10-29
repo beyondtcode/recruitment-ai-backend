@@ -54,7 +54,7 @@ from services.lead_filters import (
     today_israel,
 )
 from services.lead_pipeline import run_lead_pipeline, scrape_all_raw
-from services.scraper import KNOWN_JOB_LINKS
+from services.scraper import KNOWN_JOB_LINKS, close_shared_browser
 from services.lead_sheet import (
     ARCHIVE_HEADERS,
     BLOCKED_HEADERS,
@@ -587,11 +587,14 @@ async def run(
     if lookback_days and scrape is scrape_all_raw:
         scrape = lambda: scrape_all_raw(lookback_days)  # noqa: E731 — one-time backfill
     async with _agent_lock:
-        return await _run(
-            store, search, scrape=scrape, check=check,
-            scrape_watch=scrape_watch or (lambda w: scrape_watch_list(w)),
-            today=today or today_israel(),
-        )
+        try:
+            return await _run(
+                store, search, scrape=scrape, check=check,
+                scrape_watch=scrape_watch or (lambda w: scrape_watch_list(w)),
+                today=today or today_israel(),
+            )
+        finally:
+            await close_shared_browser()  # free the browser's memory between runs
 
 
 async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> dict[str, Any]:

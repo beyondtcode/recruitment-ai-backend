@@ -195,7 +195,9 @@ async def fetch_company_id(company: WatchCompany) -> str:
     url = f"https://www.linkedin.com/company/{company.slug}/"
     async with ce._linkedin_lock:
         try:
-            html = await asyncio.to_thread(ce._fetch_company_playwright_sync, url)
+            from services.scraper import run_in_browser_thread
+
+            html = await run_in_browser_thread(ce._fetch_company_playwright_sync, url)
         except Exception:
             logger.info("watch_list: company page fetch failed for %s", url, exc_info=True)
             html = ""

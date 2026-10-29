@@ -252,11 +252,10 @@ LINKEDIN_PAUSE_SECONDS = 1.5
 def _fetch_company_playwright_sync(url: str, timeout_ms: int = 30000) -> str:
     """Render the public company page in headless Chromium (LinkedIn answers
     plain HTTP clients with 403 but usually serves the guest page to a browser)."""
-    from services.scraper import BROWSER_USER_AGENT, _import_playwright_sync
+    from services.scraper import BROWSER_USER_AGENT, _browser_session
 
-    sync_playwright = _import_playwright_sync()
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+    with _browser_session() as browser:
+        context = None
         try:
             context = browser.new_context(user_agent=BROWSER_USER_AGENT, locale="en-US")
             context.add_init_script(
@@ -273,7 +272,8 @@ def _fetch_company_playwright_sync(url: str, timeout_ms: int = 30000) -> str:
                 return ""
             return page.content()
         finally:
-            browser.close()
+            if context is not None:
+                context.close()
 
 
 async def fetch_linkedin_company(url: str) -> LinkedInPage | None:
@@ -299,7 +299,9 @@ async def fetch_linkedin_company(url: str) -> LinkedInPage | None:
             page = parse_linkedin_company_page(html) if html else None
             if page is None or page.size == UNKNOWN:
                 try:
-                    html = await asyncio.to_thread(_fetch_company_playwright_sync, url)
+                    from services.scraper import run_in_browser_thread
+
+                    html = await run_in_browser_thread(_fetch_company_playwright_sync, url)
                 except Exception:
                     logger.info("company_enrichment: browser fetch failed for %s", url, exc_info=True)
                     html = ""

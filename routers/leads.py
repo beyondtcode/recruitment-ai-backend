@@ -26,6 +26,7 @@ from services.lead_pipeline import (
     scrape_all_raw,
     scrape_one,
 )
+from services.job_sources import LEAD_SEARCHES
 from services.lead_sheet import get_sheet_store
 from services.scraper import LINKEDIN_DEFAULT_URL
 from services.search_client import get_search_client
@@ -79,22 +80,62 @@ def _check_token(token: str | None) -> None:
 async def run_agent(
     x_leads_token: str | None = Header(default=None),
     lookback_days: int | None = Query(default=None, ge=1, le=30),
+    mode: str | None = Query(default=None, pattern="^(quick|watch|searches)$"),
+    search: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Full every-2-days run. Writes the sheet and returns a summary for Slack.
 
     ``?lookback_days=30`` = one-time backfill: searches look back that many days
     instead of 3 (and LinkedIn pages deeper). Leave it off for scheduled runs.
+
+    Short test runs (same processing and sheet writes, less input; existing
+    links are not re-checked and the weekly file is not built):
+    ``?mode=quick``     the first 3 searches, no watch list (a few minutes);
+    ``?mode=watch``     the watch list only;
+    ``?mode=searches&search=Backend,QA``  only the named searches.
     """
     _check_token(x_leads_token)
-    search = get_search_client()
-    if search is None:
+    client = get_search_client()
+    if client is None:
         logger.warning("leads/run: no TAVILY_API_KEY or SERPER_API_KEY — company data from LinkedIn pages / the LLM only, no contacts")
+    if mode:
+        summary = await _test_run(client, mode, search)
+        summary["test_mode"] = mode
+        return summary
     if lookback_days:
         logger.info("leads/run: one-time backfill, looking back %d days", lookback_days)
-    summary = await lead_agent.run(_store(), search, lookback_days=lookback_days)
+    summary = await lead_agent.run(_store(), client, lookback_days=lookback_days)
     if lookback_days:
         summary["lookback_days"] = lookback_days
     return summary
+
+
+async def _no_check(urls: list[str]) -> dict[str, str]:
+    return {}
+
+
+async def _no_scrape() -> tuple[list[dict], list[str]]:
+    return [], []
+
+
+async def _no_watch(watch) -> tuple[list[dict], list[str]]:
+    return [], []
+
+
+async def _test_run(client, mode: str, names: str | None) -> dict[str, Any]:
+    logger.info("leads/run: test run mode=%s search=%s", mode, names)
+    if mode == "quick":
+        labels = [f"{board} / {label}" for board, label, _u in LEAD_SEARCHES[:3]]
+        scrape, watch = (lambda: scrape_all_raw(only=labels)), _no_watch
+    elif mode == "watch":
+        scrape, watch = _no_scrape, None
+    else:
+        wanted = [n for n in (names or "").split(",") if n.strip()]
+        if not wanted:
+            raise HTTPException(status_code=400, detail="mode=searches needs ?search=Label1,Label2")
+        scrape, watch = (lambda: scrape_all_raw(only=wanted)), _no_watch
+    return await lead_agent.run(_store(), client, scrape=scrape, check=_no_check,
+                                scrape_watch=watch, weekly_file=False)
 
 
 @router.api_route("/weekly", methods=["GET", "POST"])

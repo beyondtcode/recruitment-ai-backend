@@ -206,6 +206,59 @@ async def fetch_company_id(company: WatchCompany) -> str:
     return parse_company_id(html)
 
 
+LINKEDIN_JOBS_API = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+_API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/131.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+COMPANY_API_MAX_JOBS = 200
+
+
+async def fetch_company_jobs(company_id: str) -> list[dict]:
+    """All of a company's open jobs in Israel, straight from LinkedIn's guest
+    jobs API (company filter + Israel geoId), page by page.
+
+    The rendered search page for a company filter often showed only a few of
+    the company's jobs (Wonderful: 2 of 15); the API returns them all.
+    Title-prefiltered like the regular searches.
+    """
+    import httpx
+
+    from services.lead_filters import passes_title_prefilter
+    from services.scraper import BOARD_CONFIGS, filter_jobs, parse_job_cards
+
+    config = BOARD_CONFIGS["LinkedIn"]
+    raw: list[dict] = []
+    start, retries = 0, 0
+    async with httpx.AsyncClient(headers=_API_HEADERS, timeout=20.0, follow_redirects=True) as client:
+        while start < COMPANY_API_MAX_JOBS:
+            url = f"{LINKEDIN_JOBS_API}?location=Israel&geoId=101620260&f_C={company_id}&start={start}"
+            try:
+                resp = await client.get(url)
+            except httpx.HTTPError:
+                logger.warning("watch_list: jobs API failed for company %s", company_id, exc_info=True)
+                break
+            if resp.status_code == 429 and retries < 2:
+                retries += 1
+                await asyncio.sleep(5)
+                continue
+            if resp.status_code != 200:
+                break
+            jobs = parse_job_cards(resp.text, config)
+            if not jobs:
+                break
+            raw.extend(jobs)
+            start += resp.text.count("base-search-card__title") or len(jobs)
+            await asyncio.sleep(1.0)
+    for job in raw:
+        job["source"] = "LinkedIn"
+    unique = list({j["job_link"]: j for j in raw if j.get("job_link")}.values())
+    kept = filter_jobs(unique, passes_title_prefilter)
+    logger.info("watch_list: jobs API company %s → %d jobs, %d after title filter", company_id, len(unique), len(kept))
+    return kept
+
+
 def company_jobs_url(company_id: str) -> str:
     """All of the company's open jobs in Israel."""
     # geoId 101620260 = Israel (more reliable than the location text with f_C).
@@ -216,10 +269,10 @@ async def scrape_watch_list(watch: WatchList) -> tuple[list[dict], list[str]]:
     """Open jobs of every watch-list company. Returns (jobs, companies with none found)."""
     from services.lead_pipeline import scrape_one
 
-    return await _scrape(watch, scrape_one, fetch_company_id)
+    return await _scrape(watch, scrape_one, fetch_company_id, fetch_company_jobs)
 
 
-async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], list[str]]:
+async def _scrape(watch: WatchList, scrape_one, get_id, company_jobs=None) -> tuple[list[dict], list[str]]:
     from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE
 
     ids = _load_ids()
@@ -240,7 +293,15 @@ async def _scrape(watch: WatchList, scrape_one, get_id) -> tuple[list[dict], lis
         # alone finds everything (Cyera: 1 by id, 13 by name).
         by_id: list[dict] = []
         if cid:
-            by_id = await _search(scrape_one, company_jobs_url(cid), company, None, by_id=True)
+            if company_jobs is not None:
+                try:
+                    by_id = [j for j in await company_jobs(cid)
+                             if belongs_to(j, company) or not j.get("company_link")]
+                except Exception:
+                    logger.warning("watch_list: company jobs failed for %s", company.name, exc_info=True)
+                    by_id = []
+            else:
+                by_id = await _search(scrape_one, company_jobs_url(cid), company, None, by_id=True)
         by_name = await _search(scrape_one, search_url(company), company, 0, by_id=False)
         found, seen_links = [], set()
         for j in by_id + by_name:

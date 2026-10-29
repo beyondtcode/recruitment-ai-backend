@@ -1178,6 +1178,54 @@ class WatchListTests(unittest.TestCase):
         tmp.cleanup()
         self.assertEqual([j["job_link"] for j in jobs], ["https://li/a", "https://li/b"])
 
+    def test_company_jobs_from_api(self) -> None:
+        import httpx
+        from services import watch_list as wl
+
+        def card(i, title):
+            return (f'<li><div class="base-card base-search-card"><a class="base-card__full-link" '
+                    f'href="https://il.linkedin.com/jobs/view/job-{i}?refId=x"></a>'
+                    f'<h3 class="base-search-card__title">{title}</h3>'
+                    f'<h4 class="base-search-card__subtitle"><a href="https://nl.linkedin.com/company/wonderfulai?trk=x">Wonderful</a></h4>'
+                    f'</div></li>')
+
+        pages = {0: card(1, "Forward Deployed Engineer") + card(2, "Senior Product Manager"),
+                 2: card(3, "Senior Product Engineer"), 3: ""}
+        seen = []
+
+        def handler(request):
+            start = int(request.url.params["start"])
+            seen.append((request.url.params["f_C"], request.url.params["geoId"], start))
+            return httpx.Response(200, text=pages.get(start, ""))
+
+        real_client = httpx.AsyncClient
+        with mock.patch.object(httpx, "AsyncClient",
+                               lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)), \
+                mock.patch.object(wl.asyncio, "sleep", mock.AsyncMock()):
+            jobs = asyncio.run(wl.fetch_company_jobs("106168221"))
+        self.assertEqual(sorted(j["job_title"] for j in jobs), ["Forward Deployed Engineer", "Senior Product Engineer"])
+        self.assertEqual([x[2] for x in seen], [0, 2, 3])
+        self.assertEqual(seen[0][:2], ("106168221", "101620260"))
+
+        wonderful = wl.WatchCompany("Wonderful", "https://www.linkedin.com/company/wonderfulai/")
+
+        async def scrape_one(url, source):
+            return []
+
+        async def get_id(company):
+            return "106168221"
+
+        async def company_jobs(cid):
+            return list(jobs)
+
+        tmp = tempfile.TemporaryDirectory()
+        with mock.patch.dict(os.environ, {"LEADS_WATCH_IDS": os.path.join(tmp.name, "ids.json")}), \
+                mock.patch.object(wl, "SEARCH_PAUSE_SECONDS", 0):
+            found, empty = asyncio.run(wl._scrape(wl.WatchList([wonderful]), scrape_one, get_id, company_jobs))
+        tmp.cleanup()
+        self.assertEqual(len(found), 2)
+        self.assertEqual(empty, [])
+
     def test_company_id_falls_back_to_name_search(self) -> None:
         from services import watch_list as wl
 

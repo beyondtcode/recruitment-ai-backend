@@ -1025,8 +1025,8 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
         contact = (company.get("Contact Name") or "").strip()
         if company.get("Target") != YES or key in do_not_contact or not company_jobs:
             continue
-        if not contact or contact == NOT_FOUND:
-            continue
+        # Companies without a contact yet are listed too (the contact cells say
+        # so), so every new fitting job reaches the weekly file.
         recently_open = any(
             (d := parse_date(j.get("Last Checked", ""))) and d >= week_ago
             or (f := parse_date(j.get("Found Date", ""))) and f >= week_ago
@@ -1060,7 +1060,8 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
                 "Outreach Status": (latest.get("Outreach Status") or "").strip() or NOT_SENT,
                 "Other Jobs": "; ".join(t for t in others if t),
                 "Outreach Phrasing": latest.get("Outreach Phrasing", ""),
-                "Contact": _contact_text(contact, company.get("Contact Title", "")),
+                "Contact": _contact_text(contact, company.get("Contact Title", "")) if contact and contact != NOT_FOUND
+                else "עוד לא נמצא איש קשר",
                 "Contact LinkedIn": company.get("Contact LinkedIn", ""),
                 "Alt Contact": _contact_text(company.get("Alt Contact Name", ""), company.get("Alt Contact Title", "")),
                 "Alt Contact LinkedIn": company.get("Alt Contact LinkedIn", ""),

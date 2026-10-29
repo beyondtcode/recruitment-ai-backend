@@ -349,7 +349,12 @@ class LookbackTests(unittest.TestCase):
             self.assertTrue(all("r2592000" in u and m == 1000 for u, m in seen))
             seen.clear()
             asyncio.run(go(None))
-            self.assertTrue(all("r259200" in u and "r2592000" not in u and m is None for u, m in seen))
+            # Default window: 5 days (runs twice a week).
+            self.assertTrue(all("r432000" in u and m is None for u, m in seen))
+            seen.clear()
+            with mock.patch.dict(os.environ, {"LEADS_LOOKBACK_DAYS": "3"}):
+                asyncio.run(go(None))
+            self.assertTrue(all("r259200" in u and "r2592000" not in u for u, _ in seen))
 
 
 class IsraeliBoardParsingTests(unittest.TestCase):

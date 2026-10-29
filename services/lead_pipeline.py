@@ -187,8 +187,9 @@ BACKFILL_LINKEDIN_MAX_JOBS = 1000
 async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], list[str]]:
     """Run every search in ``LEAD_SEARCHES``.
 
-    ``lookback_days`` (one-time backfill) widens each search's date window and
-    lets LinkedIn page deeper; normal runs use the 3-day window.
+    Each search looks back LEADS_LOOKBACK_DAYS (default 5: runs twice a week,
+    so the longest gap is 4 days plus a day of overlap). ``lookback_days`` (a
+    one-time backfill) overrides it and lets LinkedIn page deeper.
 
     Returns (jobs, labels of searches that failed or returned nothing). A search
     with zero results usually means the board changed its layout or blocked us.
@@ -203,8 +204,13 @@ async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], 
     if limit > 0:  # short test runs
         searches = searches[:limit]
     if lookback_days:
-        searches = [(b, l, with_lookback(u, lookback_days)) for b, l, u in searches]
         LINKEDIN_MAX_JOBS_OVERRIDE.set(BACKFILL_LINKEDIN_MAX_JOBS)
+    try:
+        window = lookback_days or int(os.environ.get("LEADS_LOOKBACK_DAYS") or 5)
+    except ValueError:
+        window = 5
+    if window != 3:  # the search URLs are written with a 3-day window
+        searches = [(b, l, with_lookback(u, window)) for b, l, u in searches]
     for i, (board, label, url) in enumerate(searches):
         if i:
             # Be gentle with the boards (LinkedIn rate-limits bursts of guest searches).

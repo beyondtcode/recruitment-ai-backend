@@ -517,6 +517,23 @@ class AgentRunTests(unittest.TestCase):
         main = {r["Job Link"]: r for r in store.read("Sheet1").rows}
         self.assertEqual(main["https://li/b3"]["Fit"], "מתאימה (Salesforce/monday)")
 
+    def test_weekly_lists_companies_without_contact(self) -> None:
+        store = MemoryStore({
+            "Companies": [["Company Name", "Target", "Outreach Status", "Outreach Track", "Contact Name", "Company Size"],
+                          ["Acme", "כן", "לא נשלח", "פיתוח", "לא נמצא", "51-200"],
+                          ["Beta", "כן", "לא נשלח", "פיתוח", "Dana", "51-200"]],
+            "Sheet1": [["Company Name", "Job Title", "Category", "Job Link", "Found Date", "Last Checked", "Outreach Status"],
+                       ["Acme", "Backend Developer", "Backend", "https://li/a", "26/10/2026", "26/10/2026", "לא נשלח"],
+                       ["Beta", "QA Engineer", "QA", "https://li/b", "26/10/2026", "26/10/2026", "לא נשלח"]],
+        })
+        tmp = tempfile.TemporaryDirectory()
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            summary = asyncio.run(lead_agent.weekly(store, today=date(2026, 10, 27)))
+        tmp.cleanup()
+        self.assertEqual(summary["new_companies"], 2)
+        rows = {r["Company Name"]: r for r in store.read("Weekly").rows}
+        self.assertEqual(rows["Acme"]["Contact"], "עוד לא נמצא איש קשר")
+
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
 

@@ -264,7 +264,7 @@ def _save_weekly_baseline(pairs: list[tuple[str, str]]) -> None:
 def _pull_weekly_edits(weekly: Table | None, job_rows: list[dict[str, str]], today_s: str = "") -> int:
     """Outreach Status edited in the Weekly tab → the same job in Jobs.
 
-    Each Weekly row stands for its "Latest Job Link". A Weekly status counts
+    Each Weekly row is one job (its "Job Link"). A Weekly status counts
     as an edit when it differs from what the agent last wrote there; if that
     job was also changed in Jobs since then, Jobs wins. Returns the number of
     jobs updated.
@@ -275,7 +275,7 @@ def _pull_weekly_edits(weekly: Table | None, job_rows: list[dict[str, str]], tod
     by_link = {(r.get("Job Link") or "").strip(): r for r in job_rows}
     updated = 0
     for w in weekly.rows:
-        link = (w.get("Latest Job Link") or "").strip()
+        link = (w.get("Job Link") or w.get("Latest Job Link") or "").strip()
         status = (w.get("Outreach Status") or "").strip()
         job = by_link.get(link)
         if job is None or not status:
@@ -300,7 +300,7 @@ def _refresh_weekly_statuses(store: SheetStore, job_rows: list[dict[str, str]]) 
     by_link = {(r.get("Job Link") or "").strip(): r for r in job_rows}
     pairs = []
     for w in weekly.rows:
-        link = (w.get("Latest Job Link") or "").strip()
+        link = (w.get("Job Link") or w.get("Latest Job Link") or "").strip()
         job = by_link.get(link)
         if job is not None:
             w["Outreach Status"] = (job.get("Outreach Status") or "").strip() or NOT_SENT
@@ -1013,59 +1013,47 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
     if _pull_weekly_edits(store.read(TAB_WEEKLY), jobs.rows, today.strftime("%d/%m/%Y")):
         store.write(jobs_tab(), jobs)
 
-    by_row: dict[str, list[dict[str, str]]] = {}
-    for row in jobs.rows:
-        by_row.setdefault(_job_row_key(row), []).append(row)
+    company_by_key = {_company_row_key(c): c for c in companies.rows}
 
+    # One row per job found in the last 7 days at a target company.
     new_rows: list[dict[str, str]] = []
     returning_rows: list[dict[str, str]] = []
-    for company in companies.rows:
-        key = _key(company.get("Company Name", ""))
-        company_jobs = by_row.get(_company_row_key(company), [])
+    recent = [
+        j for j in jobs.rows
+        if (f := parse_date(j.get("Found Date", ""))) and f >= week_ago
+    ]
+    recent.sort(key=lambda j: (_key(j.get("Company Name", "")),
+                               -(parse_date(j.get("Found Date", "")) or date.min).toordinal()))
+    for job in recent:
+        company = company_by_key.get(_job_row_key(job))
+        if company is None or company.get("Target") != YES:
+            continue
+        if _key(company.get("Company Name", "")) in do_not_contact:
+            continue
         contact = (company.get("Contact Name") or "").strip()
-        if company.get("Target") != YES or key in do_not_contact or not company_jobs:
-            continue
-        # Companies without a contact yet are listed too (the contact cells say
-        # so), so every new fitting job reaches the weekly file.
-        recently_open = any(
-            (d := parse_date(j.get("Last Checked", ""))) and d >= week_ago
-            or (f := parse_date(j.get("Found Date", ""))) and f >= week_ago
-            for j in company_jobs
-        )
-        if not recently_open:
-            continue
-
-        status = (company.get("Outreach Status") or "").strip() or NOT_SENT
-        status_date = parse_date(company.get("Status Updated", ""))
-        if status == NOT_SENT:
-            section = new_rows
-        else:
-            newer = [
-                j for j in company_jobs
-                if (f := parse_date(j.get("Found Date", ""))) and status_date and f > status_date
-            ]
-            if not newer:
-                continue
-            section = returning_rows
-
-        latest = _latest_job(company_jobs)
-        others = [j.get("Job Title", "") for j in company_jobs if j is not latest]
+        job_status = (job.get("Outreach Status") or "").strip() or NOT_SENT
+        company_status = (company.get("Outreach Status") or "").strip() or NOT_SENT
+        # Contacted before through another job → listed below, highlighted.
+        contacted_before = company_status != NOT_SENT and job_status == NOT_SENT
+        section = returning_rows if contacted_before else new_rows
         section.append(
             {
                 "Company Name": company.get("Company Name", ""),
+                "Job Title": job.get("Job Title", ""),
+                "Job Link": job.get("Job Link", ""),
+                "Category": job.get("Category", ""),
+                "Outreach Status": job_status,
+                "Found Date": job.get("Found Date", ""),
                 "Company Size": company.get("Company Size", ""),
                 "Outreach Track": company.get("Outreach Track", "") or TRACK_DEV,
-                "Latest Job": latest.get("Job Title", ""),
-                "Latest Job Link": latest.get("Job Link", ""),
-                "Outreach Status": (latest.get("Outreach Status") or "").strip() or NOT_SENT,
-                "Other Jobs": "; ".join(t for t in others if t),
-                "Outreach Phrasing": latest.get("Outreach Phrasing", ""),
+                "Outreach Phrasing": job.get("Outreach Phrasing", ""),
                 "Contact": _contact_text(contact, company.get("Contact Title", "")) if contact and contact != NOT_FOUND
                 else "עוד לא נמצא איש קשר",
                 "Contact LinkedIn": company.get("Contact LinkedIn", ""),
                 "Alt Contact": _contact_text(company.get("Alt Contact Name", ""), company.get("Alt Contact Title", "")),
                 "Alt Contact LinkedIn": company.get("Alt Contact LinkedIn", ""),
-                "Previous Outreach": "" if status == NOT_SENT else f"{status}, {company.get('Status Updated', '')}".strip(", "),
+                "Previous Outreach": f"{company_status}, {company.get('Status Updated', '')}".strip(", ")
+                if contacted_before else "",
             }
         )
 
@@ -1074,7 +1062,7 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
     highlight: list[int] = []
     if returning_rows:
         table.rows.append({h: "" for h in WEEKLY_HEADERS})
-        table.rows.append({"Company Name": "חברות שכבר פנו אליהן ופרסמו משרה חדשה"})
+        table.rows.append({"Company Name": "משרות חדשות בחברות שכבר פנו אליהן"})
         start = len(table.rows) + 2  # +1 header row, +1 for 1-based numbering
         table.rows.extend(returning_rows)
         highlight = list(range(start, start + len(returning_rows)))
@@ -1086,14 +1074,18 @@ def _weekly(store: SheetStore, today: date) -> dict[str, Any]:
     store.highlight_rows(TAB_WEEKLY, highlight, RETURNING_COLOR)
     store.set_dropdown(TAB_WEEKLY, "Outreach Status", OUTREACH_STATUSES)
     _save_weekly_baseline([
-        (r["Latest Job Link"], r["Outreach Status"]) for r in new_rows + returning_rows if r.get("Latest Job Link")
+        (r["Job Link"], r["Outreach Status"]) for r in new_rows + returning_rows if r.get("Job Link")
     ])
 
     summary = {
         "sheet_url": store.url,
-        "new_companies": len(new_rows),
-        "returning_companies": len(returning_rows),
-        "total_companies": len(new_rows) + len(returning_rows),
+        "new_jobs": len(new_rows),
+        "jobs_at_contacted_companies": len(returning_rows),
+        "total_jobs": len(new_rows) + len(returning_rows),
+        # Older Slack messages use these names.
+        "new_companies": len({r["Company Name"] for r in new_rows}),
+        "returning_companies": len({r["Company Name"] for r in returning_rows}),
+        "total_companies": len({r["Company Name"] for r in new_rows + returning_rows}),
     }
     logger.info("lead_agent: weekly summary %s", summary)
     return summary

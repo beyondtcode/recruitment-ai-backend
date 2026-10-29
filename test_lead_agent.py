@@ -358,9 +358,12 @@ class AgentRunTests(unittest.TestCase):
         summary_w = asyncio.run(lead_agent.weekly(store, today=TODAY))
         self.assertEqual(summary_w["new_companies"], 2)
         weekly = store.read("Weekly")
-        self.assertEqual(weekly.rows[0]["Company Name"], "Acme")
-        self.assertEqual(weekly.rows[0]["Other Jobs"], "QA Engineer")
-        self.assertEqual(weekly.rows[0]["Contact"], "Dana — CTO")
+        # One row per new job of the week.
+        acme_rows = [r for r in weekly.rows if r["Company Name"] == "Acme"]
+        self.assertEqual({r["Job Title"] for r in acme_rows}, {"Backend Developer", "QA Engineer"})
+        self.assertEqual(acme_rows[0]["Contact"], "Dana — CTO")
+        self.assertTrue(all(r["Job Link"].startswith("https://li/acme") for r in acme_rows))
+        self.assertEqual(summary_w["new_jobs"], 3)
 
         # --- Someone updates Acme's status; a new Acme job appears later ---
         comp = store.read("Companies")
@@ -392,9 +395,10 @@ class AgentRunTests(unittest.TestCase):
         summary_w = asyncio.run(lead_agent.weekly(store, today=date(2026, 11, 1)))
         self.assertEqual(summary_w["returning_companies"], 1)
         weekly = store.read("Weekly")
-        returning = [r for r in weekly.rows if r["Company Name"] == "Acme"][0]
-        self.assertEqual(returning["Previous Outreach"], "פולואפ נשלח, 27/10/2026")
-        self.assertEqual(len(store.highlights["Weekly"]), 1)
+        returning = [r for r in weekly.rows if r["Company Name"] == "Acme"]
+        self.assertEqual({r["Previous Outreach"] for r in returning}, {"פולואפ נשלח, 27/10/2026"})
+        self.assertIn("Frontend Developer", {r["Job Title"] for r in returning})
+        self.assertEqual(len(store.highlights["Weekly"]), len(returning))
 
     def test_status_per_job(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
@@ -530,7 +534,7 @@ class AgentRunTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
             summary = asyncio.run(lead_agent.weekly(store, today=date(2026, 10, 27)))
         tmp.cleanup()
-        self.assertEqual(summary["new_companies"], 2)
+        self.assertEqual(summary["new_jobs"], 2)
         rows = {r["Company Name"]: r for r in store.read("Weekly").rows}
         self.assertEqual(rows["Acme"]["Contact"], "עוד לא נמצא איש קשר")
 
@@ -730,7 +734,7 @@ class TrackTests(unittest.TestCase):
         self.assertEqual(jobs["Backend Developer"]["Contact Name"], "Cto")       # mirrored per job
         self.assertEqual(jobs["Salesforce Admin"]["Contact Name"], "Ops")
         self.assertEqual(jobs["Salesforce Admin"]["Outreach Status"], "לא נשלח")
-        self.assertEqual(weekly["new_companies"], 2)
+        self.assertEqual(weekly["new_jobs"], 2)  # one job per track
         tracks = {r["Outreach Track"] for r in store.read("Weekly").rows}
         self.assertEqual(tracks, {"פיתוח", "מערכות"})
 

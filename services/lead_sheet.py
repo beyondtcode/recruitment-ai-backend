@@ -113,12 +113,13 @@ BLOCKED_HEADERS: list[str] = ["Company", "Name Variants"]
 DO_NOT_CONTACT_HEADERS: list[str] = ["Company Name", "Reason"]
 WEEKLY_HEADERS: list[str] = [
     "Company Name",
+    "Job Title",
+    "Job Link",
+    "Category",
+    "Outreach Status",
+    "Found Date",
     "Company Size",
     "Outreach Track",
-    "Latest Job",
-    "Latest Job Link",
-    "Outreach Status",
-    "Other Jobs",
     "Outreach Phrasing",
     "Contact",
     "Contact LinkedIn",

@@ -105,6 +105,40 @@ class BlockedAdditionsTests(unittest.TestCase):
                          "בית תוכנה / השמה / מיקור חוץ")
 
 
+class WeeklyScheduleTests(unittest.TestCase):
+    def test_first_run_of_the_week_builds_weekly(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            sun, mon, tue, thu, next_tue = (date(2026, 11, 1), date(2026, 11, 2), date(2026, 11, 3),
+                                            date(2026, 11, 5), date(2026, 11, 10))
+            self.assertEqual(lead_agent._last_sunday(thu), sun)
+            self.assertEqual(lead_agent._last_sunday(sun), sun)
+            self.assertTrue(lead_agent._weekly_due(tue))       # never built
+            lead_agent._mark_weekly_built(tue)
+            self.assertFalse(lead_agent._weekly_due(thu))      # built this week
+            self.assertTrue(lead_agent._weekly_due(next_tue))  # new week, Sunday had no run
+            lead_agent._mark_weekly_built(sun)
+            self.assertFalse(lead_agent._weekly_due(mon))
+        tmp.cleanup()
+
+    def test_run_reports_weekly(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
+
+        async def scrape():
+            return [], []
+
+        with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}):
+            first = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=mock.AsyncMock(return_value={}),
+                                               today=date(2026, 11, 1)))
+            second = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=mock.AsyncMock(return_value={}),
+                                                today=date(2026, 11, 3)))
+        tmp.cleanup()
+        self.assertTrue(first["weekly_built"])
+        self.assertIn("total_jobs", first["weekly"])
+        self.assertFalse(second["weekly_built"])
+
+
 class SearchBudgetTests(unittest.TestCase):
     def test_no_cap_and_quota_exhausted(self) -> None:
         from services import search_client as sc

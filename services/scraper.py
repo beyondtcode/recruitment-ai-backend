@@ -17,6 +17,8 @@ Add new boards by extending ``BOARD_CONFIGS`` (selectors + host match).
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from html import unescape
 import contextvars
 import logging
@@ -771,27 +773,85 @@ def _import_playwright_sync():
     return sync_playwright
 
 
+# ---------------------------------------------------------------------------
+# One shared headless browser for all page fetches of a run. Launching
+# Chromium for every search cost several seconds each time. Sync Playwright
+# objects belong to the thread that created them, so every browser call runs
+# on this single worker thread; each fetch still gets a fresh context (no
+# cookies carried between searches).
+# ---------------------------------------------------------------------------
+
+_BROWSER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser")
+_playwright: Any = None
+_browser: Any = None
+_BROWSER_ARGS = ["--disable-blink-features=AutomationControlled"]
+
+
+def _close_browser_sync() -> None:
+    global _playwright, _browser
+    try:
+        if _browser is not None:
+            _browser.close()
+    except Exception:
+        logger.debug("scrape_jobs: closing the shared browser failed", exc_info=True)
+    try:
+        if _playwright is not None:
+            _playwright.stop()
+    except Exception:
+        logger.debug("scrape_jobs: stopping Playwright failed", exc_info=True)
+    _playwright = _browser = None
+
+
+def _shared_browser() -> Any:
+    global _playwright, _browser
+    if _browser is not None and _browser.is_connected():
+        return _browser
+    _close_browser_sync()
+    _playwright = _import_playwright_sync()().start()
+    _browser = _playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+    logger.info("scrape_jobs: launched the shared browser")
+    return _browser
+
+
+@contextmanager
+def _browser_session():
+    """The shared browser; after an unexpected error it is relaunched next time."""
+    browser = _shared_browser()
+    try:
+        yield browser
+    except Exception:
+        _close_browser_sync()
+        raise
+
+
+async def run_in_browser_thread(fn: Callable[..., Any], *args: Any) -> Any:
+    # Copy context variables (paging limits, known job links) like asyncio.to_thread does.
+    ctx = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(_BROWSER_EXECUTOR, ctx.run, fn, *args)
+
+
+async def close_shared_browser() -> None:
+    """Close the shared browser (end of a run), freeing its memory."""
+    await run_in_browser_thread(_close_browser_sync)
+
+
 def _is_alljobs_board(config: BoardConfig) -> bool:
     return config.source == "AllJobs" or config.skip_sponsored or config.max_pages > 1
 
 
 def _fetch_alljobs_sync(url: str, timeout_ms: int = 30000) -> tuple[str, int]:
-    """Sync Playwright fetch of AllJobs pages 1..N — runs via ``asyncio.to_thread``.
+    """Sync Playwright fetch of AllJobs pages 1..N — runs on the browser thread.
 
     Returns ``(combined_card_html, pages_scraped)``. Sponsored/VIP cards are omitted.
     """
-    sync_playwright = _import_playwright_sync()
 
     card_selector = BOARD_CONFIGS["AllJobs"].job_card
     card_htmls: list[str] = []
     pages_scraped = 0
     max_pages = BOARD_CONFIGS["AllJobs"].max_pages or ALLJOBS_MAX_PAGES
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+    with _browser_session() as browser:
+        context = None
         try:
             context = browser.new_context(
                 user_agent=BROWSER_USER_AGENT,
@@ -845,7 +905,8 @@ def _fetch_alljobs_sync(url: str, timeout_ms: int = 30000) -> tuple[str, int]:
                     len(page_cards),
                 )
         finally:
-            browser.close()
+            if context is not None:
+                context.close()
 
     combined = (
         '<div id="alljobs-scrape-root">' + "".join(card_htmls) + "</div>"
@@ -953,15 +1014,11 @@ def _fetch_listing_playwright_sync(
     timeout_ms: int = 30000,
 ) -> tuple[str, int]:
     """Sync Playwright single-page fetch for JS-heavy boards (non-AllJobs)."""
-    sync_playwright = _import_playwright_sync()
     is_linkedin = _is_linkedin_board(config) or _is_linkedin_url(url)
     wait_selector = LINKEDIN_WAIT_SELECTOR if is_linkedin else config.job_card
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+    with _browser_session() as browser:
+        context = None
         try:
             context = browser.new_context(
                 user_agent=BROWSER_USER_AGENT,
@@ -1004,7 +1061,8 @@ def _fetch_listing_playwright_sync(
             )
             return html, 1
         finally:
-            browser.close()
+            if context is not None:
+                context.close()
 
 
 async def fetch_listing_html_playwright(
@@ -1029,10 +1087,8 @@ async def fetch_listing_html_playwright(
     timeout_ms = int(timeout * 1000)
     board = config or board_config_for_url(url)
     if _is_alljobs_board(board) or _is_alljobs_url(url):
-        return await asyncio.to_thread(_fetch_alljobs_sync, url, timeout_ms)
-    return await asyncio.to_thread(
-        _fetch_listing_playwright_sync, url, board, timeout_ms
-    )
+        return await run_in_browser_thread(_fetch_alljobs_sync, url, timeout_ms)
+    return await run_in_browser_thread(_fetch_listing_playwright_sync, url, board, timeout_ms)
 
 
 async def scrape_jobs(

@@ -184,7 +184,9 @@ async def scrape_one(url: str, source: str) -> list[dict]:
 BACKFILL_LINKEDIN_MAX_JOBS = 1000
 
 
-async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], list[str]]:
+async def scrape_all_raw(
+    lookback_days: int | None = None, only: list[str] | None = None
+) -> tuple[list[dict], list[str]]:
     """Run every search in ``LEAD_SEARCHES``.
 
     Each search looks back LEADS_LOOKBACK_DAYS (default 3: runs every 2 days,
@@ -203,6 +205,12 @@ async def scrape_all_raw(lookback_days: int | None = None) -> tuple[list[dict], 
         limit = 0
     if limit > 0:  # short test runs
         searches = searches[:limit]
+    if only:  # test runs: just these searches (label or "Board / Label", any case)
+        wanted = {w.strip().casefold() for w in only if w.strip()}
+        searches = [
+            (b, l, u) for b, l, u in searches
+            if l.casefold() in wanted or f"{b} / {l}".casefold() in wanted or b.casefold() in wanted
+        ]
     if lookback_days:
         LINKEDIN_MAX_JOBS_OVERRIDE.set(BACKFILL_LINKEDIN_MAX_JOBS)
     try:

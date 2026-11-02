@@ -331,11 +331,7 @@ class TestRunTests(unittest.TestCase):
                 mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
                         mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0):
             asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
-        boards = sorted({(b, u) for b, u in seen}, key=lambda x: x[0])  # empty LinkedIn searches are retried once
-        boards = [b for b, _ in boards]
-                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0):
-            asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
-        boards = sorted(b for b, _ in seen)
+        boards = sorted(b for b, _ in {(b, u) for b, u in seen})  # empty LinkedIn searches are retried once
         # "linkedin / backend" = one search; "QA" = the QA search on every board that has one.
         self.assertEqual(boards, ["Drushim", "JobMaster", "LinkedIn", "LinkedIn"])
         self.assertTrue(any("Backend%20Developer" in u for _, u in seen))

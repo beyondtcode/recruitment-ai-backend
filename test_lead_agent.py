@@ -574,6 +574,33 @@ class AgentRunTests(unittest.TestCase):
         rows = {r["Company Name"]: r for r in store.read("Weekly").rows}
         self.assertEqual(rows["Acme"]["Contact"], "עוד לא נמצא איש קשר")
 
+    def test_doesnt_fit_links_checked_weekly(self) -> None:
+        store = MemoryStore({
+            "Sheet1": [["Company Name", "Job Title", "Job Link", "Last Checked"],
+                       ["Acme", "Backend Developer", "https://li/main", "31/10/2026"]],
+            "Doesn't Fit - Jobs": [["Company Name", "Job Title", "Job Link", "Last Checked"],
+                                   ["Big", "Backend Developer", "https://li/fresh", "30/10/2026"],
+                                   ["Big", "QA Engineer", "https://li/old", "25/10/2026"],
+                                   ["Big", "Frontend Developer", "https://li/never", ""]],
+        })
+        checked = []
+
+        async def check(urls):
+            checked.extend(urls)
+            return {u: "open" for u in urls}
+
+        async def scrape():
+            return [], []
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"size": None, "company_type": None}
+
+        with mock.patch.object(ce, "fetch_linkedin_company", mock.AsyncMock(return_value=None)), \
+                mock.patch.object(ce, "complete_json", fake_llm):
+            summary = asyncio.run(lead_agent.run(store, None, scrape=scrape, check=check, today=date(2026, 11, 2)))
+        self.assertEqual(sorted(checked), ["https://li/main", "https://li/never", "https://li/old"])
+        self.assertEqual(summary["doesnt_fit_links_skipped"], 1)
+
     def test_no_search_and_retry_limits(self) -> None:
         store = MemoryStore({"Sheet1": [["Company Name", "Job Title", "Job Link"]]})
 

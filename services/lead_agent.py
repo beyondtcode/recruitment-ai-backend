@@ -44,6 +44,7 @@ from services.company_enrichment import (
 )
 from services.contact_enrichment import NOT_FOUND, choose_profile, find_contacts
 from services.job_status import check_jobs
+from services import linkedin_pace
 from services.lead_dedup import _db_path, all_seen_links
 from services.lead_filters import (
     BLOCKED_ADDITIONS,
@@ -600,6 +601,7 @@ async def run(
 
 async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekly_file: bool = True) -> dict[str, Any]:
     today_s = format_ddmmyyyy(today)
+    linkedin_pace.cooldowns = 0
     summary: dict[str, Any] = {"sheet_url": store.url, "search_enabled": search is not None}
 
     blocklist = load_blocklist(store)
@@ -612,6 +614,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekl
     for h in other_jobs.headers:
         if h and h not in jobs.headers:
             jobs.headers.append(h)
+    other_links = {(r.get("Job Link") or "").strip() for r in other_jobs.rows}
     jobs.rows = jobs.rows + other_jobs.rows
     companies = store.read(TAB_COMPANIES) or Table(headers=[])
     companies.canonical_headers(COMPANY_HEADERS)
@@ -647,8 +650,21 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekl
         else:
             kept.append(row)
 
-    # Check every open job each run (longest-unchecked first, in case a cap is set).
-    checkable = [r for r in kept if r.get("Job Link", "").strip().startswith("http")]
+    # Jobs tab: every open job each run. Doesn't Fit jobs (nobody contacts
+    # them; about three quarters of all jobs) only when last checked
+    # LEADS_OTHER_CHECK_DAYS ago or more (default 6), so with runs every 2
+    # days each run checks about a third of them and all within a week.
+    other_every = timedelta(days=_env_int("LEADS_OTHER_CHECK_DAYS", 6))
+
+    def due(r: dict[str, str]) -> bool:
+        if (r.get("Job Link") or "").strip() not in other_links:
+            return True
+        last = parse_date(r.get("Last Checked", ""))
+        return last is None or today - last >= other_every
+
+    with_links = [r for r in kept if r.get("Job Link", "").strip().startswith("http")]
+    checkable = [r for r in with_links if due(r)]
+    other_skipped = len(with_links) - len(checkable)
     checkable.sort(key=lambda r: parse_date(r.get("Last Checked", "")) or date.min)
     links = [r["Job Link"].strip() for r in checkable[: _env_int("LEADS_MAX_LINK_CHECKS", 0) or None]]
     statuses = await check(links) if links else {}
@@ -968,12 +984,14 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekl
             "watch_list_jobs_found": len(watch_raw),
             "watch_list_without_jobs": watch_without_jobs,
             "links_not_checked_yet": max(len(checkable) - len(links), 0),
+            "doesnt_fit_links_skipped": other_skipped,
             "link_checks": {
                 s: sum(1 for v in statuses.values() if v == s) for s in ("open", "closed", "unknown")
             },
         }
     )
     summary.update(await _quota_status(search))
+    summary["linkedin_rate_limited"] = linkedin_pace.cooldowns
     # The weekly file is built by the first run of each week (Sunday, or the
     # next run after it), so no separate schedule is needed.
     summary["weekly_built"] = False

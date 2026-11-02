@@ -11,6 +11,15 @@ from unittest import mock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 os.environ.setdefault("MONDAY_BOARD_ID", "1")
+# Tests must not depend on the server's .env (tab names, caps, real API keys).
+for _k in [k for k in os.environ if k.startswith(("LEADS_", "LINKEDIN_"))] + ["TAVILY_API_KEY", "SERPER_API_KEY", "OPENAI_API_KEY"]:
+    os.environ.pop(_k, None)
+os.environ["LINKEDIN_MIN_INTERVAL"] = "0"  # no pacing in tests
+os.environ["LINKEDIN_COOLDOWN"] = "0"
+import tempfile as _tf
+_TEST_DIR = _tf.mkdtemp()  # never touch the real data folder
+os.environ["LEADS_DEDUP_DB"] = os.path.join(_TEST_DIR, "seen.db")
+os.environ["LEADS_WATCH_IDS"] = os.path.join(_TEST_DIR, "ids.json")
 
 from services import lead_filters as lf  # noqa: E402
 
@@ -226,7 +235,7 @@ class LinkedInPaginationTests(unittest.TestCase):
                     return pages.pop(0)
 
         url = "https://www.linkedin.com/jobs/search?location=Israel&f_TPR=r259200&keywords=Backend"
-        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+        with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
             extra = scraper._linkedin_more_pages(Ctx, url, card * 60)
             small = scraper._linkedin_more_pages(Ctx, url, card * 5)
             token = scraper.LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
@@ -275,7 +284,7 @@ class KnownLinksStopTests(unittest.TestCase):
         url = "https://www.linkedin.com/jobs/search?location=Israel&sortBy=DD&keywords=Dev"
         token = scraper.KNOWN_JOB_LINKS.set(known)
         try:
-            with mock.patch.object(scraper.time, "sleep", lambda s: None):
+            with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
                 extra = scraper._linkedin_more_pages(Ctx, url, page(range(0, 10)))
                 # A first page that is all known: no paging at all.
                 calls_before = len(calls)
@@ -310,7 +319,7 @@ class CompanyFilterEmptyPageTests(unittest.TestCase):
                     return pages.pop(0)
 
         url = "https://www.linkedin.com/jobs/search?location=Israel&geoId=101620260&f_C=1"
-        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+        with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
             self.assertEqual(scraper._linkedin_more_pages(Ctx, url, ""), "")  # not forced: nothing
             extra = scraper._linkedin_more_pages(Ctx, url, "", force=True)
         self.assertEqual(extra.count("base-search-card__title"), 4)
@@ -326,9 +335,10 @@ class TestRunTests(unittest.TestCase):
             return []
 
         with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
-                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0):
+                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                        mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0):
             asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
-        boards = sorted(b for b, _ in seen)
+        boards = sorted(b for b, _ in {(b, u) for b, u in seen})  # empty LinkedIn searches are retried once
         # "linkedin / backend" = one search; "QA" = the QA search on every board that has one.
         self.assertEqual(boards, ["Drushim", "JobMaster", "LinkedIn", "LinkedIn"])
         self.assertTrue(any("Backend%20Developer" in u for _, u in seen))
@@ -379,6 +389,7 @@ class LookbackTests(unittest.TestCase):
 
         with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
                 mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0), \
                 mock.patch.dict(os.environ, {"LEADS_SEARCH_LIMIT": "2"}):
             asyncio.run(go(30))
             self.assertTrue(all("r2592000" in u and m == 1000 for u, m in seen))

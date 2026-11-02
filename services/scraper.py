@@ -24,7 +24,6 @@ import contextvars
 import logging
 import os
 import re
-import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
@@ -32,6 +31,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunp
 import httpx
 from bs4 import BeautifulSoup
 
+from services import linkedin_pace
 from services.lead_dedup import filter_unseen_jobs, mark_jobs_seen
 
 logger = logging.getLogger(__name__)
@@ -978,6 +978,7 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str, *, force: bool
     start = count
     failures = 0
     while start < max_jobs:
+        linkedin_pace.wait_turn()
         try:
             resp = context.request.get(linkedin_more_url(url, start), timeout=20000)
         except Exception:
@@ -985,9 +986,9 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str, *, force: bool
             break
         if resp.status == 429:
             failures += 1
-            if failures > 2:
+            linkedin_pace.cooldown("paging")
+            if failures > 3:
                 break
-            time.sleep(5)
             continue
         if resp.status != 200:
             break
@@ -1002,7 +1003,6 @@ def _linkedin_more_pages(context: Any, url: str, first_html: str, *, force: bool
             known.update(links)
         extra.append(chunk)
         start += n
-        time.sleep(1.0)
     if extra:
         logger.info("scrape_jobs: LinkedIn pagination → %d more pages (up to offset %d) for %s", len(extra), start, url)
     return "".join(extra)
@@ -1028,7 +1028,13 @@ def _fetch_listing_playwright_sync(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if is_linkedin:
+                linkedin_pace.wait_turn()
+            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if is_linkedin and response is not None and response.status == 429:
+                linkedin_pace.cooldown(url)
+                linkedin_pace.wait_turn()
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_timeout(3000)
             try:
                 page.wait_for_selector(wait_selector, timeout=timeout_ms)

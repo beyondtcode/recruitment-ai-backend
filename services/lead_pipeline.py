@@ -33,6 +33,7 @@ from services.scraper import LINKEDIN_MAX_JOBS_OVERRIDE, scrape_jobs
 logger = logging.getLogger(__name__)
 
 SEARCH_PAUSE_SECONDS = 3.0
+RETRY_PAUSE_SECONDS = 120.0
 
 # Category of jobs that were not sent to the LLM (company known not to fit).
 UNCLASSIFIED = "לא סווג (חברה לא מתאימה)"
@@ -238,4 +239,22 @@ async def scrape_all_raw(
                 label,
                 exc_info=True,
             )
+
+    # LinkedIn searches that came back empty were usually rate-limited: try
+    # them once more at the end, after a pause.
+    retry = [(b, l, u) for b, l, u in searches if b == "LinkedIn" and f"{b} / {l}" in failed]
+    if retry:
+        logger.info("scrape_all: retrying %d empty LinkedIn searches after a pause", len(retry))
+        await asyncio.sleep(RETRY_PAUSE_SECONDS)
+        for board, label, url in retry:
+            await asyncio.sleep(SEARCH_PAUSE_SECONDS)
+            try:
+                jobs = await scrape_one(url, board)
+            except Exception:
+                logger.warning("scrape_all: retry of %s / %s failed", board, label, exc_info=True)
+                continue
+            logger.info("scrape_all: retry %s / %s → %d jobs", board, label, len(jobs))
+            if jobs:
+                combined.extend(jobs)
+                failed.remove(f"{board} / {label}")
     return combined, failed

@@ -583,6 +583,7 @@ async def run(
     scrape_watch: Callable[[WatchList], Awaitable[tuple[list[dict], list[str]]]] | None = None,
     today: date | None = None,
     lookback_days: int | None = None,
+    weekly_file: bool = True,
 ) -> dict[str, Any]:
     if lookback_days and scrape is scrape_all_raw:
         scrape = lambda: scrape_all_raw(lookback_days)  # noqa: E731 — one-time backfill
@@ -591,13 +592,13 @@ async def run(
             return await _run(
                 store, search, scrape=scrape, check=check,
                 scrape_watch=scrape_watch or (lambda w: scrape_watch_list(w)),
-                today=today or today_israel(),
+                today=today or today_israel(), weekly_file=weekly_file,
             )
         finally:
             await close_shared_browser()  # free the browser's memory between runs
 
 
-async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> dict[str, Any]:
+async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekly_file: bool = True) -> dict[str, Any]:
     today_s = format_ddmmyyyy(today)
     summary: dict[str, Any] = {"sheet_url": store.url, "search_enabled": search is not None}
 
@@ -976,7 +977,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
     # The weekly file is built by the first run of each week (Sunday, or the
     # next run after it), so no separate schedule is needed.
     summary["weekly_built"] = False
-    if _weekly_due(today):
+    if weekly_file and _weekly_due(today):
         summary["weekly"] = _weekly(store, today)
         summary["weekly_built"] = True
         _mark_weekly_built(today)

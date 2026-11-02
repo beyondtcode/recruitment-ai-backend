@@ -11,6 +11,8 @@ from unittest import mock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 os.environ.setdefault("MONDAY_BOARD_ID", "1")
+os.environ.setdefault("LINKEDIN_MIN_INTERVAL", "0")  # no pacing in tests
+os.environ.setdefault("LINKEDIN_COOLDOWN", "0")
 
 from services import company_enrichment as ce  # noqa: E402
 from services import contact_enrichment as cc  # noqa: E402

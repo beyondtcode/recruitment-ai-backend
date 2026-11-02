@@ -334,14 +334,19 @@ async def tavily_usage(api_key: str) -> tuple[int, int] | None:
     """(used, limit) of the Tavily plan this billing cycle, or None if unknown."""
     if not api_key:
         return None
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(TAVILY_USAGE_URL, headers={"Authorization": f"Bearer {api_key}"})
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        logger.info("search: could not read Tavily usage", exc_info=True)
-        return None
+    data = None
+    for attempt in range(3):  # the call failed now and then (connection errors)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(TAVILY_USAGE_URL, headers={"Authorization": f"Bearer {api_key}"})
+            response.raise_for_status()
+            data = response.json()
+            break
+        except Exception:
+            if attempt == 2:
+                logger.info("search: could not read Tavily usage", exc_info=True)
+                return None
+            await asyncio.sleep(3 * (attempt + 1))
     for section, used_key, limit_key in (("account", "plan_usage", "plan_limit"), ("key", "usage", "limit")):
         part = data.get(section) or {}
         used, limit = part.get(used_key), part.get(limit_key)

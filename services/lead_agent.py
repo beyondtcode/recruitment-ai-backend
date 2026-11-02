@@ -44,6 +44,7 @@ from services.company_enrichment import (
 )
 from services.contact_enrichment import NOT_FOUND, choose_profile, find_contacts
 from services.job_status import check_jobs
+from services import linkedin_pace
 from services.lead_dedup import _db_path, all_seen_links
 from services.lead_filters import (
     BLOCKED_ADDITIONS,
@@ -599,6 +600,7 @@ async def run(
 
 async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> dict[str, Any]:
     today_s = format_ddmmyyyy(today)
+    linkedin_pace.cooldowns = 0
     summary: dict[str, Any] = {"sheet_url": store.url, "search_enabled": search is not None}
 
     blocklist = load_blocklist(store)
@@ -973,6 +975,7 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date) -> di
         }
     )
     summary.update(await _quota_status(search))
+    summary["linkedin_rate_limited"] = linkedin_pace.cooldowns
     # The weekly file is built by the first run of each week (Sunday, or the
     # next run after it), so no separate schedule is needed.
     summary["weekly_built"] = False

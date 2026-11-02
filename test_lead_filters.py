@@ -11,6 +11,8 @@ from unittest import mock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 os.environ.setdefault("MONDAY_BOARD_ID", "1")
+os.environ.setdefault("LINKEDIN_MIN_INTERVAL", "0")  # no pacing in tests
+os.environ.setdefault("LINKEDIN_COOLDOWN", "0")
 
 from services import lead_filters as lf  # noqa: E402
 
@@ -226,7 +228,7 @@ class LinkedInPaginationTests(unittest.TestCase):
                     return pages.pop(0)
 
         url = "https://www.linkedin.com/jobs/search?location=Israel&f_TPR=r259200&keywords=Backend"
-        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+        with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
             extra = scraper._linkedin_more_pages(Ctx, url, card * 60)
             small = scraper._linkedin_more_pages(Ctx, url, card * 5)
             token = scraper.LINKEDIN_MAX_JOBS_OVERRIDE.set(0)
@@ -275,7 +277,7 @@ class KnownLinksStopTests(unittest.TestCase):
         url = "https://www.linkedin.com/jobs/search?location=Israel&sortBy=DD&keywords=Dev"
         token = scraper.KNOWN_JOB_LINKS.set(known)
         try:
-            with mock.patch.object(scraper.time, "sleep", lambda s: None):
+            with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
                 extra = scraper._linkedin_more_pages(Ctx, url, page(range(0, 10)))
                 # A first page that is all known: no paging at all.
                 calls_before = len(calls)
@@ -310,11 +312,48 @@ class CompanyFilterEmptyPageTests(unittest.TestCase):
                     return pages.pop(0)
 
         url = "https://www.linkedin.com/jobs/search?location=Israel&geoId=101620260&f_C=1"
-        with mock.patch.object(scraper.time, "sleep", lambda s: None):
+        with mock.patch.object(scraper.linkedin_pace.time, "sleep", lambda s: None):
             self.assertEqual(scraper._linkedin_more_pages(Ctx, url, ""), "")  # not forced: nothing
             extra = scraper._linkedin_more_pages(Ctx, url, "", force=True)
         self.assertEqual(extra.count("base-search-card__title"), 4)
         self.assertTrue(calls[0].endswith("f_C=1&start=0"))
+
+class LinkedInPaceTests(unittest.TestCase):
+    def test_interval_and_cooldown(self) -> None:
+        from services import linkedin_pace as lp
+        sleeps = []
+        clock = [1000.0]
+        with mock.patch.object(lp.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(lp.time, "sleep", lambda s: sleeps.append(round(s, 1))), \
+                mock.patch.dict(os.environ, {"LINKEDIN_MIN_INTERVAL": "2", "LINKEDIN_COOLDOWN": "90"}):
+            lp._next_at = 0.0
+            lp.wait_turn()           # first request: no wait
+            lp.wait_turn()           # 2 s after the first
+            lp.cooldown("test")
+            lp.wait_turn()           # waits out the cool-down
+        self.assertEqual(sleeps, [2.0, 90.0])
+        self.assertGreaterEqual(lp.cooldowns, 1)
+
+    def test_empty_linkedin_searches_are_retried(self) -> None:
+        from services import lead_pipeline
+        calls = []
+
+        async def fake_scrape_one(url, source):
+            calls.append(url)
+            # First try of the LinkedIn search is empty (rate limited), the retry works.
+            if source == "LinkedIn" and calls.count(url) == 2:
+                return [{"job_link": "https://li/1"}]
+            return []
+
+        with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
+                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0), \
+                mock.patch.object(lead_pipeline, "LEAD_SEARCHES", [
+                    ("LinkedIn", "Backend", "https://www.linkedin.com/jobs/search?f_TPR=r259200&keywords=Backend"),
+                    ("Drushim", "QA", "https://www.drushim.co.il/jobs/search/QA/?ssaen=3")]):
+            jobs, failed = asyncio.run(lead_pipeline.scrape_all_raw())
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(failed, ["Drushim / QA"])  # only LinkedIn searches are retried
 
 class LookbackTests(unittest.TestCase):
     def test_with_lookback(self) -> None:
@@ -344,6 +383,7 @@ class LookbackTests(unittest.TestCase):
 
         with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
                 mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0), \
                 mock.patch.dict(os.environ, {"LEADS_SEARCH_LIMIT": "2"}):
             asyncio.run(go(30))
             self.assertTrue(all("r2592000" in u and m == 1000 for u, m in seen))

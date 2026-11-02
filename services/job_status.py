@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from services import linkedin_pace
+
 logger = logging.getLogger(__name__)
 
 Status = Literal["open", "closed", "unknown"]
@@ -79,8 +81,17 @@ async def check_jobs(urls: list[str], *, concurrency: int = 4) -> dict[str, Stat
 
         async def linkedin_serial() -> None:
             for url in linkedin:
-                results[url] = await check_job(client, url)
-                await asyncio.sleep(1.5)
+                await linkedin_pace.await_turn()
+                try:
+                    response = await client.get(url)
+                except Exception:
+                    results[url] = "unknown"
+                    continue
+                if response.status_code == 429:
+                    linkedin_pace.cooldown("link check")
+                    results[url] = "unknown"  # checked again next run
+                    continue
+                results[url] = classify_response(response.status_code, response.text)
 
         await asyncio.gather(linkedin_serial(), *(one(u) for u in other))
 

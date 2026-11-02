@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from services import linkedin_pace
 from services.lead_filters import normalize_company
 
 logger = logging.getLogger(__name__)
@@ -234,14 +235,15 @@ async def fetch_company_jobs(company_id: str) -> list[dict]:
     async with httpx.AsyncClient(headers=_API_HEADERS, timeout=20.0, follow_redirects=True) as client:
         while start < COMPANY_API_MAX_JOBS:
             url = f"{LINKEDIN_JOBS_API}?location=Israel&geoId=101620260&f_C={company_id}&start={start}"
+            await linkedin_pace.await_turn()
             try:
                 resp = await client.get(url)
             except httpx.HTTPError:
                 logger.warning("watch_list: jobs API failed for company %s", company_id, exc_info=True)
                 break
-            if resp.status_code == 429 and retries < 2:
+            if resp.status_code == 429 and retries < 3:
                 retries += 1
-                await asyncio.sleep(5)
+                linkedin_pace.cooldown(f"company {company_id}")
                 continue
             if resp.status_code != 200:
                 break
@@ -250,7 +252,6 @@ async def fetch_company_jobs(company_id: str) -> list[dict]:
                 break
             raw.extend(jobs)
             start += resp.text.count("base-search-card__title") or len(jobs)
-            await asyncio.sleep(1.0)
     for job in raw:
         job["source"] = "LinkedIn"
     unique = list({j["job_link"]: j for j in raw if j.get("job_link")}.values())

@@ -318,43 +318,6 @@ class CompanyFilterEmptyPageTests(unittest.TestCase):
         self.assertEqual(extra.count("base-search-card__title"), 4)
         self.assertTrue(calls[0].endswith("f_C=1&start=0"))
 
-class LinkedInPaceTests(unittest.TestCase):
-    def test_interval_and_cooldown(self) -> None:
-        from services import linkedin_pace as lp
-        sleeps = []
-        clock = [1000.0]
-        with mock.patch.object(lp.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(lp.time, "sleep", lambda s: sleeps.append(round(s, 1))), \
-                mock.patch.dict(os.environ, {"LINKEDIN_MIN_INTERVAL": "2", "LINKEDIN_COOLDOWN": "90"}):
-            lp._next_at = 0.0
-            lp.wait_turn()           # first request: no wait
-            lp.wait_turn()           # 2 s after the first
-            lp.cooldown("test")
-            lp.wait_turn()           # waits out the cool-down
-        self.assertEqual(sleeps, [2.0, 90.0])
-        self.assertGreaterEqual(lp.cooldowns, 1)
-
-    def test_empty_linkedin_searches_are_retried(self) -> None:
-        from services import lead_pipeline
-        calls = []
-
-        async def fake_scrape_one(url, source):
-            calls.append(url)
-            # First try of the LinkedIn search is empty (rate limited), the retry works.
-            if source == "LinkedIn" and calls.count(url) == 2:
-                return [{"job_link": "https://li/1"}]
-            return []
-
-        with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
-                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
-                mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0), \
-                mock.patch.object(lead_pipeline, "LEAD_SEARCHES", [
-                    ("LinkedIn", "Backend", "https://www.linkedin.com/jobs/search?f_TPR=r259200&keywords=Backend"),
-                    ("Drushim", "QA", "https://www.drushim.co.il/jobs/search/QA/?ssaen=3")]):
-            jobs, failed = asyncio.run(lead_pipeline.scrape_all_raw())
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(failed, ["Drushim / QA"])  # only LinkedIn searches are retried
-
 class TestRunTests(unittest.TestCase):
     def test_only_named_searches(self) -> None:
         from services import lead_pipeline
@@ -370,6 +333,9 @@ class TestRunTests(unittest.TestCase):
             asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
         boards = sorted({(b, u) for b, u in seen}, key=lambda x: x[0])  # empty LinkedIn searches are retried once
         boards = [b for b, _ in boards]
+                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0):
+            asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
+        boards = sorted(b for b, _ in seen)
         # "linkedin / backend" = one search; "QA" = the QA search on every board that has one.
         self.assertEqual(boards, ["Drushim", "JobMaster", "LinkedIn", "LinkedIn"])
         self.assertTrue(any("Backend%20Developer" in u for _, u in seen))

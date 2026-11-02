@@ -11,8 +11,15 @@ from unittest import mock
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 os.environ.setdefault("MONDAY_BOARD_ID", "1")
-os.environ.setdefault("LINKEDIN_MIN_INTERVAL", "0")  # no pacing in tests
-os.environ.setdefault("LINKEDIN_COOLDOWN", "0")
+# Tests must not depend on the server's .env (tab names, caps, real API keys).
+for _k in [k for k in os.environ if k.startswith(("LEADS_", "LINKEDIN_"))] + ["TAVILY_API_KEY", "SERPER_API_KEY", "OPENAI_API_KEY"]:
+    os.environ.pop(_k, None)
+os.environ["LINKEDIN_MIN_INTERVAL"] = "0"  # no pacing in tests
+os.environ["LINKEDIN_COOLDOWN"] = "0"
+import tempfile as _tf
+_TEST_DIR = _tf.mkdtemp()  # never touch the real data folder
+os.environ["LEADS_DEDUP_DB"] = os.path.join(_TEST_DIR, "seen.db")
+os.environ["LEADS_WATCH_IDS"] = os.path.join(_TEST_DIR, "ids.json")
 
 from services import company_enrichment as ce  # noqa: E402
 from services import contact_enrichment as cc  # noqa: E402

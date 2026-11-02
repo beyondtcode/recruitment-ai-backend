@@ -355,6 +355,43 @@ class LinkedInPaceTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(failed, ["Drushim / QA"])  # only LinkedIn searches are retried
 
+class TestRunTests(unittest.TestCase):
+    def test_only_named_searches(self) -> None:
+        from services import lead_pipeline
+        seen = []
+
+        async def fake_scrape_one(url, source):
+            seen.append((source, url))
+            return []
+
+        with mock.patch.object(lead_pipeline, "scrape_one", fake_scrape_one), \
+                mock.patch.object(lead_pipeline, "SEARCH_PAUSE_SECONDS", 0), \
+                        mock.patch.object(lead_pipeline, "RETRY_PAUSE_SECONDS", 0):
+            asyncio.run(lead_pipeline.scrape_all_raw(only=["linkedin / backend", "QA"]))
+        boards = sorted({(b, u) for b, u in seen}, key=lambda x: x[0])  # empty LinkedIn searches are retried once
+        boards = [b for b, _ in boards]
+        # "linkedin / backend" = one search; "QA" = the QA search on every board that has one.
+        self.assertEqual(boards, ["Drushim", "JobMaster", "LinkedIn", "LinkedIn"])
+        self.assertTrue(any("Backend%20Developer" in u for _, u in seen))
+
+    def test_quick_and_watch_modes(self) -> None:
+        from routers import leads
+        calls = {}
+
+        async def fake_run(store, client, **kw):
+            calls.update(kw)
+            return {}
+
+        with mock.patch.object(leads.lead_agent, "run", fake_run), \
+                mock.patch.object(leads, "_store", lambda: None):
+            asyncio.run(leads._test_run(None, "watch", None))
+            self.assertIs(calls["scrape"], leads._no_scrape)
+            self.assertIsNone(calls["scrape_watch"])
+            self.assertIs(calls["check"], leads._no_check)
+            self.assertFalse(calls["weekly_file"])
+            asyncio.run(leads._test_run(None, "quick", None))
+            self.assertIs(calls["scrape_watch"], leads._no_watch)
+
 class LookbackTests(unittest.TestCase):
     def test_with_lookback(self) -> None:
         from services.job_sources import LEAD_SEARCHES, with_lookback

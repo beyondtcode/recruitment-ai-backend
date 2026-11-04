@@ -18,33 +18,37 @@ logger = logging.getLogger(__name__)
 
 NOT_FOUND = "לא נמצא"
 
-# Profile → (priority description for the LLM, search role clauses in order)
+# Profile → (priority description for the LLM, role words for the searches in order).
+# Each search is "<short company name> <roles>" on linkedin.com. Short, unquoted
+# queries find the right people far more often than one long OR-list (checked
+# on Cyera / Glow / Dream / AITAN, Nov 2026).
 PROFILES: dict[str, tuple[str, list[str]]] = {
     "dev": (
         "1) CTO or VP R&D (also VP Engineering / Chief Technology Officer). "
         "2) Director of Engineering / Head of Engineering / R&D Manager, preferably in the "
         "job's domain ({domain}). "
-        "3) Only if none of the above exist: CEO or Founder.",
+        "3) If nobody from 1-2 appears in the results: the CEO or a Founder.",
         [
-            '(CTO OR "VP R&D" OR "VP Engineering" OR "Chief Technology Officer")',
-            '("Director of Engineering" OR "Head of Engineering" OR "R&D Manager" OR "Engineering Manager")',
-            '(CEO OR Founder OR "Co-Founder")',
+            "CTO",
+            '"VP R&D" OR "VP Engineering" OR "Head of Engineering"',
+            "CEO OR Founder",
         ],
     ),
     "ai": (
         "1) CTO. 2) COO. 3) CEO or Founder.",
         [
-            '(CTO OR "Chief Technology Officer")',
-            '(COO OR "Chief Operating Officer")',
-            '(CEO OR Founder OR "Co-Founder")',
+            "CTO",
+            "COO",
+            "CEO OR Founder",
         ],
     ),
     "systems": (
         "The person responsible for business systems (Salesforce / monday.com): "
         "1) VP Operations or RevOps / Revenue Operations lead. 2) COO. 3) CIO.",
         [
-            '("VP Operations" OR "RevOps" OR "Revenue Operations")',
-            '(COO OR "Chief Operating Officer" OR CIO OR "Chief Information Officer")',
+            '"VP Operations" OR RevOps OR "Revenue Operations"',
+            "COO",
+            'CIO OR "Head of Business Systems"',
         ],
     ),
 }
@@ -96,7 +100,8 @@ Rules:
 - Priority order (primary = best available, alternate = next best, a different person):
   {priority}
 - "title" is the person's current role as shown (e.g. "VP R&D").
-- If nobody qualifies, return null for that slot.
+- Always take the best person available: someone lower in the priority list is
+  better than null. Return null only when nobody at this company fits any of the roles.
 Do not include markdown or extra keys."""
 
 
@@ -108,7 +113,28 @@ def clean_title(title: str) -> str:
     return _AT_COMPANY_RE.sub("", title or "").strip(" -–|,")
 
 
-def _valid(raw: object, allowed_links: set[str]) -> Contact | None:
+_FALLBACK_ROLE_RE = re.compile(r"\b(?:ceo|chief executive|founder)\b", re.IGNORECASE)
+_SENIOR_TECH_RE = re.compile(
+    r"\b(?:cto|chief technology|vp|vice president|r&d|engineering|coo|chief operating|cio|operations|revops)\b",
+    re.IGNORECASE,
+)
+
+
+def is_fallback_role(title: str) -> bool:
+    """CEO / Founder without a technical or operations role (keep searching)."""
+    return bool(_FALLBACK_ROLE_RE.search(title or "")) and not _SENIOR_TECH_RE.search(title or "")
+
+
+def mentions_company(text: str, company_name: str) -> bool:
+    """True when the result text names the company (guards against people at
+    other companies, e.g. "VP R&D at Ryft" offered for Cyera)."""
+    short = short_company_name(company_name).lower()
+    if not short or not short.isascii():
+        return True  # Hebrew / unusual names: rely on the LLM
+    return re.search(rf"(?<![a-z0-9]){re.escape(short)}(?![a-z0-9])", (text or "").lower()) is not None
+
+
+def _valid(raw: object, allowed_links: dict[str, str], company_name: str = "") -> Contact | None:
     if not isinstance(raw, dict):
         return None
     name = " ".join(str(raw.get("name") or "").split())
@@ -119,18 +145,13 @@ def _valid(raw: object, allowed_links: set[str]) -> Contact | None:
     if url not in allowed_links:
         logger.warning("contact_enrichment: dropping URL not in results: %s", url)
         return None
+    if company_name and not mentions_company(allowed_links[url], company_name):
+        logger.info("contact_enrichment: %s does not show %r as employer; skipped", url, company_name)
+        return None
     if _EXCLUDED_ROLE_RE.search(title):
         return None
     return Contact(name=name, title=title, linkedin_url=url)
 
-
-# Simpler second-pass queries (no quotes / boolean operators), used only when
-# the first pass found nobody suitable.
-LOOSE_ROLES: dict[str, list[str]] = {
-    "dev": ["CTO", "VP R&D", "Head of Engineering", "Founder"],
-    "ai": ["CTO", "COO", "CEO"],
-    "systems": ["VP Operations", "COO", "CIO"],
-}
 
 _NAME_TAIL_RE = re.compile(r"\s*(?:[|(–—]|\s-\s).*$")
 _NAME_SUFFIX_RE = re.compile(r"[,.]?\s+(?:ltd|inc|llc|corp|corporation|group|technologies|בע\"?מ)\.?$", re.IGNORECASE)
@@ -152,8 +173,9 @@ async def find_contacts(
 ) -> tuple[Contact | None, Contact | None]:
     """Return (primary, alternate).
 
-    Pass 1: precise queries. Pass 2 (only if pass 1 found nobody suitable):
-    simpler queries with the short company name.
+    Up to three searches, one per role group of the profile, in priority order.
+    Stops when a suitable person is found; a CEO / Founder found early is kept
+    only if the remaining searches find nobody in a higher-priority role.
 
     Raises ``BudgetExceeded`` only when the run's search budget ran out before
     anything was searched for this company. Other errors are swallowed.
@@ -187,24 +209,15 @@ async def find_contacts(
                 results.append(SearchResult(title=r.title, link=link, snippet=r.snippet))
         return True
 
-    # Each paid search costs budget, so a company gets at most three:
-    # 1) one query with every role of the profile;
-    # 2) only if nobody suitable: the top-priority roles on their own (more
-    #    results for them than the combined query leaves room for);
-    # 3) only if still nobody: a loose query with the short company name.
-    combined = " OR ".join(c.strip("()") for c in clauses)
-    if await collect(f'"{company_name}" ({combined}) Israel'):
-        primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
-        if primary is not None:
-            return primary, alternate
-        if await collect(f'"{company_name}" {clauses[0]} Israel'):
-            primary, alternate = await _pick(company_name, priority, domain, company_hint, results)
-            if primary is not None:
-                return primary, alternate
-            short = short_company_name(company_name)
-            roles = LOOSE_ROLES.get(profile, LOOSE_ROLES["dev"])
-            await collect(f"{short} {' '.join(roles[:3])} linkedin")
-    return await _pick(company_name, priority, domain, company_hint, results)
+    short = short_company_name(company_name)
+    best: tuple[Contact | None, Contact | None] = (None, None)
+    for roles in clauses:
+        if not await collect(f"{short} {roles}"):
+            break
+        best = await _pick(company_name, priority, domain, company_hint, results)
+        if best[0] is not None and not is_fallback_role(best[0].title):
+            return best
+    return best
 
 
 async def _pick(
@@ -228,9 +241,9 @@ async def _pick(
         logger.warning("contact_enrichment: LLM failed for %r", company_name, exc_info=True)
         return None, None
 
-    allowed = {r.link for r in results}
-    primary = _valid(data.get("primary"), allowed)
-    alternate = _valid(data.get("alternate"), allowed)
+    allowed = {r.link: f"{r.title} {r.snippet}" for r in results}
+    primary = _valid(data.get("primary"), allowed, company_name)
+    alternate = _valid(data.get("alternate"), allowed, company_name)
     if primary is None and alternate is not None:
         primary, alternate = alternate, None
     if alternate is not None and primary is not None and alternate.linkedin_url == primary.linkedin_url:

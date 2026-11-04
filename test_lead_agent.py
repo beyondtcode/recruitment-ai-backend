@@ -288,6 +288,12 @@ class ContactTests(unittest.TestCase):
         self.assertEqual((primary.name, alt.name), ("Noa", "Udi"))
         self.assertEqual(search.used, 2)
 
+    def test_clean_title(self) -> None:
+        self.assertEqual(cc.clean_title("CEO @AITAN"), "CEO")
+        self.assertEqual(cc.clean_title("VP R&D, Co-Founder @ Glow"), "VP R&D, Co-Founder")
+        self.assertEqual(cc.clean_title("Chief Technology Officer at Lumana"), "Chief Technology Officer")
+        self.assertEqual(cc.clean_title("CTO"), "CTO")
+
     def test_team_lead_never_picked(self) -> None:
         for title in ("Engineering Team Leader", "Software Engineer", "Platform Architect", "Tech Lead"):
             self.assertTrue(cc.too_junior(title), title)

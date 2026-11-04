@@ -107,7 +107,7 @@ Rules:
 Do not include markdown or extra keys."""
 
 
-_AT_COMPANY_RE = re.compile(r"\s+(?:at|@|ב-?)\s+.+$", re.IGNORECASE)
+_AT_COMPANY_RE = re.compile(r"\s+(?:(?:at|ב-?)\s+|@\s*)\S.*$", re.IGNORECASE)
 
 
 def clean_title(title: str) -> str:

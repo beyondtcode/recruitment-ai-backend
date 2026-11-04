@@ -100,12 +100,14 @@ Rules:
 - Priority order (primary = best available, alternate = next best, a different person):
   {priority}
 - "title" is the person's current role as shown (e.g. "VP R&D").
-- Always take the best person available: someone lower in the priority list is
-  better than null. Return null only when nobody at this company fits any of the roles.
+- Only the roles in the priority list qualify. Team leads, engineers, developers,
+  architects, product managers and other non-executive roles never qualify.
+- Among qualifying people, take the best available: a lower priority role is better
+  than null. Return null only when nobody at this company holds any listed role.
 Do not include markdown or extra keys."""
 
 
-_AT_COMPANY_RE = re.compile(r"\s+(?:at|@|ב-?)\s+.+$", re.IGNORECASE)
+_AT_COMPANY_RE = re.compile(r"\s+(?:(?:at|ב-?)\s+|@\s*)\S.*$", re.IGNORECASE)
 
 
 def clean_title(title: str) -> str:
@@ -125,13 +127,48 @@ def is_fallback_role(title: str) -> bool:
     return bool(_FALLBACK_ROLE_RE.search(title or "")) and not _SENIOR_TECH_RE.search(title or "")
 
 
+_JUNIOR_RE = re.compile(
+    r"\b(?:team ?lead(?:er)?|tech(?:nical)? lead|engineer|developer|architect|specialist|analyst|"
+    r"intern|student|product manager)\b",
+    re.IGNORECASE,
+)
+_SENIOR_RE = re.compile(
+    r"\b(?:cto|ceo|coo|cio|chief|vp|vice president|director|head|founder|co-founder|"
+    r"r&d manager|engineering manager|revops|revenue operations)\b",
+    re.IGNORECASE,
+)
+
+
+def too_junior(title: str) -> bool:
+    """'Engineering Team Leader' / 'Software Engineer' are not decision makers."""
+    return bool(_JUNIOR_RE.search(title or "")) and not _SENIOR_RE.search(title or "")
+
+
+_GENERIC_NAME_WORDS = {
+    "ai", "the", "inc", "ltd", "llc", "corp", "co", "com", "io", "group", "company", "labs", "lab",
+    "technologies", "technology", "tech", "security", "systems", "software", "solutions", "data",
+    "cloud", "israel", "health", "robotics", "formerly", "global",
+}
+
+
+def _name_keys(company_name: str) -> set[str]:
+    """Ways a company is written in a LinkedIn headline: 'Upwind Security' → upwind
+    security / upwindsecurity / upwind; 'Alice (Formerly ActiveFence)' → alice / activefence."""
+    short = short_company_name(company_name).lower()
+    keys = {short, short.replace(" ", "")}
+    for text in (short, (company_name or "").lower()):
+        keys.update(t for t in re.findall(r"[a-z0-9&]+", text) if len(t) >= 3 and t not in _GENERIC_NAME_WORDS)
+    return {k for k in keys if k}
+
+
 def mentions_company(text: str, company_name: str) -> bool:
     """True when the result text names the company (guards against people at
     other companies, e.g. "VP R&D at Ryft" offered for Cyera)."""
-    short = short_company_name(company_name).lower()
-    if not short or not short.isascii():
+    keys = _name_keys(company_name)
+    if not keys or not all(k.isascii() for k in keys):
         return True  # Hebrew / unusual names: rely on the LLM
-    return re.search(rf"(?<![a-z0-9]){re.escape(short)}(?![a-z0-9])", (text or "").lower()) is not None
+    low = (text or "").lower()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", low) for k in keys)
 
 
 def _valid(raw: object, allowed_links: dict[str, str], company_name: str = "") -> Contact | None:
@@ -149,6 +186,9 @@ def _valid(raw: object, allowed_links: dict[str, str], company_name: str = "") -
         logger.info("contact_enrichment: %s does not show %r as employer; skipped", url, company_name)
         return None
     if _EXCLUDED_ROLE_RE.search(title):
+        return None
+    if too_junior(title):
+        logger.info("contact_enrichment: %r (%s) is not a decision maker; skipped", name, title)
         return None
     return Contact(name=name, title=title, linkedin_url=url)
 
@@ -214,8 +254,11 @@ async def find_contacts(
     for roles in clauses:
         if not await collect(f"{short} {roles}"):
             break
-        best = await _pick(company_name, priority, domain, company_hint, results)
-        if best[0] is not None and not is_fallback_role(best[0].title):
+        pick = await _pick(company_name, priority, domain, company_hint, results)
+        if pick[0] is None:
+            continue  # keep an earlier CEO / Founder pick, if any
+        best = pick
+        if not is_fallback_role(pick[0].title):
             return best
     return best
 

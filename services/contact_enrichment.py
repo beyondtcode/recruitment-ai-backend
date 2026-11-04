@@ -85,8 +85,9 @@ def choose_profile(target_reason: str, latest_category: str) -> str:
 
 
 _SYSTEM_PROMPT = """You pick outreach contacts at a company from LinkedIn search results.
-Return ONLY a JSON object: {"primary": CONTACT|null, "alternate": CONTACT|null}
-where CONTACT = {"name": str, "title": str, "linkedin_url": str}.
+Return ONLY a JSON object: {"candidates": [CONTACT, ...]}
+where CONTACT = {"name": str, "title": str, "linkedin_url": str}: up to 4 different
+qualifying people, best first (by the priority order below). An empty list if nobody qualifies.
 
 Rules:
 - Use only people that appear in the results. Copy linkedin_url exactly from a result link
@@ -97,13 +98,13 @@ Rules:
   countries: when the result does not clearly match this company (name, industry, Israel),
   skip it. When in doubt, return null rather than a wrong person.
 - Never pick recruiters, talent acquisition, HR, HRBP or people/HR roles.
-- Priority order (primary = best available, alternate = next best, a different person):
+- Priority order:
   {priority}
 - "title" is the person's current role as shown (e.g. "VP R&D").
 - Only the roles in the priority list qualify. Team leads, engineers, developers,
   architects, product managers and other non-executive roles never qualify.
-- Among qualifying people, take the best available: a lower priority role is better
-  than null. Return null only when nobody at this company holds any listed role.
+- List every qualifying person you find, even lower in the priority order; return an
+  empty list only when nobody at this company holds any listed role.
 Do not include markdown or extra keys."""
 
 
@@ -113,6 +114,23 @@ _AT_COMPANY_RE = re.compile(r"\s+(?:(?:at|ב-?)\s+|@\s*)\S.*$", re.IGNORECASE)
 def clean_title(title: str) -> str:
     """'Chief Technology Officer at Lumana' → 'Chief Technology Officer'."""
     return _AT_COMPANY_RE.sub("", title or "").strip(" -–|,")
+
+
+# Titles that are the profile's first choice: once one is found, stop searching.
+TOP_ROLE_RE: dict[str, re.Pattern] = {
+    "dev": re.compile(
+        r"\b(?:cto|chief technology|(?:vp|vice president)\b.*?(?:r&d|\bengineering|\btechnology|\bdevelopment))",
+        re.IGNORECASE,
+    ),
+    "ai": re.compile(r"\b(?:cto|chief technology)\b", re.IGNORECASE),
+    "systems": re.compile(
+        r"\b(?:(?:vp|vice president)\b.*?\boperations|revops|revenue operations)\b", re.IGNORECASE,
+    ),
+}
+
+
+def is_top_role(title: str, profile: str) -> bool:
+    return bool(TOP_ROLE_RE.get(profile, TOP_ROLE_RE["dev"]).search(title or ""))
 
 
 _FALLBACK_ROLE_RE = re.compile(r"\b(?:ceo|chief executive|founder)\b", re.IGNORECASE)
@@ -139,8 +157,14 @@ _SENIOR_RE = re.compile(
 )
 
 
+_NOT_THE_CTO_RE = re.compile(r"office of the cto|cto office|field cto", re.IGNORECASE)
+
+
 def too_junior(title: str) -> bool:
-    """'Engineering Team Leader' / 'Software Engineer' are not decision makers."""
+    """'Engineering Team Leader' / 'Software Engineer' / 'Architect, CTO Office' are
+    not decision makers."""
+    if _NOT_THE_CTO_RE.search(title or ""):
+        return True
     return bool(_JUNIOR_RE.search(title or "")) and not _SENIOR_RE.search(title or "")
 
 
@@ -214,8 +238,8 @@ async def find_contacts(
     """Return (primary, alternate).
 
     Up to three searches, one per role group of the profile, in priority order.
-    Stops when a suitable person is found; a CEO / Founder found early is kept
-    only if the remaining searches find nobody in a higher-priority role.
+    Stops as soon as a first-choice role is found (e.g. CTO / VP R&D); a lower
+    role found early is kept only if the remaining searches find nobody better.
 
     Raises ``BudgetExceeded`` only when the run's search budget ran out before
     anything was searched for this company. Other errors are swallowed.
@@ -256,10 +280,10 @@ async def find_contacts(
             break
         pick = await _pick(company_name, priority, domain, company_hint, results)
         if pick[0] is None:
-            continue  # keep an earlier CEO / Founder pick, if any
-        best = pick
-        if not is_fallback_role(pick[0].title):
-            return best
+            continue  # keep an earlier pick, if any
+        best = pick  # later picks see all results so far, so they are better informed
+        if is_top_role(pick[0].title, profile if profile in PROFILES else "dev"):
+            return best  # first-choice role found: no more searches needed
     return best
 
 
@@ -278,17 +302,26 @@ async def _pick(
         f"Company: {company_name}\n{hint}\nSearch results:\n"
         f"{format_results(results, limit=25)}\n\nRespond with JSON only."
     )
-    try:
-        data = await complete_json(system, user, max_tokens=400)
-    except Exception:
-        logger.warning("contact_enrichment: LLM failed for %r", company_name, exc_info=True)
-        return None, None
+    data: dict = {}
+    for attempt in range(2):  # one retry: the model occasionally returns broken JSON
+        try:
+            data = await complete_json(system, user, max_tokens=700)
+            break
+        except Exception:
+            logger.warning("contact_enrichment: LLM failed for %r (attempt %d)", company_name, attempt + 1,
+                           exc_info=attempt == 1)
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):  # older answer shape
+        candidates = [data.get("primary"), data.get("alternate")]
 
+    # The code checks (other company, junior title, invented URL) may drop someone;
+    # the next valid candidate then moves up.
     allowed = {r.link: f"{r.title} {r.snippet}" for r in results}
-    primary = _valid(data.get("primary"), allowed, company_name)
-    alternate = _valid(data.get("alternate"), allowed, company_name)
-    if primary is None and alternate is not None:
-        primary, alternate = alternate, None
-    if alternate is not None and primary is not None and alternate.linkedin_url == primary.linkedin_url:
-        alternate = None
-    return primary, alternate
+    picked: list[Contact] = []
+    for raw in candidates:
+        contact = _valid(raw, allowed, company_name)
+        if contact is not None and all(c.linkedin_url != contact.linkedin_url for c in picked):
+            picked.append(contact)
+        if len(picked) == 2:
+            break
+    return (picked[0] if picked else None), (picked[1] if len(picked) > 1 else None)

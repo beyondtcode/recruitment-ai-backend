@@ -308,6 +308,20 @@ class ContactTests(unittest.TestCase):
         self.assertEqual(primary.name, "Udi Oster")  # the team lead is dropped, the CEO moves up
         self.assertIsNone(alt)
 
+    def test_early_ceo_not_lost_when_later_pick_is_empty(self) -> None:
+        provider = FakeProvider({"Acme CTO": [SearchResult("Udi - CEO @Acme", "https://il.linkedin.com/in/udi", "")]})
+        calls = []
+
+        async def fake_llm(system, user, max_tokens=0):
+            calls.append(1)
+            if len(calls) == 1:
+                return {"primary": {"name": "Udi", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"}}
+            return {"primary": None, "alternate": None}  # the model changes its mind later
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, _ = asyncio.run(cc.find_contacts("Acme", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Udi")
+
     def test_ceo_kept_when_nobody_else(self) -> None:
         provider = FakeProvider({"AITAN": [SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", "")]})
 

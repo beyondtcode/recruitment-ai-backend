@@ -236,8 +236,11 @@ async def find_contacts(
     for roles in clauses:
         if not await collect(f"{short} {roles}"):
             break
-        best = await _pick(company_name, priority, domain, company_hint, results)
-        if best[0] is not None and not is_fallback_role(best[0].title):
+        pick = await _pick(company_name, priority, domain, company_hint, results)
+        if pick[0] is None:
+            continue  # keep an earlier CEO / Founder pick, if any
+        best = pick
+        if not is_fallback_role(pick[0].title):
             return best
     return best
 

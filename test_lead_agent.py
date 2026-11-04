@@ -251,8 +251,54 @@ class ContactTests(unittest.TestCase):
         with mock.patch.object(cc, "complete_json", fake_llm):
             self.assertEqual(asyncio.run(cc.find_contacts("Acme - Payments", "dev", "", search)), (None, None))
         self.assertEqual(search.used, 3)
-        self.assertIn("CTO OR", provider.queries[0])
-        self.assertTrue(provider.queries[2].startswith("Acme "))
+        self.assertEqual(provider.queries[0], "Acme CTO")  # short name, one role group per search
+        self.assertTrue(all(q.startswith("Acme ") for q in provider.queries))
+        self.assertIn("CEO OR Founder", provider.queries[2])
+
+    def test_person_at_other_company_rejected(self) -> None:
+        search = BudgetedSearch([FakeProvider({"Cyera": [
+            SearchResult("Tamar B. - Co-Founder & CTO at Cyera", "https://il.linkedin.com/in/tamar", ""),
+            SearchResult("Guy G. - Co-Founder & VP R&D at Ryft", "https://il.linkedin.com/in/guy", ""),
+        ]})], 10)
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"primary": {"name": "Tamar B.", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/tamar"},
+                    "alternate": {"name": "Guy G.", "title": "VP R&D", "linkedin_url": "https://il.linkedin.com/in/guy"}}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("Cyera", "dev", "", search))
+        self.assertEqual(primary.name, "Tamar B.")
+        self.assertIsNone(alt)  # works at Ryft, not Cyera
+
+    def test_ceo_found_first_keeps_searching_for_cto(self) -> None:
+        provider = FakeProvider({
+            "Acme CTO": [SearchResult("Udi - CEO @Acme", "https://il.linkedin.com/in/udi", "")],
+            "Acme \"VP R&D\"": [SearchResult("Noa - VP R&D at Acme", "https://il.linkedin.com/in/noa", "")],
+        })
+
+        async def fake_llm(system, user, max_tokens=0):
+            if "in/noa" in user:
+                return {"primary": {"name": "Noa", "title": "VP R&D", "linkedin_url": "https://il.linkedin.com/in/noa"},
+                        "alternate": {"name": "Udi", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"}}
+            return {"primary": {"name": "Udi", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"}}
+
+        search = BudgetedSearch([provider], 10)
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("Acme", "dev", "", search))
+        self.assertEqual((primary.name, alt.name), ("Noa", "Udi"))
+        self.assertEqual(search.used, 2)
+
+    def test_ceo_kept_when_nobody_else(self) -> None:
+        provider = FakeProvider({"AITAN": [SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", "")]})
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"primary": {"name": "Udi Oster", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"}}
+
+        search = BudgetedSearch([provider], 10)
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, _ = asyncio.run(cc.find_contacts("AITAN", "dev", "", search))
+        self.assertEqual(primary.name, "Udi Oster")
+        self.assertEqual(search.used, 3)
 
     def test_invented_url_rejected(self) -> None:
         search = BudgetedSearch([FakeProvider({"": [SearchResult("A - CTO", "https://il.linkedin.com/in/a", "")]})], 10)
@@ -348,7 +394,7 @@ class AgentRunTests(unittest.TestCase):
         provider = FakeProvider({
             "Acme": [SearchResult("Dana - CTO - Acme", "https://il.linkedin.com/in/dana", ""),
                      SearchResult("Avi - VP R&D - Acme", "https://il.linkedin.com/in/avi", "")],
-            "BigBank": [SearchResult("Ops Lead - VP Operations", "https://il.linkedin.com/in/ops", "")],
+            "BigBank": [SearchResult("Ops Lead - VP Operations - BigBank", "https://il.linkedin.com/in/ops", "")],
         })
         search = BudgetedSearch([provider], budget=60)
 
@@ -836,7 +882,7 @@ class ContactRefreshTests(unittest.TestCase):
         async def fake_llm(system, user, max_tokens=0):
             return {"primary": {"name": "New Cto", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/new"}}
 
-        provider = FakeProvider({"": [SearchResult("New Cto - CTO", "https://il.linkedin.com/in/new", "")]})
+        provider = FakeProvider({"": [SearchResult("New Cto - CTO - OldCo", "https://il.linkedin.com/in/new", "")]})
         with mock.patch.dict(os.environ, {"LEADS_DEDUP_DB": os.path.join(tmp.name, "s.db")}), \
                 mock.patch("services.enrichment._classify_job", classify), \
                 mock.patch.object(cc, "complete_json", fake_llm):

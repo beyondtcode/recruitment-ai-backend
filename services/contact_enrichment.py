@@ -100,8 +100,10 @@ Rules:
 - Priority order (primary = best available, alternate = next best, a different person):
   {priority}
 - "title" is the person's current role as shown (e.g. "VP R&D").
-- Always take the best person available: someone lower in the priority list is
-  better than null. Return null only when nobody at this company fits any of the roles.
+- Only the roles in the priority list qualify. Team leads, engineers, developers,
+  architects, product managers and other non-executive roles never qualify.
+- Among qualifying people, take the best available: a lower priority role is better
+  than null. Return null only when nobody at this company holds any listed role.
 Do not include markdown or extra keys."""
 
 
@@ -123,6 +125,23 @@ _SENIOR_TECH_RE = re.compile(
 def is_fallback_role(title: str) -> bool:
     """CEO / Founder without a technical or operations role (keep searching)."""
     return bool(_FALLBACK_ROLE_RE.search(title or "")) and not _SENIOR_TECH_RE.search(title or "")
+
+
+_JUNIOR_RE = re.compile(
+    r"\b(?:team ?lead(?:er)?|tech(?:nical)? lead|engineer|developer|architect|specialist|analyst|"
+    r"intern|student|product manager)\b",
+    re.IGNORECASE,
+)
+_SENIOR_RE = re.compile(
+    r"\b(?:cto|ceo|coo|cio|chief|vp|vice president|director|head|founder|co-founder|"
+    r"r&d manager|engineering manager|revops|revenue operations)\b",
+    re.IGNORECASE,
+)
+
+
+def too_junior(title: str) -> bool:
+    """'Engineering Team Leader' / 'Software Engineer' are not decision makers."""
+    return bool(_JUNIOR_RE.search(title or "")) and not _SENIOR_RE.search(title or "")
 
 
 def mentions_company(text: str, company_name: str) -> bool:
@@ -149,6 +168,9 @@ def _valid(raw: object, allowed_links: dict[str, str], company_name: str = "") -
         logger.info("contact_enrichment: %s does not show %r as employer; skipped", url, company_name)
         return None
     if _EXCLUDED_ROLE_RE.search(title):
+        return None
+    if too_junior(title):
+        logger.info("contact_enrichment: %r (%s) is not a decision maker; skipped", name, title)
         return None
     return Contact(name=name, title=title, linkedin_url=url)
 

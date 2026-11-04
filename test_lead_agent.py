@@ -288,6 +288,26 @@ class ContactTests(unittest.TestCase):
         self.assertEqual((primary.name, alt.name), ("Noa", "Udi"))
         self.assertEqual(search.used, 2)
 
+    def test_team_lead_never_picked(self) -> None:
+        for title in ("Engineering Team Leader", "Software Engineer", "Platform Architect", "Tech Lead"):
+            self.assertTrue(cc.too_junior(title), title)
+        for title in ("CTO", "VP R&D", "Director of Engineering", "Engineering Manager", "Co-Founder & CTO", "CEO"):
+            self.assertFalse(cc.too_junior(title), title)
+        provider = FakeProvider({"AITAN": [
+            SearchResult("Idan M. - Engineering Team Leader - AITAN", "https://il.linkedin.com/in/idan", ""),
+            SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", ""),
+        ]})
+
+        async def fake_llm(system, user, max_tokens=0):
+            self.assertIn("Team leads", system)
+            return {"primary": {"name": "Idan M.", "title": "Engineering Team Leader", "linkedin_url": "https://il.linkedin.com/in/idan"},
+                    "alternate": {"name": "Udi Oster", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"}}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("AITAN", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Udi Oster")  # the team lead is dropped, the CEO moves up
+        self.assertIsNone(alt)
+
     def test_ceo_kept_when_nobody_else(self) -> None:
         provider = FakeProvider({"AITAN": [SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", "")]})
 

@@ -144,13 +144,31 @@ def too_junior(title: str) -> bool:
     return bool(_JUNIOR_RE.search(title or "")) and not _SENIOR_RE.search(title or "")
 
 
+_GENERIC_NAME_WORDS = {
+    "ai", "the", "inc", "ltd", "llc", "corp", "co", "com", "io", "group", "company", "labs", "lab",
+    "technologies", "technology", "tech", "security", "systems", "software", "solutions", "data",
+    "cloud", "israel", "health", "robotics", "formerly", "global",
+}
+
+
+def _name_keys(company_name: str) -> set[str]:
+    """Ways a company is written in a LinkedIn headline: 'Upwind Security' → upwind
+    security / upwindsecurity / upwind; 'Alice (Formerly ActiveFence)' → alice / activefence."""
+    short = short_company_name(company_name).lower()
+    keys = {short, short.replace(" ", "")}
+    for text in (short, (company_name or "").lower()):
+        keys.update(t for t in re.findall(r"[a-z0-9&]+", text) if len(t) >= 3 and t not in _GENERIC_NAME_WORDS)
+    return {k for k in keys if k}
+
+
 def mentions_company(text: str, company_name: str) -> bool:
     """True when the result text names the company (guards against people at
     other companies, e.g. "VP R&D at Ryft" offered for Cyera)."""
-    short = short_company_name(company_name).lower()
-    if not short or not short.isascii():
+    keys = _name_keys(company_name)
+    if not keys or not all(k.isascii() for k in keys):
         return True  # Hebrew / unusual names: rely on the LLM
-    return re.search(rf"(?<![a-z0-9]){re.escape(short)}(?![a-z0-9])", (text or "").lower()) is not None
+    low = (text or "").lower()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", low) for k in keys)
 
 
 def _valid(raw: object, allowed_links: dict[str, str], company_name: str = "") -> Contact | None:

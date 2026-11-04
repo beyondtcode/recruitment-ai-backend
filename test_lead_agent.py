@@ -288,6 +288,60 @@ class ContactTests(unittest.TestCase):
         self.assertEqual((primary.name, alt.name), ("Noa", "Udi"))
         self.assertEqual(search.used, 2)
 
+    def test_second_tier_found_first_keeps_searching_for_vp(self) -> None:
+        # BlueBird case: "<company> CTO" only surfaced a Head of Software Development;
+        # the VP R&D search must still run.
+        provider = FakeProvider({
+            "BlueBird CTO": [SearchResult("Alik - Head of Software Development - BlueBird", "https://il.linkedin.com/in/alik", "")],
+            "BlueBird \"VP R&D\"": [SearchResult("Ariye - VP R&D and Engineering - BlueBird", "https://il.linkedin.com/in/ariye", "")],
+        })
+
+        async def fake_llm(system, user, max_tokens=0):
+            cands = []
+            if "in/ariye" in user:
+                cands.append({"name": "Ariye", "title": "VP R&D and Engineering", "linkedin_url": "https://il.linkedin.com/in/ariye"})
+            cands.append({"name": "Alik", "title": "Head of Software Development", "linkedin_url": "https://il.linkedin.com/in/alik"})
+            return {"candidates": cands}
+
+        search = BudgetedSearch([provider], 10)
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("BlueBird", "dev", "", search))
+        self.assertEqual((primary.name, alt.name), ("Ariye", "Alik"))
+        self.assertEqual(search.used, 2)
+
+    def test_dropped_candidate_lets_next_one_move_up(self) -> None:
+        provider = FakeProvider({"AITAN": [
+            SearchResult("Idan M. - Engineering Team Leader - AITAN", "https://il.linkedin.com/in/idan", ""),
+            SearchResult("Guy - VP R&D at Ryft", "https://il.linkedin.com/in/guy", ""),
+            SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", ""),
+        ]})
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"candidates": [
+                {"name": "Idan M.", "title": "Engineering Team Leader", "linkedin_url": "https://il.linkedin.com/in/idan"},
+                {"name": "Guy", "title": "VP R&D", "linkedin_url": "https://il.linkedin.com/in/guy"},
+                {"name": "Udi Oster", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"},
+            ]}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("AITAN", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Udi Oster")
+        self.assertIsNone(alt)
+
+    def test_broken_json_retried_once(self) -> None:
+        provider = FakeProvider({"Acme": [SearchResult("Dana - CTO - Acme", "https://il.linkedin.com/in/dana", "")]})
+        calls = []
+
+        async def fake_llm(system, user, max_tokens=0):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("Expecting ',' delimiter")
+            return {"candidates": [{"name": "Dana", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/dana"}]}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, _ = asyncio.run(cc.find_contacts("Acme", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Dana")
+
     def test_clean_title(self) -> None:
         self.assertEqual(cc.clean_title("CEO @AITAN"), "CEO")
         self.assertEqual(cc.clean_title("VP R&D, Co-Founder @ Glow"), "VP R&D, Co-Founder")
@@ -295,7 +349,8 @@ class ContactTests(unittest.TestCase):
         self.assertEqual(cc.clean_title("CTO"), "CTO")
 
     def test_team_lead_never_picked(self) -> None:
-        for title in ("Engineering Team Leader", "Software Engineer", "Platform Architect", "Tech Lead"):
+        for title in ("Engineering Team Leader", "Software Engineer", "Platform Architect", "Tech Lead",
+                      "Platform Architect - CTO Office", "Global Field CTO", "Office of the CTO"):
             self.assertTrue(cc.too_junior(title), title)
         for title in ("CTO", "VP R&D", "Director of Engineering", "Engineering Manager", "Co-Founder & CTO", "CEO"):
             self.assertFalse(cc.too_junior(title), title)
@@ -1036,6 +1091,60 @@ class SmallTestRunTests(unittest.TestCase):
 
 
 class TitleCleanupTests(unittest.TestCase):
+    def test_second_tier_found_first_keeps_searching_for_vp(self) -> None:
+        # BlueBird case: "<company> CTO" only surfaced a Head of Software Development;
+        # the VP R&D search must still run.
+        provider = FakeProvider({
+            "BlueBird CTO": [SearchResult("Alik - Head of Software Development - BlueBird", "https://il.linkedin.com/in/alik", "")],
+            "BlueBird \"VP R&D\"": [SearchResult("Ariye - VP R&D and Engineering - BlueBird", "https://il.linkedin.com/in/ariye", "")],
+        })
+
+        async def fake_llm(system, user, max_tokens=0):
+            cands = []
+            if "in/ariye" in user:
+                cands.append({"name": "Ariye", "title": "VP R&D and Engineering", "linkedin_url": "https://il.linkedin.com/in/ariye"})
+            cands.append({"name": "Alik", "title": "Head of Software Development", "linkedin_url": "https://il.linkedin.com/in/alik"})
+            return {"candidates": cands}
+
+        search = BudgetedSearch([provider], 10)
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("BlueBird", "dev", "", search))
+        self.assertEqual((primary.name, alt.name), ("Ariye", "Alik"))
+        self.assertEqual(search.used, 2)
+
+    def test_dropped_candidate_lets_next_one_move_up(self) -> None:
+        provider = FakeProvider({"AITAN": [
+            SearchResult("Idan M. - Engineering Team Leader - AITAN", "https://il.linkedin.com/in/idan", ""),
+            SearchResult("Guy - VP R&D at Ryft", "https://il.linkedin.com/in/guy", ""),
+            SearchResult("Udi Oster - CEO @AITAN", "https://il.linkedin.com/in/udi", ""),
+        ]})
+
+        async def fake_llm(system, user, max_tokens=0):
+            return {"candidates": [
+                {"name": "Idan M.", "title": "Engineering Team Leader", "linkedin_url": "https://il.linkedin.com/in/idan"},
+                {"name": "Guy", "title": "VP R&D", "linkedin_url": "https://il.linkedin.com/in/guy"},
+                {"name": "Udi Oster", "title": "CEO", "linkedin_url": "https://il.linkedin.com/in/udi"},
+            ]}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, alt = asyncio.run(cc.find_contacts("AITAN", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Udi Oster")
+        self.assertIsNone(alt)
+
+    def test_broken_json_retried_once(self) -> None:
+        provider = FakeProvider({"Acme": [SearchResult("Dana - CTO - Acme", "https://il.linkedin.com/in/dana", "")]})
+        calls = []
+
+        async def fake_llm(system, user, max_tokens=0):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("Expecting ',' delimiter")
+            return {"candidates": [{"name": "Dana", "title": "CTO", "linkedin_url": "https://il.linkedin.com/in/dana"}]}
+
+        with mock.patch.object(cc, "complete_json", fake_llm):
+            primary, _ = asyncio.run(cc.find_contacts("Acme", "dev", "", BudgetedSearch([provider], 10)))
+        self.assertEqual(primary.name, "Dana")
+
     def test_clean_title(self) -> None:
         self.assertEqual(cc.clean_title("Chief Technology Officer at Lumana"), "Chief Technology Officer")
         self.assertEqual(cc.clean_title("VP R&D @ Adaptive6"), "VP R&D")

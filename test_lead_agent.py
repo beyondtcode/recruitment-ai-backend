@@ -500,6 +500,9 @@ class AgentRunTests(unittest.TestCase):
             summary = asyncio.run(lead_agent.run(store, search, scrape=scrape, check=check, today=TODAY))
 
         self.assertEqual(summary["new_jobs"], 3)  # Nvidia blocked
+        self.assertEqual(
+            summary["new_target_jobs"] + summary["new_unknown_jobs"] + summary["new_other_jobs"], 3)
+        self.assertGreaterEqual(summary["new_target_jobs"], 1)
         self.assertEqual(summary["archived_jobs"], 1)
         self.assertEqual(summary["removed_blocked_jobs"], 1)
         self.assertEqual(summary["empty_searches"], ["LinkedIn / monday.com"])

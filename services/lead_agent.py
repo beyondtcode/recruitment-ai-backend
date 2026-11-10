@@ -962,6 +962,10 @@ async def _run(store, search, *, scrape, check, scrape_watch, today: date, weekl
     summary.update(
         {
             "new_jobs": len(new_rows),
+            # New jobs by audience (Target is mirrored from the company above).
+            "new_target_jobs": sum(1 for r in new_rows if r.get("Target") == YES),
+            "new_unknown_jobs": sum(1 for r in new_rows if r.get("Target") == UNKNOWN),
+            "new_other_jobs": sum(1 for r in new_rows if r.get("Target") == NO),
             "archived_jobs": len(archived),
             "removed_blocked_jobs": removed_blocked,
             "open_jobs": len(all_jobs),
